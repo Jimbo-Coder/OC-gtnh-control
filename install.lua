@@ -1,7 +1,7 @@
 -- /home/dtpf/install.lua
 -- One-step OpenComputers Internet Card installer & updater for GTNH DTPF Controller.
 -- Fresh install:
---   wget -f https://raw.githubusercontent.com/StankCIty/gtnh-dtpf-control/main/install.lua && install
+--   wget -f https://raw.githubusercontent.com/Jimbo-Coder/gtnh-dtpf-control/main/install.lua && install
 -- Local / floppy install (no Internet Card needed):
 --   install --local <sourceDir> [owner/repo] [branch]
 -- Update existing install (preserves & backs up config.cfg):
@@ -12,7 +12,7 @@ local cliArgs = { ... }
 local component = require("component")
 local filesystem = require("filesystem")
 
-local DEFAULT_REPO = "StankCIty/gtnh-dtpf-control"
+local DEFAULT_REPO = "Jimbo-Coder/gtnh-dtpf-control"
 local DEFAULT_BRANCH = "main"
 local INSTALL_DIR = "/home/dtpf"
 local CONFIG_PATH = "/home/dtpf/config.cfg"

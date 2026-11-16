@@ -14,7 +14,7 @@ Manages passive AE2 stock targets, 24/7 continuous loops, **AE2 On-Demand autocr
 Install on OpenOS from `/home` with an **Internet Card** slotted in your OC computer/server:
 
 ```sh
-wget -f https://raw.githubusercontent.com/StankCIty/gtnh-dtpf-control/main/install.lua && install
+wget -f https://raw.githubusercontent.com/Jimbo-Coder/gtnh-dtpf-control/main/install.lua && install
 ```
 
 *(If installing from a fork or custom branch: `wget -f https://raw.githubusercontent.com/<owner>/<repo>/<branch>/install.lua && install <owner>/<repo> <branch>`.)*
@@ -190,3 +190,4 @@ Both the **compiled recipe manifest** and the **Python extractor that generated 
 | [`tools/extract_dtpf_recipes.py`](tools/extract_dtpf_recipes.py) | Standalone bytecode extractor (`javap` over `DTPFRecipes`, `PlasmaForgeRecipes`, `RecipeLoader2`) that regenerates `lib/recipes_db.lua` for future GTNH updates (`python3 tools/extract_dtpf_recipes.py --mods-dir <path/to/mods>`). |
 | [`tools/test_offline.py`](tools/test_offline.py) | Offline **Lua 5.3 + OpenComputers `JNLua`** regression suite (`19` suites + live heap audit) with `160x50` framebuffer emulation, width-1 Unifont glyph audit, strict `_G` undeclared-global trap, stock-GTNH unpatched mode test, and `install.lua` update/rollback/backup tests. |
 | [`DESIGN.md`](DESIGN.md) | Detailed multi-server scaling, AE2 Storage-Bus topology notes, and internal scheduler design reference. |
+| [`LICENSE`](LICENSE) | MIT License. |
