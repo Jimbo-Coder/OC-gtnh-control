@@ -2558,12 +2558,33 @@ function UI:renderOverviewKpis(ov)
 
     -- Card 4: On-Demand & Bridge (x = 122..159, w = 38) -> click opens Setup tab
     local od = (self.state and self.state.onDemand) or {}
-    local odBorder = od.stalled and COLORS.yellow or (od.hasWork and COLORS.purple or COLORS.border)
+    local flushingNow = (self.state and self.state.odFlushActive == true)
+    local canFlushOd = self.cfg.transposerAddr and self.cfg.transposerAddr ~= "" and self.cfg.transposerAddr ~= "none"
+        and self.cfg.onDemandNetAddr and self.cfg.stockNetAddr
+    local showOdFlushBtn = canFlushOd and (flushingNow or od.hasWork or ((od.totalCatalyst or 0) > 0))
+    local odBorder = (flushingNow or od.stalled) and COLORS.yellow or (od.hasWork and COLORS.purple or COLORS.border)
     self:drawFrame(122, 5, 38, 5, odBorder, COLORS.panelBg, "round")
     self:addHitbox(122, 5, 159, 9, function() self.tab = TAB_SETUP end)
-    self:drawText(124, 6, "ON-DEMAND & BRIDGE", COLORS.muted, COLORS.panelBg)
+    if showOdFlushBtn then
+        self:drawText(124, 6, "OD & BRIDGE", COLORS.muted, COLORS.panelBg)
+        if flushingNow then
+            self:drawButton(141, 6, "[Stop ]", COLORS.red, COLORS.btnBg, function()
+                Scheduler.cancelOdFlush(self.cfg, self.state)
+                self:setStatus("Cancelled OD flush.")
+            end)
+        else
+            self:drawButton(141, 6, "[Flush]", od.stalled and COLORS.yellow or COLORS.purple, COLORS.btnBg, function()
+                Scheduler.requestOdFlush(self.state)
+                self:setStatus("Flushing Color 1 OD inputs -> Passive -> Main AE2...")
+            end)
+        end
+    else
+        self:drawText(124, 6, "ON-DEMAND & BRIDGE", COLORS.muted, COLORS.panelBg)
+    end
     self:drawText(150, 6, "[Setup →]", COLORS.cyan, COLORS.panelBg)
-    if od.stalled then
+    if flushingNow then
+        self:drawText(124, 7, "↻ FLUSHING OD -> MAIN AE2", COLORS.yellow, COLORS.panelBg)
+    elseif od.stalled then
         self:drawText(124, 7, "! OD STALLED (Passives Running)", COLORS.yellow, COLORS.panelBg)
     elseif od.hasWork then
         self:drawText(124, 7, padOrTrunc("⚡ CRAFTING: " .. tostring(od.summary or "Active"), 34), COLORS.purple, COLORS.panelBg)
@@ -3894,18 +3915,51 @@ function UI:renderWiringTopologyCard(ctx)
             self:save("Transposer Passive Side -> " .. (SIDE_NAMES[self.cfg.stockTransposerSide] or "?"))
         end) + 1
         local odSide = self.cfg.odTransposerSide or 0
-        self:drawButton(bxTp, 15, "[OD:" .. (SIDE_NAMES[odSide] or "Down") .. "]", COLORS.purple, COLORS.btnBg, function(step)
+        bxTp = self:drawButton(bxTp, 15, "[OD:" .. (SIDE_NAMES[odSide] or "Down") .. "]", COLORS.purple, COLORS.btnBg, function(step)
             self.cfg.odTransposerSide = ((self.cfg.odTransposerSide or 0) + (step or 1) + 6) % 6
             self.cfg._hasExplicitTpSides = true
             Scheduler.syncSubnetsStruct(self.cfg)
             self:save("Transposer OD Side -> " .. (SIDE_NAMES[self.cfg.odTransposerSide] or "?"))
-        end)
-        self:drawText(82, 15, "Bridge Status :", COLORS.muted, COLORS.panelBg)
+        end) + 1
+
+        local afPolls = math.max(0, math.floor(tonumber(self.cfg.odAutoFlushPolls) or 0))
+        local afSec = math.floor(afPolls * (tonumber(self.cfg.pollInterval) or 2.0) + 0.5)
+        local afLbl = (afPolls > 0) and string.format("[AutoFlush:%ds]", afSec) or "[AutoFlush:OFF]"
+        bxTp = self:drawButton(bxTp, 15, afLbl, (afPolls > 0) and COLORS.yellow or COLORS.muted, COLORS.btnBg, function(step)
+            local presets = { 0, 8, 15, 30 }
+            local curP = 1
+            for pi = 1, #presets do
+                if presets[pi] == afPolls then curP = pi break end
+            end
+            local nxtIdx = ((curP - 1 + (step or 1) + #presets) % #presets) + 1
+            self.cfg.odAutoFlushPolls = presets[nxtIdx]
+            Scheduler.syncSubnetsStruct(self.cfg)
+            local nxtSec = math.floor(self.cfg.odAutoFlushPolls * (tonumber(self.cfg.pollInterval) or 2.0) + 0.5)
+            self:save("Stalled OD Auto-Flush -> " .. ((self.cfg.odAutoFlushPolls > 0) and (tostring(nxtSec) .. "s") or "OFF"))
+        end) + 1
+
+        local flushingNow = (self.state and self.state.odFlushActive == true)
+        local odBusyOrStalled = self.state and self.state.onDemand and (self.state.onDemand.stalled or self.state.onDemand.hasWork)
+        if flushingNow then
+            bxTp = self:drawButton(bxTp, 15, "[STOP FLUSH]", COLORS.red, COLORS.btnBg, function()
+                Scheduler.cancelOdFlush(self.cfg, self.state)
+                self:setStatus("Cancelled OD flush.")
+            end) + 1
+        else
+            bxTp = self:drawButton(bxTp, 15, "[FLUSH OD]", odBusyOrStalled and COLORS.yellow or COLORS.cyan, COLORS.btnBg, function()
+                Scheduler.requestOdFlush(self.state)
+                self:setStatus("Flushing Color 1 OD inputs -> Passive -> Main AE2...")
+            end) + 1
+        end
+
+        local stX = math.max(96, bxTp + 1)
+        self:drawText(stX, 15, "Status:", COLORS.muted, COLORS.panelBg)
+        local valX = stX + 8
         local bSt = (self.state and self.state.odBridgeStatus) or "Idle (0 calls)"
-        local bCol = (bSt:find("^Blocked") and COLORS.red)
-            or ((bSt:find("^Top%-Up") or bSt:find("^Draining") or bSt:find("^Preview")) and COLORS.yellow)
+        local bCol = (bSt:find("^Blocked") or bSt:find("^! ") or bSt:find("^Flush err")) and COLORS.red
+            or ((bSt:find("^Flushing") or bSt:find("^Top%-Up") or bSt:find("^Draining") or bSt:find("^Preview")) and COLORS.yellow)
             or COLORS.green
-        self:drawText(98, 15, padOrTrunc(bSt, self.w - 100), bCol, COLORS.panelBg)
+        self:drawText(valX, 15, padOrTrunc(bSt, math.max(8, self.w - valX - 2)), bCol, COLORS.panelBg)
     else
         self:drawText(4, 15, "Color 1 (White) = On-Demand | Color 2 (Orange) = Passive | Color 0 = NC Aux Subnet", COLORS.muted, COLORS.panelBg)
     end

@@ -930,12 +930,14 @@ function Hardware.pollOnDemandSubnet(odProxy)
         summary = "Idle",
         fluids = {},
         items = {},
+        evacItems = {},
         catalysts = {},
         totalCatalyst = 0,
     }
     if not odProxy then return state end
 
     local parts = {}
+    local evacMap = {}
     local flist = safeCall(odProxy, "getFluidsInNetwork")
     if type(flist) == "table" then
         for i = 1, #flist do
@@ -989,9 +991,35 @@ function Hardware.pollOnDemandSubnet(odProxy)
                         end
                     end
                     state.items[key] = (state.items[key] or 0) + amt
+                    if it.name ~= "ae2fc:fluid_drop" then
+                        local evacKey = key .. (it.tag ~= nil and ("#" .. tostring(it.tag)) or "")
+                        local rec = evacMap[evacKey]
+                        if not rec then
+                            rec = {
+                                key = evacKey,
+                                name = it.name,
+                                damage = dmg,
+                                amount = amt,
+                                maxSize = math.max(1, math.min(64, math.floor(tonumber(it.maxSize) or 64))),
+                                tag = it.tag,
+                                label = it.label or it.name,
+                            }
+                            evacMap[evacKey] = rec
+                            state.evacItems[#state.evacItems + 1] = rec
+                        else
+                            rec.amount = rec.amount + amt
+                        end
+                    end
                 end
             end
         end
+    end
+
+    if #state.evacItems > 1 then
+        table.sort(state.evacItems, function(a, b)
+            if a.amount ~= b.amount then return a.amount > b.amount end
+            return a.key < b.key
+        end)
     end
 
     if state.hasWork then
@@ -1715,6 +1743,63 @@ function Hardware.transferViaTransposer(tpAddr, srcSide, dstSide, maxLiters, com
     if not tp then return false, 0 end
     local ok, moved = safeCall(tp, "transferFluid", srcSide, dstSide, math.max(1, math.floor(tonumber(maxLiters) or 1000)))
     return (ok == true), math.max(0, math.floor(tonumber(moved) or 0))
+end
+
+function Hardware.setDualInterfaceItemSlot(ifAddr, slot, itemSpec, compLib)
+    local cl = compLib or component
+    local p = ifAddr and cl.proxy(ifAddr) or nil
+    if not p then return false end
+    local slotIdx = slot or 1
+    if type(itemSpec) == "table" and type(itemSpec.name) == "string" and itemSpec.name ~= "" then
+        local ok = safeCall(p, "setInterfaceConfiguration", slotIdx, {
+            name = itemSpec.name,
+            damage = math.floor(tonumber(itemSpec.damage) or 0),
+            size = math.max(1, math.min(64, math.floor(tonumber(itemSpec.size) or 64))),
+            tag = itemSpec.tag,
+        })
+        return ok == true
+    end
+    local ok = safeCall(p, "setInterfaceConfiguration", slotIdx)
+    return ok == true
+end
+
+function Hardware.getTransposerSlotCount(tpAddr, side, slot, compLib)
+    local cl = compLib or component
+    local tp = tpAddr and cl.proxy(tpAddr) or nil
+    if not tp then return 0 end
+    local slotIdx = slot or 1
+    local cnt = safeCall(tp, "getSlotStackSize", side, slotIdx)
+    if type(cnt) == "number" then
+        return math.max(0, math.floor(cnt))
+    end
+    local stack = safeCall(tp, "getStackInSlot", side, slotIdx)
+    if type(stack) == "table" then
+        return math.max(0, math.floor(tonumber(stack.size or stack.amount) or 0))
+    end
+    return 0
+end
+
+function Hardware.transferItemViaTransposer(tpAddr, srcSide, dstSide, maxItems, srcSlot, sinkSlot, compLib)
+    local cl = compLib or component
+    local tp = tpAddr and cl.proxy(tpAddr) or nil
+    if not tp then return false, 0 end
+    local cnt = math.max(1, math.floor(tonumber(maxItems) or 64))
+    local r1, r2
+    if srcSlot ~= nil and sinkSlot ~= nil then
+        r1, r2 = safeCall(tp, "transferItem", srcSide, dstSide, cnt, math.max(1, math.floor(tonumber(srcSlot))), math.max(1, math.floor(tonumber(sinkSlot))))
+    elseif srcSlot ~= nil then
+        r1, r2 = safeCall(tp, "transferItem", srcSide, dstSide, cnt, math.max(1, math.floor(tonumber(srcSlot))))
+    else
+        r1, r2 = safeCall(tp, "transferItem", srcSide, dstSide, cnt)
+    end
+    -- OpenComputers Transposer.transferItem returns a single integer moved count,
+    -- while some harnesses may return (true, count).
+    if type(r1) == "number" then
+        return true, math.max(0, math.floor(r1))
+    elseif r1 == true then
+        return true, math.max(0, math.floor(tonumber(r2) or 0))
+    end
+    return false, 0
 end
 
 return Hardware

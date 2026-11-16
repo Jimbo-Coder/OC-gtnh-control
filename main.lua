@@ -197,6 +197,7 @@ local function saveConfig(cfg)
     addKV("      ", "address", cfg.transposerAddr)
     addKV("      ", "enabled", (cfg.transposerEnabled ~= false))
     addKV("      ", "chunkLiters", cfg.transposerChunkLiters or 5120)
+    addKV("      ", "autoFlushPolls", cfg.odAutoFlushPolls or 0)
     add("    },")
     add("  },")
     add("")
@@ -267,6 +268,7 @@ local function saveConfig(cfg)
     addKV("  ", "fallbackConvMode", cfg.fallbackConvMode or "global")
     addKV("  ", "onDemandConvMode", cfg.onDemandConvMode or "auto_safe")
     addKV("  ", "pausePassivesOnOD", (cfg.pausePassivesOnOD ~= false))
+    addKV("  ", "odAutoFlushPolls", cfg.odAutoFlushPolls or 0)
     addKV("  ", "defaultCatalystTier", cfg.defaultCatalystTier or 4)
     addKV("  ", "catalystAutoFallback", (cfg.catalystAutoFallback ~= false))
     addKV("  ", "uniformNcSubnet", (cfg.uniformNcSubnet ~= false))
@@ -463,10 +465,15 @@ local function runCheck()
             i, tostring(d.name), tostring(st.shouldAllowWork == true), tostring(st.wantConv == true),
             tonumber(st.wantCatTier) or 4, tostring(st.jobLabel)))
     end
-    print(string.format("  Catalyst Bridge: tp=%s (P:%s <-> OD:%s) | %s",
+    local autoFlushPolls = math.max(0, math.floor(tonumber(cfg.odAutoFlushPolls) or 0))
+    local autoFlushStr = (autoFlushPolls > 0)
+        and string.format("%ds(%dp)", math.floor(autoFlushPolls * (tonumber(cfg.pollInterval) or 2.0)), autoFlushPolls)
+        or "OFF"
+    print(string.format("  Catalyst Bridge: tp=%s (P:%s <-> OD:%s) | AutoFlush=%s | %s",
         cfg.transposerAddr and cfg.transposerAddr:sub(1, 10) or "None",
         tostring(cfg.stockTransposerSide or 1),
         tostring(cfg.odTransposerSide or 0),
+        autoFlushStr,
         tostring(runtimeState.odBridgeStatus or "Disabled")))
     for i = 1, #((ep and ep.warnings) or {}) do
         print("  ! WARNING: " .. tostring(ep.warnings[i]))
@@ -540,11 +547,12 @@ local function runGUI()
                 and (not ui.promptActive)
                 and (not ui.passiveModalActive)
                 and (not ui.logModalActive)
-            local timeout = math.max(0.05, nextPoll - now)
-            if animActive then
+            local forcePoll = (runtimeState._forcePollNow == true)
+            local timeout = forcePoll and 0.01 or math.max(0.05, nextPoll - now)
+            if (not forcePoll) and animActive then
                 timeout = math.min(timeout, math.max(0.05, nextAnim - now))
             end
-            if savePending then
+            if (not forcePoll) and savePending then
                 timeout = math.min(timeout, math.max(0.02, saveDeadline - now))
             end
             local ev, _, a1, a2, a3 = event.pull(timeout)
@@ -564,7 +572,8 @@ local function runGUI()
                 end
             end
 
-            if ui.running and computer.uptime() >= nextPoll then
+            if ui.running and (runtimeState._forcePollNow == true or computer.uptime() >= nextPoll) then
+                runtimeState._forcePollNow = false
                 local ok, err = pcall(Scheduler.step, cfg, runtimeState, { allowStockCache = true, allowSensorCache = true })
                 if not ok then
                     ui.statusMsg = "Scheduler error: " .. tostring(err)

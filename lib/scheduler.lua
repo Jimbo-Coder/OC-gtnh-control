@@ -480,6 +480,7 @@ function Scheduler.syncSubnetsStruct(cfg)
     cfg.subnets.transposer.address = cfg.transposerAddr
     cfg.subnets.transposer.enabled = (cfg.transposerEnabled ~= false)
     cfg.subnets.transposer.chunkLiters = cfg.transposerChunkLiters or 5120
+    cfg.subnets.transposer.autoFlushPolls = math.max(0, math.floor(tonumber(cfg.odAutoFlushPolls) or 0))
 end
 
 -- Ensure config has valid defaults for Subnets, Global settings, Per-DTPF overrides, Channels, and all 27 Families
@@ -502,6 +503,12 @@ function Scheduler.ensureConfig(cfg)
     if cfg.pausePassivesOnOD == nil then
         cfg.pausePassivesOnOD = true
     end
+    if type(cfg.subnets) == "table" and type(cfg.subnets.transposer) == "table" and cfg.subnets.transposer.autoFlushPolls ~= nil then
+        cfg.odAutoFlushPolls = tonumber(cfg.subnets.transposer.autoFlushPolls)
+    elseif cfg.odAutoFlushPolls == nil and cfg.odAutoFlushStall == true then
+        cfg.odAutoFlushPolls = 15
+    end
+    cfg.odAutoFlushPolls = math.max(0, math.floor(tonumber(cfg.odAutoFlushPolls) or 0))
     cfg.defaultCatalystTier = math.max(1, math.min(5, math.floor(tonumber(cfg.defaultCatalystTier or cfg.onDemandCatalystTier or 4))))
     if cfg.catalystAutoFallback == nil then
         cfg.catalystAutoFallback = true
@@ -1372,16 +1379,67 @@ function Scheduler.matchOnDemandRecipe(cfg, stock, odState)
     return best
 end
 
+-- Request or cancel full 2-way evacuation of Color 1 OD inputs (`items + fluids + catalyst`) -> Passive -> Main AE2
+function Scheduler.requestOdFlush(runtimeState)
+    if not runtimeState then return end
+    runtimeState.odFlushActive = true
+    runtimeState.odFlushManual = true
+    runtimeState._odItemDrainBackpressure = false
+    runtimeState._forcePollNow = true
+end
+
+function Scheduler.cancelOdFlush(cfg, runtimeState)
+    if not runtimeState then return end
+    runtimeState.odFlushActive = false
+    runtimeState.odFlushManual = false
+    runtimeState._forcePollNow = true
+    local odAddr = runtimeState._odIfAddr or (cfg and cfg.onDemandNetAddr)
+    local stockAddr = cfg and cfg.stockNetAddr
+    if runtimeState._odIfItemKey ~= nil and odAddr then
+        Hardware.setDualInterfaceItemSlot(odAddr, 1, nil)
+    end
+    if runtimeState._odIfSlot1 ~= nil and odAddr then
+        Hardware.setDualInterfaceFluidSlot(odAddr, 1, nil)
+    end
+    if runtimeState._stockIfSlot1 ~= nil and stockAddr then
+        Hardware.setDualInterfaceFluidSlot(stockAddr, 1, nil)
+    end
+    runtimeState._odIfItemKey = nil
+    runtimeState._odIfSlot1 = nil
+    runtimeState._stockIfSlot1 = nil
+end
+
 -- 2-Way OC Transposer Catalyst Bridge (`Passive <-> On-Demand`) with zero steady-state overhead at 50% discount
 function Scheduler.stepOdCatalystBridge(cfg, runtimeState, stock, globalOdAddr, globalOdState, rawDtpfSt, odMatch, channelById, pushEvent)
     runtimeState._odBridgeMovedLiters = 0
-    if cfg.transposerEnabled == false
-        or not cfg.transposerAddr or cfg.transposerAddr == "" or cfg.transposerAddr == "none"
-        or not globalOdAddr or not cfg.stockNetAddr then
+    local flushRequested = (runtimeState.odFlushActive == true)
+    local manualFlush = (flushRequested and runtimeState.odFlushManual == true)
+    local hasBridgeHardware = cfg.transposerAddr and cfg.transposerAddr ~= "" and cfg.transposerAddr ~= "none"
+        and globalOdAddr and cfg.stockNetAddr
+
+    if flushRequested then
+        if not hasBridgeHardware then
+            runtimeState.odFlushActive = false
+            runtimeState.odFlushManual = false
+            runtimeState.odBridgeStatus = "Flush err: No Transposer/OD IF"
+            return
+        end
+        if (not manualFlush) and (cfg.armed ~= true or cfg.transposerEnabled == false) then
+            runtimeState.odFlushActive = false
+            runtimeState.odFlushManual = false
+            runtimeState.odBridgeStatus = (cfg.transposerEnabled == false) and "Disabled" or "Paused"
+            return
+        end
+    elseif cfg.transposerEnabled == false or not hasBridgeHardware then
         runtimeState.odBridgeStatus = "Disabled"
         return
     end
 
+    if globalOdAddr then
+        runtimeState._odIfAddr = globalOdAddr
+    end
+
+    local tpAddr = cfg.transposerAddr
     local stockSide = cfg.stockTransposerSide or 1
     local odSide = cfg.odTransposerSide or 0
     local chunkLiters = math.max(100, math.floor(tonumber(cfg.transposerChunkLiters) or 5120))
@@ -1394,18 +1452,199 @@ function Scheduler.stepOdCatalystBridge(cfg, runtimeState, stock, globalOdAddr, 
         end
     end
 
-    local function clearStockIf()
-        if runtimeState._stockIfSlot1 ~= nil and cfg.armed then
+    local function clearStockIf(forceClear)
+        if runtimeState._stockIfSlot1 ~= nil and (cfg.armed or forceClear) then
             Hardware.setDualInterfaceFluidSlot(cfg.stockNetAddr, 1, nil)
             runtimeState._stockIfSlot1 = nil
         end
     end
 
-    local function clearOdIf()
-        if runtimeState._odIfSlot1 ~= nil and cfg.armed then
+    local function clearOdIf(forceClear)
+        if runtimeState._odIfSlot1 ~= nil and (cfg.armed or forceClear) then
             Hardware.setDualInterfaceFluidSlot(globalOdAddr, 1, nil)
             runtimeState._odIfSlot1 = nil
         end
+    end
+
+    local function clearOdItemIf(forceClear)
+        if runtimeState._odIfItemKey ~= nil and (cfg.armed or forceClear) then
+            Hardware.setDualInterfaceItemSlot(globalOdAddr, 1, nil)
+            runtimeState._odIfItemKey = nil
+        end
+    end
+
+    -- Case 0: Active OD Evacuation (`Color 1 Items + Fluids + Catalyst -> Passive Dual IF -> Main AE2`)
+    if flushRequested then
+        clearStockIf(true)
+
+        local function handleBackpressure(stuckCnt)
+            if (stuckCnt or 0) <= 0 then return false end
+            sleepBrief()
+            stuckCnt = Hardware.getTransposerSlotCount(tpAddr, stockSide, 1)
+            if stuckCnt <= 0 then return false end
+            clearOdItemIf(true)
+            Hardware.transferItemViaTransposer(tpAddr, stockSide, odSide, stuckCnt, 1)
+            runtimeState._odItemDrainBackpressure = true
+            runtimeState.odFlushActive = false
+            runtimeState.odFlushManual = false
+            runtimeState.odBridgeStatus = "! Set Passive Item SB -> Bi-Dir"
+            pushEvent("warn", "! OD Flush halted: Passive Item Storage Bus rejected insert (set Extract+Insert)", { stage = "WARN", minLevel = 1 })
+            return true
+        end
+
+        if handleBackpressure(Hardware.getTransposerSlotCount(tpAddr, stockSide, 1)) then
+            return
+        end
+
+        local evacList = (globalOdState and globalOdState.evacItems) or {}
+        local itemTarget = nil
+        if runtimeState._odIfItemKey ~= nil then
+            for idx = 1, #evacList do
+                if evacList[idx].key == runtimeState._odIfItemKey then
+                    itemTarget = evacList[idx]
+                    break
+                end
+            end
+        end
+        if not itemTarget and #evacList > 0 then
+            itemTarget = evacList[1]
+        end
+
+        local totalItemsMoved = 0
+        if itemTarget then
+            if runtimeState._odIfItemKey ~= itemTarget.key then
+                Hardware.setDualInterfaceItemSlot(globalOdAddr, 1, {
+                    name = itemTarget.name,
+                    damage = itemTarget.damage,
+                    size = itemTarget.maxSize,
+                    tag = itemTarget.tag,
+                })
+                runtimeState._odIfItemKey = itemTarget.key
+                sleepBrief()
+            end
+            for _ = 1, 4 do
+                local curOdSlot = Hardware.getTransposerSlotCount(tpAddr, odSide, 1)
+                local toMove = (curOdSlot > 0) and curOdSlot or (itemTarget.maxSize or 64)
+                local okTr, movedI = Hardware.transferItemViaTransposer(tpAddr, odSide, stockSide, toMove, 1, 1)
+                if not okTr or (movedI or 0) <= 0 then
+                    break
+                end
+                totalItemsMoved = totalItemsMoved + movedI
+                sleepBrief()
+                if handleBackpressure(Hardware.getTransposerSlotCount(tpAddr, stockSide, 1)) then
+                    return
+                end
+                if totalItemsMoved >= itemTarget.amount then
+                    break
+                end
+            end
+            if totalItemsMoved >= itemTarget.amount then
+                clearOdItemIf(true)
+                sleepBrief()
+                local remOd = Hardware.getTransposerSlotCount(tpAddr, odSide, 1)
+                if remOd > 0 then
+                    local _, extraMoved = Hardware.transferItemViaTransposer(tpAddr, odSide, stockSide, remOd, 1, 1)
+                    totalItemsMoved = totalItemsMoved + (extraMoved or 0)
+                    if (extraMoved or 0) > 0 then
+                        sleepBrief()
+                        if handleBackpressure(Hardware.getTransposerSlotCount(tpAddr, stockSide, 1)) then
+                            return
+                        end
+                    end
+                end
+            end
+        else
+            clearOdItemIf(true)
+            local resOd = Hardware.getTransposerSlotCount(tpAddr, odSide, 1)
+            if resOd > 0 then
+                local _, resMoved = Hardware.transferItemViaTransposer(tpAddr, odSide, stockSide, resOd, 1, 1)
+                totalItemsMoved = totalItemsMoved + (resMoved or 0)
+                if (resMoved or 0) > 0 then
+                    sleepBrief()
+                    if handleBackpressure(Hardware.getTransposerSlotCount(tpAddr, stockSide, 1)) then
+                        return
+                    end
+                end
+            end
+        end
+
+        local odFluids = (globalOdState and globalOdState.fluids) or {}
+        local drainFluid = runtimeState._odIfSlot1
+        if drainFluid then
+            local remCur = (odFluids[drainFluid] or 0) + (cats[drainFluid] or 0)
+            if remCur <= 0 and Hardware.getTransposerTankLevel(tpAddr, odSide, 1) <= 0 then
+                drainFluid = nil
+            end
+        end
+        if not drainFluid then
+            local bestAmt = -1
+            for k, amt in pairs(odFluids) do
+                if amt > bestAmt or (amt == bestAmt and k < tostring(drainFluid)) then
+                    bestAmt = amt
+                    drainFluid = k
+                end
+            end
+            for k, amt in pairs(cats) do
+                if amt > bestAmt or (amt == bestAmt and k < tostring(drainFluid)) then
+                    bestAmt = amt
+                    drainFluid = k
+                end
+            end
+        end
+
+        local movedFluid = 0
+        if drainFluid then
+            if runtimeState._odIfSlot1 ~= drainFluid then
+                Hardware.setDualInterfaceFluidSlot(globalOdAddr, 1, drainFluid)
+                runtimeState._odIfSlot1 = drainFluid
+                sleepBrief()
+            end
+            local tankLvl = Hardware.getTransposerTankLevel(tpAddr, odSide, 1)
+            local netRem = (odFluids[drainFluid] or 0) + (cats[drainFluid] or 0)
+            local totalRem = netRem + tankLvl
+            if totalRem > 0 then
+                local _, mF = Hardware.transferViaTransposer(tpAddr, odSide, stockSide, math.min(totalRem, chunkLiters))
+                movedFluid = mF or 0
+                runtimeState._odBridgeMovedLiters = movedFluid
+                if runtimeState.stepStats and movedFluid > 0 then
+                    runtimeState.stepStats.bridgeLiters = (runtimeState.stepStats.bridgeLiters or 0) + movedFluid
+                end
+                local afterTank = Hardware.getTransposerTankLevel(tpAddr, odSide, 1)
+                if (netRem == 0 and afterTank == 0) or (movedFluid >= totalRem and afterTank == 0) then
+                    clearOdIf(true)
+                end
+            else
+                clearOdIf(true)
+            end
+        else
+            clearOdIf(true)
+        end
+
+        local odSlotAfter = Hardware.getTransposerSlotCount(tpAddr, odSide, 1)
+        local odTankAfter = Hardware.getTransposerTankLevel(tpAddr, odSide, 1)
+        local hasNetWork = (globalOdState and ((#(globalOdState.evacItems or {}) > 0) or ((globalOdState.fluidCount or 0) > 0))) or false
+        if (not hasNetWork) and totalOdCat == 0 and totalItemsMoved == 0 and movedFluid == 0 and odSlotAfter == 0 and odTankAfter == 0 then
+            clearOdItemIf(true)
+            clearOdIf(true)
+            runtimeState.odFlushActive = false
+            runtimeState.odFlushManual = false
+            runtimeState._odStallPolls = 0
+            runtimeState.odStalled = false
+            runtimeState.odStallReason = nil
+            runtimeState.odBridgeStatus = "Idle (Flushed -> Main)"
+            pushEvent("out", "✓ OD Flush complete -> returned Color 1 inputs to Main", { stage = "OUT", minLevel = 1 })
+        else
+            runtimeState.odFlushActive = true
+            runtimeState.odBridgeStatus = string.format("Flushing OD (-%dI / -%dL)", totalItemsMoved, movedFluid)
+            if totalItemsMoved > 0 or movedFluid > 0 then
+                pushEvent("out", string.format("OD Bridge: flushed -%dI / -%dL -> Main", totalItemsMoved, movedFluid), { stage = "OUT", minLevel = 2 })
+            end
+        end
+        return
+    end
+
+    if runtimeState._odIfItemKey ~= nil and cfg.armed then
+        clearOdItemIf(false)
     end
 
     -- Case 1: OD Idle (0 items & 0 non-catalyst fluids) -> Zero-call fast path or Drain excess catalyst out
@@ -2002,7 +2241,7 @@ local function stepEvaluateOdAndBridge(cfg, runtimeState, ctx, opts, pushEvent)
     local odState
     if #ctx.dedicatedActive > 0 then
         local seenAddrs, tags = {}, {}
-        local totalFluids, totalItems = 0, 0
+        local totalFluids, totalItems, totalCat = 0, 0, 0
         local hasPatCat, patCatName, firstDesc = false, nil, nil
         for k = 1, #ctx.activeOdDtpfs do
             local idx = ctx.activeOdDtpfs[k]
@@ -2013,6 +2252,7 @@ local function stepEvaluateOdAndBridge(cfg, runtimeState, ctx, opts, pushEvent)
                 seenAddrs[a] = true
                 totalFluids = totalFluids + (dst.fluidCount or 0)
                 totalItems = totalItems + (dst.itemCount or 0)
+                totalCat = totalCat + (dst.totalCatalyst or 0)
             end
             if dst.hasPatternedCatalyst then
                 hasPatCat = true
@@ -2027,6 +2267,7 @@ local function stepEvaluateOdAndBridge(cfg, runtimeState, ctx, opts, pushEvent)
             hasWork = true,
             hasPatternedCatalyst = hasPatCat,
             patternedCatalystName = patCatName,
+            totalCatalyst = totalCat,
             fluidCount = totalFluids,
             itemCount = totalItems,
             activeDtpfs = ctx.activeOdDtpfs,
@@ -2037,6 +2278,7 @@ local function stepEvaluateOdAndBridge(cfg, runtimeState, ctx, opts, pushEvent)
             hasWork = ctx.globalOdState.hasWork,
             hasPatternedCatalyst = ctx.globalOdState.hasPatternedCatalyst,
             patternedCatalystName = ctx.globalOdState.patternedCatalystName,
+            totalCatalyst = ctx.globalOdState.totalCatalyst or 0,
             fluidCount = ctx.globalOdState.fluidCount,
             itemCount = ctx.globalOdState.itemCount,
             activeDtpfs = (#ctx.activeOdDtpfs > 0) and ctx.activeOdDtpfs or nil,
@@ -2062,11 +2304,24 @@ local function stepEvaluateOdAndBridge(cfg, runtimeState, ctx, opts, pushEvent)
     end
 
     if not ctx.useCache then
+        if odState.hasWork then
+            runtimeState._odAutoFlushIdlePolls = 0
+        elseif not runtimeState.odFlushActive then
+            runtimeState._odAutoFlushIdlePolls = (runtimeState._odAutoFlushIdlePolls or 0) + 1
+            if runtimeState._odAutoFlushIdlePolls >= 2 then
+                runtimeState._odAutoFlushLastSig = nil
+                runtimeState._odAutoFlushLoopWarned = false
+                runtimeState._odItemDrainBackpressure = false
+            end
+        end
+
         if not cfg.armed or not (odState.hasWork == true) or not cfg.pausePassivesOnOD then
             runtimeState._odStallPolls = 0
             runtimeState._odStallSig = nil
             runtimeState.odStalled = false
             runtimeState.odStallReason = nil
+        elseif runtimeState.odFlushActive == true then
+            runtimeState._odStallPolls = 0
         else
             local curOdSig = buildOdAmountSig(ctx.globalOdState)
             local sigChanged = (runtimeState._odStallSig ~= nil and curOdSig ~= runtimeState._odStallSig)
@@ -2108,6 +2363,28 @@ local function stepEvaluateOdAndBridge(cfg, runtimeState, ctx, opts, pushEvent)
                     local reasonStr = (#ncLabels > 0)
                         and ("0 active DTPFs; check " .. table.concat(ncLabels, " + ") .. " in NC/Pattern")
                         or "0 active DTPFs; check Circuit/NC/Coil"
+                    local canAutoFlush = (cfg.armed == true)
+                        and ((cfg.odAutoFlushPolls or 0) > 0)
+                        and (cfg.transposerEnabled ~= false)
+                        and cfg.transposerAddr and cfg.transposerAddr ~= "" and cfg.transposerAddr ~= "none"
+                        and ctx.globalOdAddr and cfg.stockNetAddr
+                        and (not runtimeState.odFlushActive)
+                        and (not runtimeState._odItemDrainBackpressure)
+                    if canAutoFlush then
+                        if runtimeState._odAutoFlushLastSig ~= nil and curOdSig == runtimeState._odAutoFlushLastSig then
+                            reasonStr = "AE2 CPU re-pushed craft (cancel CPU or click [Flush])"
+                            if not runtimeState._odAutoFlushLoopWarned then
+                                runtimeState._odAutoFlushLoopWarned = true
+                                pushEvent("warn", "! OD Auto-Flush paused: AE2 CPU re-pushed same craft", { stage = "WARN", minLevel = 1 })
+                            end
+                        elseif runtimeState._odStallPolls >= math.max(4, cfg.odAutoFlushPolls) then
+                            runtimeState.odFlushActive = true
+                            runtimeState.odFlushManual = false
+                            runtimeState._odAutoFlushLastSig = curOdSig
+                            runtimeState._odAutoFlushLoopWarned = false
+                            pushEvent("warn", "! OD Auto-Flush triggered -> cycling Color 1 to Main", { stage = "WARN", minLevel = 1 })
+                        end
+                    end
                     if not runtimeState.odStalled then
                         local odName = (globalOdMatch and globalOdMatch.family and globalOdMatch.family.name) or odState.summary
                         pushEvent("warn", "! OD Stalled (" .. tostring(odName) .. ") -> running Passives", { stage = "WARN", minLevel = 1 })
@@ -2138,6 +2415,15 @@ local function stepEvaluateOdAndBridge(cfg, runtimeState, ctx, opts, pushEvent)
             if not (cr and cr.hasAny and cr.allOdOnly) then
                 ctx.channelOdInfo[chId] = nil
             end
+        end
+    end
+
+    if runtimeState.odFlushActive == true then
+        for i = 1, #cfg.dtpfs do
+            ctx.dtpfHasOdWork[i] = false
+        end
+        for chId in pairs(ctx.channelOdInfo) do
+            ctx.channelOdInfo[chId] = nil
         end
     end
 

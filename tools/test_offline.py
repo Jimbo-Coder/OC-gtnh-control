@@ -3660,6 +3660,495 @@ do
     component._reset()
 end
 
+-- ============================================================================
+-- TEST 20: OD Evacuation [FLUSH OD], Backpressure Rollback & Auto-Flush Loop Guard
+-- ============================================================================
+do
+    Hardware.resetClusterState()
+    component._reset()
+
+    local function makeRichAE2Bridge()
+        local fluids = {}
+        local items = {} -- array of { name, damage, amount, maxSize, tag, label }
+        local itemSlotCfg = {}
+        local fluidSlotCfg = {}
+        local itemBuf = nil
+        local fluidTank = { name = nil, amount = 0 }
+        local itemCfgLog = {}
+        local rejectsInsert = false
+
+        local function itemKey(it)
+            return tostring(it.name) .. ":" .. tostring(it.damage or 0) .. (it.tag ~= nil and ("#" .. tostring(it.tag)) or "")
+        end
+
+        local function addItem(spec, qty)
+            if qty <= 0 then return end
+            local k = itemKey(spec)
+            for i = 1, #items do
+                if itemKey(items[i]) == k then
+                    items[i].amount = items[i].amount + qty
+                    return
+                end
+            end
+            items[#items + 1] = {
+                name = spec.name,
+                damage = spec.damage or 0,
+                amount = qty,
+                maxSize = spec.maxSize or 64,
+                tag = spec.tag,
+                label = spec.label or spec.name,
+            }
+        end
+
+        local function getItemTotal(spec)
+            local k = itemKey(spec)
+            for i = 1, #items do
+                if itemKey(items[i]) == k then return items[i].amount end
+            end
+            return 0
+        end
+
+        local function takeItem(spec, qty)
+            local k = itemKey(spec)
+            for i = 1, #items do
+                if itemKey(items[i]) == k then
+                    local take = math.min(qty, items[i].amount)
+                    items[i].amount = items[i].amount - take
+                    if items[i].amount <= 0 then table.remove(items, i) end
+                    return take
+                end
+            end
+            return 0
+        end
+
+        local function syncItemBuf()
+            local c = itemSlotCfg[1]
+            if c and c.name then
+                if itemBuf and itemKey(itemBuf) ~= itemKey(c) and itemBuf.amount > 0 then
+                    addItem(itemBuf, itemBuf.amount)
+                    itemBuf = nil
+                end
+                local want = math.max(1, math.min(64, tonumber(c.size) or 64))
+                local curAmt = itemBuf and itemBuf.amount or 0
+                if curAmt < want then
+                    local pull = takeItem(c, want - curAmt)
+                    if pull > 0 then
+                        itemBuf = {
+                            name = c.name,
+                            damage = c.damage or 0,
+                            amount = curAmt + pull,
+                            maxSize = 64,
+                            tag = c.tag,
+                            label = c.name,
+                        }
+                    end
+                end
+            else
+                if (not rejectsInsert) and itemBuf and itemBuf.amount > 0 then
+                    addItem(itemBuf, itemBuf.amount)
+                    itemBuf = nil
+                end
+            end
+        end
+
+        local function syncFluidTank()
+            local c = fluidSlotCfg[1]
+            if c and c.name then
+                if fluidTank.name and fluidTank.name ~= c.name and fluidTank.amount > 0 then
+                    fluids[fluidTank.name] = (fluids[fluidTank.name] or 0) + fluidTank.amount
+                    fluidTank.amount = 0
+                end
+                fluidTank.name = c.name
+                local want = 64000 - fluidTank.amount
+                local have = fluids[c.name] or 0
+                local pull = math.min(want, have)
+                if pull > 0 then
+                    fluids[c.name] = have - pull
+                    fluidTank.amount = fluidTank.amount + pull
+                end
+            else
+                if fluidTank.name and fluidTank.amount > 0 then
+                    fluids[fluidTank.name] = (fluids[fluidTank.name] or 0) + fluidTank.amount
+                end
+                fluidTank.name = nil
+                fluidTank.amount = 0
+            end
+        end
+
+        local proxy = {
+            getFluidsInNetwork = function()
+                local out = {}
+                for k, v in pairs(fluids) do
+                    if v > 0 then out[#out + 1] = { name = k, amount = v, size = v, label = k } end
+                end
+                return out
+            end,
+            getItemsInNetwork = function()
+                local out = {}
+                for i = 1, #items do
+                    local it = items[i]
+                    if it.amount > 0 then
+                        out[#out + 1] = {
+                            name = it.name,
+                            damage = it.damage or 0,
+                            size = it.amount,
+                            amount = it.amount,
+                            maxSize = it.maxSize or 64,
+                            tag = it.tag,
+                            label = it.label or it.name,
+                        }
+                    end
+                end
+                return out
+            end,
+            setInterfaceConfiguration = function(slot, detail)
+                itemCfgLog[#itemCfgLog + 1] = detail and detail.name or nil
+                itemSlotCfg[slot] = detail
+                syncItemBuf()
+                return true
+            end,
+            getInterfaceConfiguration = function(slot)
+                return itemSlotCfg[slot]
+            end,
+            setFluidInterfaceConfiguration = function(slot, detail)
+                fluidSlotCfg[slot] = detail
+                syncFluidTank()
+                return true
+            end,
+        }
+
+        return proxy, {
+            fluids = fluids,
+            items = items,
+            itemSlotCfg = itemSlotCfg,
+            fluidSlotCfg = fluidSlotCfg,
+            itemCfgLog = itemCfgLog,
+            addItem = addItem,
+            getItemAmt = getItemTotal,
+            getItemBuf = function() return itemBuf end,
+            setItemBuf = function(b) itemBuf = b end,
+            getTank = function() return fluidTank end,
+            syncItemBuf = syncItemBuf,
+            syncFluidTank = syncFluidTank,
+            setRejectInsert = function(v) rejectsInsert = v end,
+            isRejectInsert = function() return rejectsInsert end,
+            clear = function()
+                for k in pairs(fluids) do fluids[k] = nil end
+                for i = #items, 1, -1 do table.remove(items, i) end
+                itemSlotCfg[1] = nil
+                fluidSlotCfg[1] = nil
+                itemBuf = nil
+                fluidTank.name = nil
+                fluidTank.amount = 0
+            end,
+        }
+    end
+
+    local stockProxy20, stockSt20 = makeRichAE2Bridge()
+    local odProxy20, odSt20 = makeRichAE2Bridge()
+    stockSt20.fluids.exciteddtcc = 500000
+    stockSt20.fluids.exciteddtpc = 500000
+    stockSt20.fluids.exciteddtrc = 500000
+    stockSt20.fluids.exciteddtec = 5000000
+    stockSt20.fluids.exciteddtsc = 500000
+    stockSt20.fluids.dimensionallytranscendentresidue = 20000000
+    stockSt20.fluids["molten.iron"] = 10000000
+    stockSt20.fluids["molten.neutronium"] = 30000000000
+    stockSt20.addItem({ name = "minecraft:cobblestone", damage = 0 }, 100000)
+
+    component._register("t20-stock-if", "fluid_interface", stockProxy20)
+    component._register("t20-od-if", "fluid_interface", odProxy20)
+
+    local function sideBridge(side)
+        if side == 1 then return stockSt20 end
+        if side == 0 then return odSt20 end
+        return nil
+    end
+
+    local tp20 = {
+        getTankLevel = function(side)
+            local s = sideBridge(side)
+            if not s then return 0 end
+            s.syncFluidTank()
+            return s.getTank().amount or 0
+        end,
+        transferFluid = function(srcSide, dstSide, count)
+            local src = sideBridge(srcSide)
+            local dst = sideBridge(dstSide)
+            if not src or not dst then return false, 0 end
+            src.syncFluidTank()
+            local t = src.getTank()
+            if not t.name or (t.amount or 0) <= 0 then return false, 0 end
+            local mv = math.min(count, t.amount)
+            local fname = t.name
+            t.amount = t.amount - mv
+            if t.amount <= 0 then t.name = nil end
+            dst.fluids[fname] = (dst.fluids[fname] or 0) + mv
+            -- Once last fluid leaves OD, clear any virtual ae2fc:fluid_drop representing it
+            if srcSide == 0 and (dst.fluids[fname] ~= nil) and (src.fluids[fname] or 0) == 0 and (t.amount or 0) == 0 then
+                for i = #src.items, 1, -1 do
+                    if src.items[i].name == "ae2fc:fluid_drop" and src.items[i].label == fname then
+                        table.remove(src.items, i)
+                    end
+                end
+            end
+            src.syncFluidTank()
+            return true, mv
+        end,
+        getSlotStackSize = function(side, slot)
+            if (slot or 1) ~= 1 then return 0 end
+            local s = sideBridge(side)
+            if not s then return 0 end
+            s.syncItemBuf()
+            local b = s.getItemBuf()
+            return (b and b.amount) or 0
+        end,
+        transferItem = function(srcSide, dstSide, count, srcSlot, sinkSlot)
+            local src = sideBridge(srcSide)
+            local dst = sideBridge(dstSide)
+            if not src or not dst then return 0 end
+            src.syncItemBuf()
+            local b = src.getItemBuf()
+            if not b or (b.amount or 0) <= 0 then return 0 end
+            local mv = math.min(count or 64, b.amount)
+            local movedSpec = { name = b.name, damage = b.damage, maxSize = 64, tag = b.tag, label = b.label }
+            b.amount = b.amount - mv
+            if b.amount <= 0 then src.setItemBuf(nil) end
+            if dst.isRejectInsert() then
+                local db = dst.getItemBuf()
+                if db and db.name == movedSpec.name and db.damage == movedSpec.damage and db.tag == movedSpec.tag then
+                    db.amount = db.amount + mv
+                elseif not db then
+                    dst.setItemBuf({
+                        name = movedSpec.name,
+                        damage = movedSpec.damage,
+                        amount = mv,
+                        maxSize = 64,
+                        tag = movedSpec.tag,
+                        label = movedSpec.label,
+                    })
+                end
+            else
+                dst.addItem(movedSpec, mv)
+            end
+            src.syncItemBuf()
+            -- Single integer return matching OpenComputers Transposer.transferItem
+            return mv
+        end,
+    }
+    component._register("t20-tp", "transposer", tp20)
+    component._register("t20-dtpf1", "dtpf", {
+        getCoordinates = function() return 10, 65, 10 end,
+        getCoilHeat = function() return 13500 end,
+        getFuelDiscount = function() return 50 end,
+        isMachineActive = function() return false end,
+        isWorkAllowed = function() return true end,
+        setWorkAllowed = function() return true end,
+        isConvergenceActive = function() return false end,
+        getConvergenceMode = function() return false end,
+        setConvergenceMode = function() return true end,
+        getProgress = function() return 0 end,
+        getMaxProgress = function() return 0 end,
+        getSensorInformation = function() return {} end,
+    })
+    component._register("t20-h1", "me_inputhatch", {
+        getCoordinates = function() return 10, 64, 10 end,
+        getSlotSize = function() return 16 end,
+        getAutoPull = function() return false end,
+        setAutoPull = function() return true end,
+        getConfiguration = function() return nil end,
+        setConfiguration = function() return true end,
+    })
+    component._register("t20-b1", "me_inputbus", {
+        getCoordinates = function() return 10, 64, 11 end,
+        getSlotSize = function() return 16 end,
+        getAutoPull = function() return false end,
+        setAutoPull = function() return true end,
+        getConfiguration = function() return nil end,
+        setConfiguration = function() return true end,
+    })
+
+    local cfg20 = Scheduler.ensureConfig({
+        armed = false,
+        stockNetAddr = "t20-stock-if",
+        onDemandNetAddr = "t20-od-if",
+        transposerAddr = "t20-tp",
+        transposerEnabled = true,
+        stockTransposerSide = 1,
+        odTransposerSide = 0,
+        pollInterval = 2.0,
+        odAutoFlushPolls = 0,
+        catalystAutoFallback = true,
+    })
+    local st20 = {}
+
+    -- Part A: Manual [FLUSH OD] drains multi-stack (>64) + NBT-tagged items + fluids + catalyst while skipping ae2fc:fluid_drop
+    odSt20.addItem({ name = "gregtech:gt.metaitem.01", damage = 17032, label = "Neutronium Ingot" }, 150)
+    odSt20.addItem({ name = "miscutils:nbt_part", damage = 3, tag = "nbt-bytes", label = "NBT Core" }, 8)
+    odSt20.addItem({ name = "ae2fc:fluid_drop", damage = 0, label = "molten.copper" }, 1)
+    odSt20.fluids["molten.copper"] = 7200
+    odSt20.fluids["exciteddtec"] = 4000
+
+    local gpu20 = component._newMockGPU(160, 50)
+    Scheduler.step(cfg20, st20)
+    local ui20 = UI.new(cfg20, st20, function() end)
+    local function clickBtn20(needle, rowY, btn)
+        for i = #ui20.hitboxes, 1, -1 do
+            local hb = ui20.hitboxes[i]
+            if hb.y1 == rowY and hb.y2 == rowY then
+                local row = gpu20._rowText(rowY)
+                if unicode.sub(row, hb.x1, hb.x2):find(needle, 1, true) then
+                    ui20:handleTouch(hb.x1, rowY, btn or 0)
+                    return true
+                end
+            end
+        end
+        return false
+    end
+
+    ui20.tab = 4; ui20:render()
+    local row15Txt = gpu20._rowText(15)
+    assert(row15Txt:find("[AutoFlush:OFF]", 1, true), "T20 Tab 4 renders [AutoFlush:OFF]")
+    assert(row15Txt:find("[FLUSH OD]", 1, true), "T20 Tab 4 renders [FLUSH OD]")
+    for _, s in ipairs(gpu20._calls) do _G.__RENDERED_GPU_CALLS[#_G.__RENDERED_GPU_CALLS + 1] = s end
+
+    assert(clickBtn20("[FLUSH OD]", 15, 0), "T20 clicked [FLUSH OD] hitbox on Tab 4")
+    assertEq(st20.odFlushActive, true, "T20 clicking [FLUSH OD] activates odFlushActive (even when paused)")
+    assertEq(st20._forcePollNow, true, "T20 clicking [FLUSH OD] requests immediate poll")
+    ui20.tab = 1; ui20:render()
+    local card4Hdr = gpu20._rowText(6)
+    assert(card4Hdr:find("[Stop ]", 1, true), "T20 Overview Card 4 shows [Stop ] while flush active")
+    assert(gpu20._rowText(7):find("FLUSHING OD", 1, true), "T20 Overview Card 4 row 7 displays flushing state")
+    for _, s in ipairs(gpu20._calls) do _G.__RENDERED_GPU_CALLS[#_G.__RENDERED_GPU_CALLS + 1] = s end
+
+    for _ = 1, 10 do
+        Scheduler.step(cfg20, st20)
+        if not st20.odFlushActive then break end
+    end
+    assertEq(st20.odFlushActive, false, "T20 Part A manual flush completes")
+    assertEq(st20.odBridgeStatus, "Idle (Flushed -> Main)", "T20 Part A status Idle (Flushed -> Main)")
+    assertEq(stockSt20.getItemAmt({ name = "gregtech:gt.metaitem.01", damage = 17032 }), 150,
+        "T20 Part A drained all 150 multi-stack items to Main")
+    assertEq(stockSt20.getItemAmt({ name = "miscutils:nbt_part", damage = 3, tag = "nbt-bytes" }), 8,
+        "T20 Part A drained all 8 NBT-tagged items preserving tag")
+    assertEq(stockSt20.fluids["molten.copper"], 7200, "T20 Part A drained non-catalyst fluid to Main")
+    assertEq(stockSt20.fluids["exciteddtec"], 5004000, "T20 Part A drained catalyst fluid back to Main")
+    assertEq(#odSt20.items, 0, "T20 Part A Color 1 item network empty")
+    assertEq(odSt20.itemSlotCfg[1], nil, "T20 Part A cleared OD Dual IF item slot 1")
+    assertEq(odSt20.fluidSlotCfg[1], nil, "T20 Part A cleared OD Dual IF fluid slot 1")
+    for _, cfgName in ipairs(odSt20.itemCfgLog) do
+        assert(cfgName ~= "ae2fc:fluid_drop", "T20 Part A never configured virtual ae2fc:fluid_drop into item slot 1")
+    end
+
+    -- Part B: Backpressure rollback when Passive Item Storage Bus rejects insert (Extract-Only)
+    odSt20.addItem({ name = "gregtech:gt.metaitem.01", damage = 17032, label = "Neutronium Ingot" }, 32)
+    stockSt20.setRejectInsert(true)
+    Scheduler.step(cfg20, st20)
+    ui20.tab = 1; ui20:render()
+    assert(clickBtn20("[Flush]", 6, 0), "T20 Part B Overview Card 4 clicked [Flush] hitbox when OD has work")
+    assertEq(st20.odFlushActive, true, "T20 Part B [Flush] button triggered odFlushActive")
+    Scheduler.step(cfg20, st20)
+    assertEq(st20.odFlushActive, false, "T20 Part B backpressure halts flush")
+    assertEq(st20.odBridgeStatus, "! Set Passive Item SB -> Bi-Dir", "T20 Part B surfaces bi-dir warning")
+    assertEq(tp20.getSlotStackSize(1, 1), 0, "T20 Part B leaves 0 items stranded on Passive Dual IF")
+    assertEq(odSt20.getItemAmt({ name = "gregtech:gt.metaitem.01", damage = 17032 }), 32,
+        "T20 Part B rolled all 32 items cleanly back to Color 1")
+    stockSt20.setRejectInsert(false)
+    odSt20.clear()
+    Scheduler.step(cfg20, st20)
+    Scheduler.step(cfg20, st20) -- 2 idle polls reset backpressure & loop latches
+
+    -- Part C: Auto-Flush on Stall (`odAutoFlushPolls = 8`) + AE2 Crafting CPU Re-Push Loop Guard
+    cfg20.armed = true
+    cfg20.pausePassivesOnOD = true
+    cfg20.odAutoFlushPolls = 0
+    st20 = {}
+    odSt20.addItem({ name = "gregtech:gt.metaitem.01", damage = 17032, label = "Neutronium Ingot" }, 64)
+    odSt20.fluids["molten.copper"] = 1000
+    for _ = 1, 8 do
+        Scheduler.step(cfg20, st20)
+    end
+    assertEq(st20.odStalled, true, "T20 Part C stalls at >=4 polls when odAutoFlushPolls=0")
+    assertEq(st20.odFlushActive ~= true, true, "T20 Part C never auto-flushes when odAutoFlushPolls=0")
+
+    cfg20.odAutoFlushPolls = 8
+    st20 = {}
+    for p = 1, 8 do
+        Scheduler.step(cfg20, st20)
+        if p < 8 then
+            assertEq(st20.odFlushActive ~= true, true, "T20 Part C does not trigger auto-flush before poll 8")
+        end
+    end
+    assertEq(st20.odFlushActive, true, "T20 Part C triggers auto-flush at poll 8")
+    for _ = 1, 6 do
+        Scheduler.step(cfg20, st20)
+        if not st20.odFlushActive then break end
+    end
+    assertEq(st20.odBridgeStatus, "Idle (Flushed -> Main)", "T20 Part C auto-flush emptied stalled craft to Main")
+
+    -- Immediately re-push identical stalled craft (0 idle polls between flush & re-push) -> Loop Breaker must halt cycling!
+    odSt20.addItem({ name = "gregtech:gt.metaitem.01", damage = 17032, label = "Neutronium Ingot" }, 64)
+    odSt20.fluids["molten.copper"] = 1000
+    for _ = 1, 10 do
+        Scheduler.step(cfg20, st20)
+        assertEq(st20.odFlushActive ~= true, true, "T20 Part C loop guard refuses infinite re-flush on AE2 CPU re-push")
+    end
+    assert(tostring(st20.odStallReason or ""):find("AE2 CPU re-pushed", 1, true),
+        "T20 Part C stall reason explains AE2 CPU re-push loop guard")
+
+    -- Clear OD for 2 idle polls -> loop guard resets cleanly
+    odSt20.clear()
+    Scheduler.step(cfg20, st20)
+    Scheduler.step(cfg20, st20)
+    assertEq(st20._odAutoFlushLastSig, nil, "T20 Part C loop guard resets after 2 idle polls")
+
+    -- Part D: UI [AutoFlush] preset cycling, [STOP FLUSH] render & main.lua config persistence round-trip
+    ui20.tab = 4; ui20:render()
+    assert(clickBtn20("[AutoFlush:16s]", 15, 0), "T20 Part D Tab 4 clicked [AutoFlush:16s] (8 -> 15)")
+    assertEq(cfg20.odAutoFlushPolls, 15, "T20 Part D forward click cycles AutoFlush 8 -> 15")
+    ui20:render()
+    assert(clickBtn20("[AutoFlush:30s]", 15, 1), "T20 Part D Tab 4 right-clicked [AutoFlush:30s] (15 -> 8)")
+    assertEq(cfg20.odAutoFlushPolls, 8, "T20 Part D right-click cycles AutoFlush 15 -> 8")
+
+    cfg20.odAutoFlushPolls = 0
+    ui20:render()
+    local afOffX
+    for i = #ui20.hitboxes, 1, -1 do
+        local hb = ui20.hitboxes[i]
+        if hb.y1 == 15 and hb.y2 == 15 and unicode.sub(gpu20._rowText(15), hb.x1, hb.x2):find("[AutoFlush:OFF]", 1, true) then
+            afOffX = hb.x1
+            break
+        end
+    end
+    assert(afOffX ~= nil, "T20 Part D located [AutoFlush:OFF] hitbox")
+
+    local evQ20 = require("event")._queue
+    while #evQ20 > 0 do table.remove(evQ20) end
+    evQ20[1] = { "key_down", "kbd", string.byte("4"), 5 }
+    evQ20[2] = { "touch", "scr", afOffX, 15, 0 }
+    evQ20[3] = { "key_down", "kbd", string.byte("q"), 16 }
+    component.gpu = gpu20
+    local mainPath20 = _G.__DTPF_ROOT .. "/main.lua"
+    local cfgPath20 = _G.__DTPF_ROOT .. "/config.cfg"
+    __py_write_file(cfgPath20, "{ armed = true }\n")
+    local m20, mErr20 = load(assert(__py_read_file(mainPath20)), "@" .. mainPath20)
+    assert(m20, mErr20)
+    m20()
+    component.gpu = nil
+    local saved20 = assert(__py_read_file(cfgPath20), "T20 Part D main.lua wrote config.cfg")
+    assert(saved20:find("odAutoFlushPolls = 8", 1, true), "T20 Part D main.lua persisted odAutoFlushPolls = 8")
+    assert(saved20:find("autoFlushPolls = 8", 1, true), "T20 Part D main.lua persisted subnets.transposer.autoFlushPolls = 8")
+    local reloadedTbl = assert(load("return " .. saved20:match("(%b{})")), "T20 Part D valid Lua config table")()
+    reloadedTbl.odAutoFlushPolls = nil -- Prove ensureConfig also hydrates cleanly from subnets.transposer.autoFlushPolls
+    local hydratedCfg = Scheduler.ensureConfig(reloadedTbl)
+    assertEq(hydratedCfg.odAutoFlushPolls, 8, "T20 Part D Scheduler.ensureConfig hydrates autoFlushPolls from subnets.transposer")
+    __py_remove_vfs(cfgPath20)
+    for _, s in ipairs(gpu20._calls) do _G.__RENDERED_GPU_CALLS[#_G.__RENDERED_GPU_CALLS + 1] = s end
+
+    Hardware.resetClusterState()
+    component._reset()
+end
+
 return "OK"
 """
             res = host.exec_lua(test_suite, "test_suite")
@@ -3729,7 +4218,7 @@ return "OK"
             finally:
                 mem_host.close()
 
-            print(f"ALL 19 OFFLINE TEST SUITES PASSED (0 bad-width glyphs, {live_kb} KB live JNLua heap, Lua 5.3 + OpenOS verified).")
+            print(f"ALL 20 OFFLINE TEST SUITES PASSED (0 bad-width glyphs, {live_kb} KB live JNLua heap, Lua 5.3 + OpenOS verified).")
             print("--- Sample main.lua --check output ---")
             for line in check_out.splitlines():
                 print("  " + line)

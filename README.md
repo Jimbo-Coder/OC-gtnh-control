@@ -14,12 +14,40 @@ Autonomous OpenComputers (`Lua 5.3`) controller for **GregTech: New Horizons (GT
 
 The controller keeps **Main AE2**, **On-Demand (`Color 1`)**, **Passive (`Color 2`)**, and **Non-Consumed (`Color 0`)** cleanly separated so AE2 autocrafts never fight passive production:
 
+```text
+                   +------------------------------------------------+
+                   |                MAIN AE2 NETWORK                |
+                   +---------+----------------------------+---------+
+                             |                            |
+       Pattern Dual IF       |                            |  Main Dual IF + Bi-Dir
+  (Blocking + Adv. Card)     v                            v  Item & Fluid Storage Buses
+                      +-------------+              +-------------+
+                      |  ON-DEMAND  |              |   PASSIVE   | (0 drives: sees Main;
+                      |   SUBNET    |              |   SUBNET    |  inserts flow straight
+                      |  (Color 1)  |              |  (Color 2)  |  back into Main AE2)
+                      +------+------+              +------+------+
+                             |                            |
+                      [OD Dual IF] <-> [Transposer] <-> [Passive Dual IF]
+                       (+ Adapter)    (Cat Ramp &        (+ Adapter)
+                                       OD -> Main)
+                             |                            |
+                             v                            v
+  [NC Subnet (Color 0)] -> DTPF #1 .. #N <----------------+  --> Shared Outputs -> Main
+  (Shared NC Input Bus)    - Shared Color 1 OD Hatch + Bus
+                           - Dedicated Color 2 Hatch + Bus (autoPull=OFF)
+                                   ^
+                                   :  Wireless MFUs (0 OC blocks on DTPFs)
+                                   v
+                      [OC Server] <-- 3x MFU Adapters per DTPF
+                                      (Controller + Passive Hatch + Passive Bus)
+```
+
 - **On-Demand Subnet (`Color 1`, White) — Full-Bonus Patterns:**
   AE2 patterns are encoded at the **full `50%` catalyst bonus** through a Main-to-`Color 1` Pattern `ME Dual Interface` with **`Blocking Mode: ON` + `Advanced Blocking Card`**. Whenever an AE2 craft pushes ingredients onto `Color 1`, OC detects it via an Adapter and pauses/yields passive queues so the DTPF runs the On-Demand craft immediately.
 - **Passive Subnet (`Color 2`, Orange) — Bi-Directional Bridge + OC Hatch Filters:**
-  An unfiltered **Bi-Directional (`Extract + Insert`)** `ME Storage Bus` + `ME Fluid Storage Bus` bridge Main AE2 (via an unfiltered Main `ME Dual Interface`) onto the Passive Subnet (`Color 2`), making all Main AE2 items/fluids visible without creating a storage feedback loop and providing a clean return path back into Main AE2 if anything is returned onto the Passive Subnet. Each DTPF's `Color 2` `Stocking Input Hatch (ME)` and `Stocking Input Bus (ME)` keep **`autoPull = OFF`**, and OC sets each unit's virtual filter slots (`setConfiguration`) so every DTPF pulls only its assigned passive recipe (or clears to empty when idle or yielded).
-- **OC Transposer — Startup / Ramp & Convergence Catalyst:**
-  Because AE2 patterns are encoded at full `50%` catalyst bonus while cold startups, tier upgrades, or Convergence runs need extra catalyst up front, an OC **Transposer** bridges Main AE2 -> `Color 1` Dual Interface to inject the exact catalyst delta automatically.
+  Has **no storage drives of its own** and connects to Main AE2 (via an unfiltered Main `ME Dual Interface`) through unfiltered **Bi-Directional (`Extract + Insert`)** `ME Storage Bus` + `ME Fluid Storage Bus`. This exposes all Main AE2 stock to OC-filtered `Color 2` `Stocking Input Hatch/Bus (ME)` (`autoPull = OFF`) while routing anything pushed onto `Color 2` straight back into Main AE2 with zero storage feedback loops.
+- **OC Transposer (`[OD Dual IF] <-> [Passive Dual IF]`):**
+  Supplies startup/ramp & convergence catalyst deltas above full-bonus pattern amounts (`Passive -> OD`), drains leftover catalyst automatically when OD goes idle, and can evacuate stuck On-Demand items + fluids back through Passive into Main AE2 via **`[FLUSH OD]`** (Tab 1 `[Flush]` / Tab 4 `[FLUSH OD]`) or optional **`[AutoFlush]`** on stall.
 - **Non-Consumed Aux (`Color 0`, Unpainted) & Shared Outputs:**
   All non-consumed items (Programmed Circuits, Lenses, Hypervisors, Cores, Frames/Casings) sit in a shared `Color 0` `Stocking Input Bus (ME)`, while standard `ME Output Hatch/Bus` bricks dump all products straight back into Main AE2.
 
