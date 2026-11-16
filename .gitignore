@@ -1,0 +1,11 @@
+# Runtime / world-specific state (never commit personal saves or secrets)
+config.cfg
+.repo
+*.bak
+*.tmp
+
+# OS / Python scratch
+__pycache__/
+*.py[cod]
+.DS_Store
+scratch/
