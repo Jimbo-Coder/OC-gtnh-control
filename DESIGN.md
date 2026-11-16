@@ -4,7 +4,7 @@
 
 ### Per-DTPF Rig (Uniform Across All Units)
 1. **1x MFU pointed at the DTPF Controller (`1004`):**
-   - `CompoundBlockDriver` merges `DriverDTPF` (`priority=10`, `"dtpf"`) with Computronics `DriverMachine` + `DriverDeviceInformation` + `DriverPlasmaForge` into a single `"dtpf"` component exposing Convergence, Catalyst Tier, Progress, Coordinates, Work Control, and Sensor Information.
+   - `CompoundBlockDriver` merges [`DriverDTPF` (GTNewHorizons/OpenComputers#228)](https://github.com/GTNewHorizons/OpenComputers/pull/228) (`priority=10`, `"dtpf"`) with Computronics `DriverMachine` + `DriverDeviceInformation` + `DriverPlasmaForge` into a single `"dtpf"` component exposing Convergence, Catalyst Tier, Progress, Coordinates, Work Control, and Sensor Information (falling back gracefully to read-only Convergence status when `#228` is absent).
    - **Machine Controller Cover Check:** If the South face (`z+1`) still has a legacy GregTech Machine Controller Cover attached, it overrides `setWorkAllowed()` every tick. Crowbar that cover off if you want OC's `[Work: ON/OFF]` toggle to control the DTPF. (The UI automatically surfaces a `! COVER OVERRIDE` banner if detected.)
 2. **Color 1 (`mColor=1` White) — On-Demand Channel:**
    - Dedicated `Stocking Input Hatch (ME)` + `Stocking Input Bus (ME)` (wallsharable since OD crafts pause passive queues cleanly) connected either to `1` shared On-Demand subnet OR `1` dedicated On-Demand mini-subnet per DTPF (Main -> `Color 1` Pattern `ME Dual Interface` MUST have **`Blocking Mode: ON` + `Advanced Blocking Card`**; optional small `ME Drive` on `Color 1`; OD adapters auto-pair `1:1` and are selectable via `[OD NET]` / `[ 1:1 PAIR OD ]` on **Tab 4 (`SETUP`)**).
@@ -67,9 +67,10 @@ An **MFU (`Upgrade MF`)** is an item slotted inside an OC `Adapter` back in your
 One **OpenComputers Server Rack** holds up to **4 Tier 3 Servers** (`64` components per Server stock with `Tier 3 CPU + 3x Tier 3 Component Bus`):
 - **Server 1 (Master):** Install GPU, Screen/Terminal Server, Network Card, + up to `~18` DTPFs (`<= 64` total components). Runs `/home/dtpf/main.lua`.
 - **Servers 2–4 (Headless Workers):** No GPU or Screen needed (`Tier 3 CPU + 3x Tier 3 Component Bus + Network Card + HDD/EEPROM`). Each Worker handles up to **`20` independent Option A DTPFs** (`60` MFUs + `1` Network Card = `<= 64`). Run `/home/dtpf/main.lua --worker` (configure `/etc/rc.cfg` to auto-start on boot). **1 full Rack = up to `~78` independent DTPFs on 1 unified GUI!**
-- **Exact Server Rack GUI Wiring:**
+- **Exact Server Rack & Multi-Rack Wiring:**
   1. Connect each Server's **thick main component line** (`I/O`) to a **different face** of the Rack (`Left`, `Right`, `Top`, `Back`) so each Server's Adapters stay completely isolated (`<= 64` components per Server — never exceeding any cap).
-  2. Connect every Server's **thin `Network Card` line** to **one shared Rack face (e.g. `Bottom`)** with Rack **Relay ON** (`or` connect their network lines via Rack bus). That passes Master/Worker RPC over port `4104` inside the Rack **without** merging component buses across Servers!
+  2. Connect every Server's **thin `Network Card` line** to **one shared Rack face (e.g. `Bottom`)** with Rack **Relay ON**. That passes Master/Worker RPC over port `4104` inside the Rack **without** merging component buses across Servers!
+  3. **Multiple Server Racks (`>78` DTPFs):** Simply connect the **Relay face** of additional Server Racks together using regular OC Cables/Switch (with only Network Card lines on that Relay bus) — `Hardware.discoverWorkers()` broadcasts `DTPF_DISC` across the entire bridged LAN and merges workers from any number of Racks automatically.
 
 ---
 
