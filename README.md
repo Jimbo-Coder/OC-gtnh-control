@@ -64,8 +64,6 @@ Zero OC blocks or cables touch any DTPF. Every MFU (`Upgrade MF`) is bound to th
 | **On-Demand (OD)** | `Color 1` (White) | **Yes (Wallshared) or 1:1** | `Stocking Input Hatch (ME)` + `Stocking Input Bus (ME)` on `Color 1` | `0` per DTPF (`1` Adapter on OD Dual IF, or `1` per OD mini-subnet) |
 | **Passive Channel** | `Color 2` (Orange) | **Dedicated per DTPF** | Dedicated `Stocking Input Hatch (ME)` + `Stocking Input Bus (ME)` (`autoPull = OFF`) | **`3` Wireless MFUs** (`1` Controller + `1` Hatch + `1` Bus) in `3` Adapters |
 
-> Prefer **0 passive MFUs** (or grouping many DTPFs onto shared passive AE2 channels)? Option B uses a Storage-Bus subnet bridge instead of per-DTPF passive MFUs — see [DESIGN.md](DESIGN.md) for the comparison.
-
 ---
 
 ## 3. Setup Visuals
@@ -125,7 +123,7 @@ Full automated Tier 2 **Catalyst Convergence** control (`isConvergence`, target 
 
 ![DTPF Control Center live log modal showing recent scheduling events](screenshots/gui_log_modal.png)
 
-- **[DESIGN.md](DESIGN.md)** — Full hardware tables, Option A vs. Option B bridge notes, scheduler math, catalyst policy, and multi-rack protocol details.
+- **[DESIGN.md](DESIGN.md)** — Full hardware layout, Transposer bridge & OD flush details, scheduler math, catalyst policy, and multi-rack protocol details.
 - **`tools/test_offline.py`** — Offline Lua 5.3 + JNLua heap & UI test suite.
 - **`tools/extract_dtpf_recipes.py`** — GTNH recipe extractor feeding `lib/recipes_db.lua`.
 - **License:** [MIT](LICENSE)

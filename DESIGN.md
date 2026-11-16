@@ -9,68 +9,43 @@
 2. **Color 1 (`mColor=1` White) — On-Demand Channel:**
    - Dedicated `Stocking Input Hatch (ME)` + `Stocking Input Bus (ME)` (wallsharable since OD crafts pause passive queues cleanly) connected either to `1` shared On-Demand subnet OR `1` dedicated On-Demand mini-subnet per DTPF (Main -> `Color 1` Pattern `ME Dual Interface` MUST have **`Blocking Mode: ON` + `Advanced Blocking Card`**; optional small `ME Drive` on `Color 1`; OD adapters auto-pair `1:1` and are selectable via `[OD NET]` / `[ 1:1 PAIR OD ]` on **Tab 4 (`SETUP`)**).
 3. **Color 2 (`mColor=2` Orange) — Passive Channel (`ch1..chN`):**
-   - Dedicated `Stocking Input Hatch (ME)` + `Stocking Input Bus (ME)` (`autoPull = OFF` on Direct MFU Main AE2, or `autoPull = ON` when fed by a Storage-Bus subnet bridge).
+   - Dedicated `Stocking Input Hatch (ME)` + `Stocking Input Bus (ME)` (`autoPull = OFF`) connected to the shared `Color 2` Passive Subnet (`0` AE2 drives, reading Main AE2 through unfiltered Bi-Directional Storage Buses).
    - Additional channels (`ch2..chN`) auto-pair `1:1` by 3D coordinates so every DTPF can run an independent passive recipe simultaneously.
 4. **Unpainted (`mColor=0`) — Uniform Shared NC Aux Subnet:**
    - Shared `Stocking Input Bus (ME)` holding **all non-consumed (NC) items** across every DTPF evenly (Programmed Circuits, Lenses, Hypervisor Matrices, `Hi-Computation Station T5`, SpaceTime Bending Cores, Casings).
-   - Because GT `doCheckRecipe()` combines unpainted (`-1`) buses with every colored pass, OC keeps `uniformNcSubnet = true` by default so Main Net stocks are not checked for NC items and Passive buses/Storage Buses do not duplicate NC items.
+   - Because GT `doCheckRecipe()` combines unpainted (`-1`) buses with every colored pass, OC keeps `uniformNcSubnet = true` by default so Main Net stocks are not checked for NC items and Passive Hatches/Buses do not duplicate NC items.
 
-### Two Supported Passive Control Topologies (Zero OC Blocks Touching Any DTPF)
+### AE2 Subnets, Wireless MFUs & 2-Way OC Transposer Bridge
 
-An **MFU (`Upgrade MF`)** is an item slotted inside an OC `Adapter` back in your OC rack (wireless up to `512` blocks). You `Sneak + Right-Click` the 1 accessible front face of each machine, then put the MFU into your OC Adapter back at your base — **nothing blocks any face of any DTPF**.
+An **MFU (`Upgrade MF`)** is slotted inside an OC `Adapter` back in your OC room (wireless up to `512` blocks). You `Sneak + Right-Click` the front face of each Controller, Passive Stocking Hatch, and Passive Stocking Bus, then place those `3` MFUs per DTPF into OC Adapters — **zero OC blocks or cables touch any DTPF**.
 
-| Subsystem | Option A — Zero-Subnet Direct MFU (Simplest Wiring) | Option B — Storage-Bus Subnet Bridge (Fewer MFUs) |
+| Subsystem | Physical AE2 / GT Setup | OC Hardware |
 | :--- | :--- | :--- |
-| **Passive Hatches & Buses on each DTPF** | All `Color 2` passive `Stocking Input Hatch/Bus (ME)` connect **straight to Main AE2 Net** (`autoPull = OFF`; direct on Main AE2 with `0` Dual IFs, `0` Storage Buses, `0` Quartz Fibers, no 16-color or P2P limit). | Each channel (`ch1..chN`) gets an Extract-Only `ME Fluid Storage Bus + ME Storage Bus` on **2 separate cable blocks** facing a Main Net `ME Dual Interface`, feeding `Color 2+` `Stocking Input Hatch/Bus (ME)` (`autoPull = ON`). |
-| **OC Hardware for Passives** | **`2` wireless MFUs + `2` plain Adapters per DTPF** in OC rack (or 1 Adapter per pair if `mfg` / rack slots arranged; bound to each DTPF's `Stocking Input Hatch (ME)` + `Stocking Input Bus (ME)`). OC auto-pairs by 3D `(x,y,z)`. | **`1` plain Adapter (`0` MFUs)** per `1–2` channels back in the AE2 room touching the Storage Bus cable blocks (`fluid_storagebus` + `me_storagebus`). |
-| **Each DTPF Controller (`N` units)** | `1x wireless MFU + Adapter` bound to DTPF Controller (`1004`). (`3` MFUs total per DTPF.) | `1x wireless MFU + Adapter` bound to DTPF Controller (`1004`). (`1` MFU total per DTPF.) |
-| **Main Net Stock Reader** | `1x plain Adapter` (`0 MFUs`) on any unfiltered Main Net `ME Dual IF` / `ME IF` / `ME Controller`. | Same (`1x plain Adapter` on unfiltered Main Net IF, or shared with StorageBus Adapter). |
-| **On-Demand (`Color 1`) Detector** | `1x plain Adapter` (`0 MFUs`) on `1` shared `Color 1` OD IF **or** `1x plain Adapter` per DTPF OD mini-subnet (`[OD NET]` / `[ 1:1 PAIR OD ]` on **Tab 4**). | Same. |
-| **Unpainted (`Color 0`) NC Aux Subnet** | Shared `Stocking Input Bus (ME)` (`0 Adapters, 0 MFUs`). | Same. |
+| **Outputs** | Shared `ME Output Hatch` + `ME Output Bus` -> Main AE2 | `0` |
+| **Non-Consumed (`Color 0`)** | Wallshared `Stocking Input Bus (ME)` holding NC items/circuits/lenses | `0` |
+| **On-Demand (`Color 1`)** | Wallshared (or 1:1) `Stocking Input Hatch/Bus (ME)` fed by Main Pattern `ME Dual Interface` (**`Blocking Mode: ON` + `Advanced Blocking Card`**) | `1` Adapter on `Color 1 OD Dual IF` (or `1` per OD mini-subnet) |
+| **Passive Subnet (`Color 2`)** | `0` AE2 drives; bridged from an unfiltered Main `ME Dual Interface` via unfiltered **Bi-Directional (`Extract + Insert`)** `ME Storage Bus` + `ME Fluid Storage Bus` -> dedicated per-DTPF `Stocking Input Hatch/Bus (ME)` (`autoPull = OFF`) | **`3` Wireless MFUs** per DTPF (`1` Controller + `1` Passive Hatch + `1` Passive Bus) + `1` Adapter on `Passive / Stock Dual IF` |
+| **2-Way Bridge (`OD <-> Passive`)** | `1x OC Transposer` placed between `Color 1 OD Dual IF` (`odSide`) and `Passive / Stock Dual IF` (`stockSide`) | Connected to OC (`0` MFUs if adjacent or `1` MFU) |
 
-> **Why Choose Option A vs. Option B:**
-> - **Choose Option A (Direct Wireless MFUs)** if building `N` isolated Quartz-Fiber Storage-Bus subnets feels like too much AE2 wiring overhead: every passive `Stocking Input Hatch/Bus (ME)` plugs straight onto your Main AE2 cable, giving **1:1 Per-DTPF Passive Control** for `5–18+` DTPFs with **zero AE2 subnets**.
-> - **Choose Option B (Storage-Bus Bridge)** if you want **1 MFU per DTPF total** or want one shared Storage-Bus channel (`ch1`) to feed an entire group of DTPFs (`3` components for `10` grouped DTPFs).
-
-```text
-  OPTION A: ZERO-SUBNET DIRECT WIRELSES MFUs (1:1 Per-DTPF Passives, Zero Passive Subnets!)
-  -----------------------------------------------------------------------------------------
-  UNFILTERED MAIN AE2 NET ──► Directly to every DTPF's Color 2 Stocking Hatch + Bus (autoPull=OFF)
-                                 ▲              ▲
-                     (wireless MFU #1)   (wireless MFU #2)   (+ MFU #3 on Controller)
-                     Bound via Sneak-RClick on Hatch & Bus; MFUs sit in Adapters in OC rack!
-
-  OPTION B: STORAGE-BUS SUBNET BRIDGE (0 Passive MFUs — Sits Back in AE2 Room)
-  -----------------------------------------------------------------------------------------
-  Main Net [ME Dual Interface] ◄── OC Adapter (Stock Reader)
-     ▲           ▲
-  [Fluid SB]  [Item SB]  (Extract Only, 2 SEPARATE Color-2 cable blocks) ◄── OC Adapter (0 MFUs)
-     └─────┬─────┘
-           └──► Color 2 Subnet ──► DTPF Stocking Input Hatch/Bus (ME) [autoPull=ON]
-```
-
-> **Note on Passive / "OC Read" Subnet (`Extract + Insert` vs. Option B) & 2-Way OD Evacuation:**
-> - On a shared **Passive / Stock Subnet** (`0` AE2 drives of its own; e.g. `Main Net Dual Interface -> Item + Fluid Storage Buses -> Color 2 Subnet`), setting those unfiltered Storage Buses to **Bi-Directional (`Extract + Insert`)** exposes Main AE2 stock without creating a storage feedback loop (`DualityInterface` uses `MEMonitorPassThrough`) while routing any items or fluids inserted onto `Passive / Stock Dual IF` straight back into Main AE2.
-> - **2-Way OD Evacuation (`[FLUSH OD]` / Optional `[AutoFlush]` on Stall):** The OC Transposer (`OD Dual IF <-> Passive / Stock Dual IF`) drains items directly via `setInterfaceConfiguration(1, { name, damage, size, tag })` + `transferItem` (no OC Database Upgrade required; virtual `ae2fc:fluid_drop` entries are skipped) and drains both non-catalyst fluids and catalyst fluids via `setFluidInterfaceConfiguration(1, fluid)` + `transferFluid`, clearing slot 1 to `nil` when finished.
-> - **Backpressure Rollback & AE2 CPU Loop Guard:** If `Passive / Stock Dual IF` slot 1 retains an inserted stack (`getSlotStackSize(stockSide, 1) > 0` because the Passive Item Storage Bus is still `Extract Only`), OC immediately rolls the stack back into `Color 1`, clears slot 1 config, halts flushing with `! Set Passive Item SB -> Bi-Dir`, and leaves `0` items stranded. When `[AutoFlush]` is enabled (`odAutoFlushPolls > 0`), it only triggers once after sustained stall (`>= max(4, odAutoFlushPolls)` polls); if an active AE2 Crafting CPU immediately re-pushes the identical craft before 2 idle polls elapse, OC pauses auto-flush with `AE2 CPU re-pushed craft (cancel CPU or click [Flush])` instead of looping endlessly.
-> - Keep **Option B** per-channel *filtered* passive Storage Buses `Extract Only` and separate from your unfiltered Passive / Stock Reader subnet.
-
-- **Storage Bus Shadowing Rule (Option B — 2 Separate Cable Blocks):** Never place `ME Storage Bus` and `ME Fluid Storage Bus` on the same AE2 cable block (`CompoundBlockDriver` merges them and `fluid_storagebus` `priority=2` shadows `me_storagebus` `priority=1`). Put them on 2 adjacent/separate cable blocks touching the Adapter.
+- **Why `Extract + Insert` Works Cleanly on `Color 2` (`0` Drives):** Because the Main Net side of the bridge is a `ME Dual Interface`, unfiltered `ME Storage Bus` + `ME Fluid Storage Bus` set to **Bi-Directional (`Extract + Insert`)** expose Main AE2 inventory without creating a storage feedback loop (`DualityInterface` uses `MEMonitorPassThrough`) while routing anything pushed onto `Passive / Stock Dual IF` straight back into Main AE2.
+- **2-Way OD Catalyst & Evacuation (`[FLUSH OD]` / Optional `[AutoFlush]` on Stall):**
+  - **Catalyst Top-Up & Drain:** Injects startup/ramp & convergence catalyst deltas (`Passive -> OD`) above full-bonus pattern amounts, and automatically drains leftover excess catalyst (`OD -> Passive -> Main`) once OD goes idle.
+  - **2-Way OD Evacuation:** Drains items directly via `setInterfaceConfiguration(1, { name, damage, size, tag })` + `transferItem` (no OC Database Upgrade required; virtual `ae2fc:fluid_drop` entries are skipped) and drains both non-catalyst fluids and catalyst fluids via `setFluidInterfaceConfiguration(1, fluid)` + `transferFluid`, clearing slot 1 configs to `nil` when finished.
+  - **Backpressure Rollback & AE2 CPU Loop Guard:** If `Passive / Stock Dual IF` slot 1 retains an inserted stack (`getSlotStackSize(stockSide, 1) > 0` because the Passive Item Storage Bus is still `Extract Only`), OC immediately rolls the stack back into `Color 1`, clears slot 1 config, halts flushing with `! Set Passive Item SB -> Bi-Dir`, and leaves `0` items stranded. When `[AutoFlush]` is enabled (`odAutoFlushPolls > 0`), it triggers once after sustained stall (`>= max(4, odAutoFlushPolls)` polls); if an active AE2 Crafting CPU immediately re-pushes the identical craft before 2 idle polls elapse, OC pauses auto-flush with `AE2 CPU re-pushed craft (cancel CPU or click [Flush])` instead of looping endlessly.
 - **ME Dual Interface Detection (`"fluid_interface"`):** In GTNH 2.9.0 (`ae2fc-1.5.116-gtnh` + `OpenComputers-1.12.68-GTNH`), AE2FC's `TileFluidInterface` extends AE2 `TileInterface`, so OC exposes full `NetworkControl` (`getItemsInNetwork` + `getFluidsInNetwork`) under component type `"fluid_interface"`. `Hardware.discoverAENetworks()` scans `"me_interface"`, `"fluid_interface"`, and `"me_controller"`.
 - **Scaling to 10–32+ Independent DTPFs, Minimum OC Hardware & Budget (Verified in GTNH 2.9.0 `OpenComputers.cfg` + `libjnlua53`):**
   - **Minimum OC Spec (`OpenComputers.cfg` defaults: `ramSizes=[192,256,384,512,768,1024]`, `ramScaleFor64Bit=1.8`, `hddSizes=[1024,2048,4096]`, `cpuComponentCount=[8,12,16,1024]`):**
-    - **Memory:** Minimum **`2x Memory (Tier 3.5)`** (`3,686 KB` scaled 64-bit Lua heap). Measured live `libjnlua53` heap across all 4 GUI tabs + `[Log]` modal views is **`2,606 KB`**.
+    - **Memory:** Minimum **`2x Memory (Tier 3.5)`** (`3,686 KB` scaled 64-bit Lua heap). Measured live `libjnlua53` heap across all 4 GUI tabs + `[Log]` modal views is **`2,630 KB`**.
     - **Storage:** Minimum **`Hard Disk Drive Tier 2 (2 MB)`** (`~1.4 MB` peak during `.tmp` atomic updates).
-    - **Case / Server:** **Tier 3 Case** (`16` components max -> up to **`2` DTPFs** in 1:1 MFU mode) or **Server Rack + Tier 2/3 Server w/ Component Bus Tier 3** (`48–64` components -> `3` to **`18`** independent DTPFs on `1` Server).
+    - **Case / Server:** **Tier 3 Case** (`16` components max -> up to **`2` DTPFs**) or **Server Rack + Tier 2/3 Server w/ Component Bus Tier 3** (`48–64` components -> `3` to **`18`** independent DTPFs on `1` Server).
   - **CPU / Lua 5.3:** Requires **Tier 3 CPU / APU Tier 3** in **Lua 5.3** mode (`Sneak + Right-Click`).
-  - **No Server TPS Risk from Component Count Alone:** Verified in `OpenComputers-1.12.68-GTNH.jar` that `ManagedEnvironment.canUpdate()` returns `false` on StorageBus / GT environments, so connected Storage Buses and MFUs do **not** run per-tick polling loops. Lua execution is separately rate-limited by `callBudgets = [0.5, 1, 1.5]` and `executionDelay = 12ms`, and our script only writes configuration calls when state actually changes (`pollInterval = 2.0s` / `3.0s`).
-  - Click **`[ 1:1 PAIR DTPFS ]`** on **Tab 4 (`SETUP`)** to bind `DTPF #1..#N` -> `ch1..chN` (auto-matched by 3D coordinates for Option A hatches/buses).
-- **0-Stock Empty Filter Sentinel (Option B only):** Whenever a Storage Bus channel has zero items or fluids (or is cleared during On-Demand preemption or `OD-Only`), OC automatically writes a verified 0-stock sentinel (`ic2pahoehoelava` / `minecraft:fire`) to Slot 1 so an empty whitelist never exposes all of Main Net. (Option A direct `me_inputhatch`/`me_inputbus` slots clear directly to `nil` with no sentinels needed.)
+  - **No Server TPS Risk from Component Count Alone:** Verified in `OpenComputers-1.12.68-GTNH.jar` that `ManagedEnvironment.canUpdate()` returns `false` on StorageBus / GT environments, so connected MFUs and Adapters do **not** run per-tick polling loops. Lua execution is separately rate-limited by `callBudgets = [0.5, 1, 1.5]` and `executionDelay = 12ms`, and our script only writes configuration calls when state actually changes (`pollInterval = 2.0s` / `3.0s`).
+  - Click **`[ 1:1 PAIR DTPFS ]`** on **Tab 4 (`SETUP`)** to bind `DTPF #1..#N` -> `ch1..chN` (auto-matched by 3D coordinates for every DTPF's Stocking Hatch + Bus).
 
 ### Multi-Server Single-Rack Scaling (`19–78+` DTPFs)
 One **OpenComputers Server Rack** holds up to **4 Tier 3 Servers** (`64` components per Server stock with `Tier 3 CPU + 3x Tier 3 Component Bus`):
 - **Server 1 (Master):** Install GPU, Screen/Terminal Server, Network Card, + up to `~18` DTPFs (`<= 64` total components). Runs `/home/dtpf/main.lua`.
-- **Servers 2–4 (Headless Workers):** No GPU or Screen needed (`Tier 3 CPU + 3x Tier 3 Component Bus + Network Card + HDD/EEPROM`). Each Worker handles up to **`20` independent Option A DTPFs** (`60` MFUs + `1` Network Card = `<= 64`). Run `/home/dtpf/main.lua --worker` (configure `/etc/rc.cfg` to auto-start on boot). **1 full Rack = up to `~78` independent DTPFs on 1 unified GUI!**
+- **Servers 2–4 (Headless Workers):** No GPU or Screen needed (`Tier 3 CPU + 3x Tier 3 Component Bus + Network Card + HDD/EEPROM`). Each Worker handles up to **`20` independent DTPFs** (`60` MFUs + `1` Network Card = `<= 64`). Run `/home/dtpf/main.lua --worker` (configure `/etc/rc.cfg` to auto-start on boot). **1 full Rack = up to `~78` independent DTPFs on 1 unified GUI!**
 - **Exact Server Rack & Multi-Rack Wiring:**
   1. Connect each Server's **thick main component line** (`I/O`) to a **different face** of the Rack (`Left`, `Right`, `Top`, `Back`) so each Server's Adapters stay completely isolated (`<= 64` components per Server — never exceeding any cap).
   2. Connect every Server's **thin `Network Card` line** to **one shared Rack face (e.g. `Bottom`)** with Rack **Relay ON**. That passes Master/Worker RPC over port `4104` inside the Rack **without** merging component buses across Servers!
@@ -135,7 +110,7 @@ Recipes with no recipe-native catalyst (`Molten Shirabon`, `Molten SpaceTime`, `
 
 | Command | Purpose |
 | :--- | :--- |
-| `python3 tools/test_offline.py` | Runs the offline Lua 5.3 + OpenComputers `JNLua` regression suite (`19` suites) and UI framebuffer/heap verification. |
+| `python3 tools/test_offline.py` | Runs the offline Lua 5.3 + OpenComputers `JNLua` regression suite (`20` suites) and UI framebuffer/heap verification. |
 | `install --local <dir>` | Inside OpenOS: offline/local atomic install into `/home/dtpf/` (restores `/home/config.dtpf.bak` if present). |
 | `dtpf --check` | Inside OpenOS: prints structured Raw Inputs, Scheduler Decisions, and Dry-Run Outputs read-only check and exits. |
 | `dtpf --update` | Inside OpenOS: downloads and syntax-verifies the latest Lua files via Internet Card (`config.cfg` preserved). |
