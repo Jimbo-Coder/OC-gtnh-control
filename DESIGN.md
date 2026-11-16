@@ -49,7 +49,9 @@ An **MFU (`Upgrade MF`)** is an item slotted inside an OC `Adapter` back in your
            └──► Color 2 Subnet ──► DTPF Stocking Input Hatch/Bus (ME) [autoPull=ON]
 ```
 
-> **Note on "OC Read Subnet" vs. Direct Main Net Interface:** If you already have an unfiltered OC Read Subnet fed by `Main Net Dual Interface -> Extract-Only Item+Fluid Storage Buses -> OC Subnet -> Adapter on OC Subnet Dual Interface`, that works fine as the **Main Net Stock Reader** because nothing filters its Storage Buses. Keep it separate from any Option B passive Storage Buses.
+> **Note on Passive / "OC Read" Subnet (`Extract + Insert` vs. Option B):**
+> - On a shared **Passive / Stock Subnet** (such as an unfiltered `Color 2` subnet bridged from a `Main Net Dual Interface -> Item + Fluid Storage Buses -> Subnet -> DTPF Stocking Hatch/Bus [autoPull=OFF]` and/or `Adapter on Subnet Dual IF`), setting those unfiltered Storage Buses to **Bi-Directional (`Extract + Insert`)** exposes Main AE2 stock without creating a storage feedback loop (`DualityInterface` uses `MEMonitorPassThrough`), and provides a clean return path back into Main AE2 if anything is ever returned onto the Passive Subnet.
+> - Keep **Option B** per-channel *filtered* passive Storage Buses `Extract Only` and separate from your unfiltered Passive / Stock Reader subnet.
 
 - **Storage Bus Shadowing Rule (Option B — 2 Separate Cable Blocks):** Never place `ME Storage Bus` and `ME Fluid Storage Bus` on the same AE2 cable block (`CompoundBlockDriver` merges them and `fluid_storagebus` `priority=2` shadows `me_storagebus` `priority=1`). Put them on 2 adjacent/separate cable blocks touching the Adapter.
 - **ME Dual Interface Detection (`"fluid_interface"`):** In GTNH 2.9.0 (`ae2fc-1.5.116-gtnh` + `OpenComputers-1.12.68-GTNH`), AE2FC's `TileFluidInterface` extends AE2 `TileInterface`, so OC exposes full `NetworkControl` (`getItemsInNetwork` + `getFluidsInNetwork`) under component type `"fluid_interface"`. `Hardware.discoverAENetworks()` scans `"me_interface"`, `"fluid_interface"`, and `"me_controller"`.

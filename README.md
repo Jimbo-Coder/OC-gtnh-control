@@ -1,92 +1,103 @@
-# GTNH DTPF Automation Controller (OpenComputers)
+# GTNH DTPF OpenComputers Controller
 
-A self-configuring **OpenComputers (Lua 5.3 / OpenOS)** controller for automating **Dimensionally Transcendent Plasma Forges (DTPFs)** in **GregTech: New Horizons 2.9+**.
+Autonomous OpenComputers (`Lua 5.3`) controller for **GregTech: New Horizons (GTNH 2.9+)** Dimensionally Transcendent Plasma Forges (**DTPFs**). It dynamically dispatches passive crafting, yields cleanly to AE2 On-Demand crafts, handles catalyst ramp/convergence costs, and scales from 1 DTPF to an entire base from a single UI.
 
-Handles passive AE2 stock targets, 24/7 loops, **AE2 On-Demand autocrafting priority**, optional Convergence automation, Coil Tier & 8h warmup tracking, DTR/catalyst reserve floors, and an optional Transposer catalyst bridge in a 4-tab `160x50` touch GUI.
+### `[1] OVERVIEW` — Global Reserves, Catalyst Tier & Active DTPFs
+![DTPF Control Center Overview tab showing reserve bars and active DTPFs](screenshots/gui_overview.png)
 
-### `[1] OVERVIEW` — Health, Fleet, Queue, Reserves & Activity
-![Overview Tab](screenshots/gui_overview.png)
-
-### `[2] FLEET` — Per-DTPF Cards, Global Policy & Priority Queue
-![Fleet Tab](screenshots/gui_fleet.png)
+### `[2] FLEET` — Per-DTPF Channels, Roles & Live Status
+![DTPF Control Center Fleet tab showing per-unit status and channel bindings](screenshots/gui_fleet.png)
 
 ---
 
-## 1. Install & Update
+## 1. How It Works (Core Concepts)
 
-Run on OpenOS from `/home` with an **Internet Card**:
+The controller keeps **Main AE2**, **On-Demand (`Color 1`)**, **Passive (`Color 2`)**, and **Non-Consumed (`Color 0`)** cleanly separated so AE2 autocrafts never fight passive production:
+
+- **On-Demand Subnet (`Color 1`, White) — Full-Bonus Patterns:**
+  AE2 patterns are encoded at the **full `50%` catalyst bonus** through a Main-to-`Color 1` Pattern `ME Dual Interface` with **`Blocking Mode: ON` + `Advanced Blocking Card`**. Whenever an AE2 craft pushes ingredients onto `Color 1`, OC detects it via an Adapter and pauses/yields passive queues so the DTPF runs the On-Demand craft immediately.
+- **Passive Subnet (`Color 2`, Orange) — Bi-Directional Bridge + OC Hatch Filters:**
+  An unfiltered **Bi-Directional (`Extract + Insert`)** `ME Storage Bus` + `ME Fluid Storage Bus` bridge Main AE2 (via an unfiltered Main `ME Dual Interface`) onto the Passive Subnet (`Color 2`), making all Main AE2 items/fluids visible without creating a storage feedback loop and providing a clean return path back into Main AE2 if anything is returned onto the Passive Subnet. Each DTPF's `Color 2` `Stocking Input Hatch (ME)` and `Stocking Input Bus (ME)` keep **`autoPull = OFF`**, and OC sets each unit's virtual filter slots (`setConfiguration`) so every DTPF pulls only its assigned passive recipe (or clears to empty when idle or yielded).
+- **OC Transposer — Startup / Ramp & Convergence Catalyst:**
+  Because AE2 patterns are encoded at full `50%` catalyst bonus while cold startups, tier upgrades, or Convergence runs need extra catalyst up front, an OC **Transposer** bridges Main AE2 -> `Color 1` Dual Interface to inject the exact catalyst delta automatically.
+- **Non-Consumed Aux (`Color 0`, Unpainted) & Shared Outputs:**
+  All non-consumed items (Programmed Circuits, Lenses, Hypervisors, Cores, Frames/Casings) sit in a shared `Color 0` `Stocking Input Bus (ME)`, while standard `ME Output Hatch/Bus` bricks dump all products straight back into Main AE2.
+
+---
+
+## 2. What Each DTPF Shares vs. Needs Dedicated
+
+Zero OC blocks or cables touch any DTPF. Every MFU (`Upgrade MF`) is bound to the front face with `Sneak + Right-Click` and placed in Adapters back in your OC room (wireless up to `512` blocks).
+
+| Channel / Subsystem | Color | Shared Across DTPFs? | Physical AE2 / GT Hardware | OC Hardware Per DTPF |
+| :--- | :--- | :--- | :--- | :--- |
+| **Outputs** | Default | **Yes (Wallshared)** | Shared `ME Output Hatch` + `ME Output Bus` -> Main AE2 | `0` |
+| **Non-Consumed Aux** | `Color 0` (Unpainted) | **Yes (Wallshared)** | Shared `Stocking Input Bus (ME)` holding NC catalysts/circuits/lenses | `0` |
+| **On-Demand (OD)** | `Color 1` (White) | **Yes (Wallshared) or 1:1** | `Stocking Input Hatch (ME)` + `Stocking Input Bus (ME)` on `Color 1` | `0` per DTPF (`1` Adapter on OD Dual IF, or `1` per OD mini-subnet) |
+| **Passive Channel** | `Color 2` (Orange) | **Dedicated per DTPF** | Dedicated `Stocking Input Hatch (ME)` + `Stocking Input Bus (ME)` (`autoPull = OFF`) | **`3` Wireless MFUs** (`1` Controller + `1` Hatch + `1` Bus) in `3` Adapters |
+
+> Prefer **0 passive MFUs** (or grouping many DTPFs onto shared passive AE2 channels)? Option B uses a Storage-Bus subnet bridge instead of per-DTPF passive MFUs — see [DESIGN.md](DESIGN.md) for the comparison.
+
+---
+
+## 3. Setup Visuals
+
+### Underside Wallsharing — Shared Outputs, Shared `Color 0` NC, `Color 1` OD & `Color 2` Passive
+![Wallshared DTPF underside hatches and buses showing shared outputs, NC, OD, and dedicated passive hatches](screenshots/dtpf_wallsharing_underside.png)
+
+### AE2 Bridge Room — `Color 0` NC, `Color 1` OD Pattern IF + Transposer & Passive / Stock Dual IF
+![AE2 subnet bridge showing Pattern IF with blocking card, OD Dual IF, OC Transposer, and Passive / Stock Dual IF](screenshots/ae2_subnets_and_bridge.png)
+
+### OC Wireless MFU Room — `3` MFU Adapters per DTPF + Passive / OD Dual-IF Adapters
+![OC adapter room showing stacks of 3 MFU adapters per DTPF and cable back to server rack](screenshots/oc_wireless_mfu_room.png)
+
+---
+
+## 4. Install & First Boot
+
+Requires **Lua 5.3** (`Sneak + Right-Click` a **Tier 3 CPU / APU Tier 3**), **`2x Memory (Tier 3.5)`**, **`HDD Tier 2 (2 MB)`**, and an **Internet Card** (or `--local` for offline/floppy installs).
 
 ```sh
 wget -f https://raw.githubusercontent.com/Jimbo-Coder/gtnh-dtpf-control/main/install.lua && install
 ```
 
-- **Safe update (settings untouched):** `dtpf --update` stages files as `.tmp`, validates syntax with `load()`, and aborts cleanly on error.
-- **Survives folder wipes:** Settings save to `/home/dtpf/config.cfg` and auto-mirror to `/home/config.dtpf.bak` (restored automatically on reinstall).
-- **No Internet Card:** Copy the repo folder to OpenOS (e.g. `/home/dtpf_src`) and run `/home/dtpf_src/install.lua --local /home/dtpf_src`.
+1. Run `dtpf` (starts **PAUSED** on fresh config so nothing runs unconfigured).
+2. Open **`Tab 4 (SETUP)`** and click **`[ 1:1 PAIR DTPFS ]`** (and **`[ 1:1 PAIR OD ]`** if using separate OD subnets) — OC auto-pairs Controllers, Hatches, and Buses by 3D coordinates.
+3. Verify readouts via `dtpf --check`, then click **`[ARM / RESUME]`** to begin autonomous scheduling.
+
+Useful CLI commands:
+- `dtpf` — Launch 160x50 Control Center GUI
+- `dtpf --check` — Read-only hardware, AE2 stock, and scheduler dry-run check
+- `dtpf --lock` — Force `autoPull = OFF` on all passive `Stocking Input Hatch/Bus (ME)`
+- `dtpf --worker` — Run headless Relay Mode worker daemon on additional servers
+- `dtpf --update` — Pull updates from GitHub while backing up and preserving `/home/dtpf/config.cfg`
 
 ---
 
-## 2. OC Requirements & DTPF Scaling
+## 5. OC Scaling & DTPF Limits
 
-**Minimum OC parts:** **Tier 3 CPU (or APU) in Lua 5.3** (`Sneak + Right-Click` in hand), **`2x` Memory Tier 3.5**, **HDD Tier 2 (`2 MB`) + OpenOS**, **Tier 3 GPU + Screen (`160x50`)**, optional **Internet Card**.
+Because each DTPF uses `3` components in 1:1 MFU mode (Controller + Passive Hatch + Passive Bus) alongside shared adapters and system components:
 
-| OC Setup | Component Limit | Max DTPFs (`3` MFUs/DTPF) | Notes |
+| OC Hardware Tier | Component Budget | Practical DTPF Limit | How It Scales |
 | :--- | :--- | :--- | :--- |
-| **Tier 3 Computer Case** | `16` | **Up to `2` DTPFs** | Starter case (`6` DTPF MFUs + display/HDD/AE2). |
-| **1x Tier 3 Server** *(in a Rack)* | `64` *(w/ 3x Bus T3)* | **Up to `~18` DTPFs** | Single-server sweet spot (`54` DTPF MFUs + AE2/screen). |
-| **1x Full Server Rack** *(1 Master + 3 `--worker` Servers)* | `4 x 64 = 256` | **Up to `~78` DTPFs from 1 Rack** | Keep each Server's Adapter I/O face separate; link only their Network Card lines via **Rack Relay Mode** (`+20` DTPFs per headless `--worker`). |
-| **Multiple Server Racks** | `+256` / Rack | **`80–150+` DTPFs** | Already supported: bridge Rack Relay faces over an OC Cable (see [`DESIGN.md`](DESIGN.md)). |
+| **Tier 3 Case** | `16` components | **Up to `2` DTPFs** | Single computer case setup |
+| **1x Server (Comp. Bus T3)** | `64` components | **Up to `~18` DTPFs** | Single server in a Server Rack |
+| **1x Full Server Rack** | `4x 64` (Relay Mode) | **Up to `~78` DTPFs** | `1` GUI coordinator + `3` headless `dtpf --worker` servers inside one rack (enable **Relay Mode** in the Rack GUI) |
+| **Multi-Rack (OC Cable)** | Unlimited racks (`port 4104`) | **`80–150+` DTPFs** | Chain extra Server Racks running headless `dtpf --worker` servers over normal OC cables; the coordinator discovers them automatically |
 
 ---
 
-## 3. Simple Physical Setup
+## 6. Convergence Control
 
-Everything is auto-discovered by component type and 3D coordinates — **no manual UUID config needed**.
-
-1. **`Color 2` (Orange) — Passive (`1` Stocking Hatch + `1` Stocking Bus per DTPF, never wallshared):**
-   Wire straight to your **Main AE2 net** (`autoPull = OFF` — run `dtpf --lock` before connecting). Bind **`3` Wireless MFUs** per DTPF (`Controller` + `Color 2 Hatch` + `Color 2 Bus`) and put them in Adapters back at your OC Rack (`0` OC blocks touching your DTPFs).
-2. **`Color 1` (White) — On-Demand AE2 Patterns *(wallsharable)*:**
-   Main AE2 Pattern Dual Interface (**`Blocking Mode: ON` + `Advanced Blocking Card`**) pushing into an isolated **Color 1** subnet feeding `Color 1` Stocking Hatch + Bus on the DTPFs. Whenever an AE2 craft enters `Color 1`, OC automatically pauses passives so your pattern runs next.
-3. **`Color 0` (Unpainted) — Shared Non-Consumed Items *(wallsharable)*:**
-   Small unpainted subnet holding shared Programmed Circuits, Lenses, Hypervisor Matrices, Hi-Computation Station T5, and Bending Cores.
-4. **AE2 Readers (+ Optional Transposer Catalyst Bridge):**
-   Put `1` Adapter/MFU on an unfiltered **Main Dual IF** (reads stocks) and `1` on the **Color 1 OD Dual IF** (detects crafts). Optionally sandwich `1` **OC Transposer** between them so OC tops up catalysts automatically for patterns without catalyst fluids.
-
-![AE2 Subnets and Transposer Bridge](screenshots/ae2_subnets_and_bridge.png)
-![DTPF Wallsharing Layout](screenshots/dtpf_wallsharing_underside.png)
-![Wireless MFU Adapter Room](screenshots/oc_wireless_mfu_room.png)
+Full automated Tier 2 **Catalyst Convergence** control (`isConvergence`, target catalyst / convergence tier management) uses [`DriverDTPF` (GTNewHorizons/OpenComputers#228)](https://github.com/GTNewHorizons/OpenComputers/pull/228). If that PR is not yet included in your GTNH build, the controller still installs cleanly and falls back gracefully to standard Tier 0/1 scheduling with read-only convergence visibility where supported.
 
 ---
 
-## 4. First Boot
+## 7. Logs, Tooling & Docs
 
-```sh
-dtpf --lock    # Locks autoPull = OFF on passive Stocking Hatches/Buses
-dtpf --check   # Read-only Raw Inputs -> Decisions -> Outputs diagnostic
-dtpf           # Launch 160x50 GUI (starts safely in PAUSED mode)
-```
+![DTPF Control Center live log modal showing recent scheduling events](screenshots/gui_log_modal.png)
 
-Verify **`[4] SETUP`** shows `[OK]`, set stock targets in **`[3] RECIPES`** / **`[2] FLEET`**, then click **`[○ PAUSED: SAFE]` -> `[● ARMED: AUTO]`**.
-
----
-
-## 5. Convergence Control (Stock GTNH 2.9 vs. OC PR #228)
-
-- **Stock GTNH 2.9 (`gt_machine`):** Works out of the box — full passive scheduling, On-Demand priority, Work control, Coil/Warmup tracking, and live Convergence status reading (toggle Convergence manually inside the DTPF GUI).
-- **Automated Convergence & Catalyst Tier switching (`Auto @50%`, `Always`, `OFF`):** Supported automatically when using an OpenComputers build with **[GTNewHorizons/OpenComputers#228](https://github.com/GTNewHorizons/OpenComputers/pull/228)** (`DriverDTPF`).
-
----
-
-## 6. UI, Logs & Tooling
-
-- **4 Tabs (`[1-4]`):** **`[1] OVERVIEW`** · **`[2] FLEET`** · **`[3] RECIPES`** (27 deduplicated families) · **`[4] SETUP`** (`[1:1 PAIR DTPFS]`, `[1:1 PAIR OD]`, Reserve Floors).
-- **`[Log]` (`[L]`):** Structured **`[IN ]` / `[DEC]` / `[OUT]` / `[WRN]`** Activity Log + live **`Raw I/O Snapshot`** inspector with **`[Quiet]` / `[Normal]` / `[Raw]`** verbosity (`[V]`).
-
-![Activity Log Modal](screenshots/gui_log_modal.png)
-
-| Resource | Purpose |
-| :--- | :--- |
-| [`DESIGN.md`](DESIGN.md) | Multi-server / Multi-Rack wiring, Storage-Bus subnet alternative, full UI/hotkey & scheduler docs. |
-| [`lib/recipes_db.lua`](lib/recipes_db.lua) / [`tools/extract_dtpf_recipes.py`](tools/extract_dtpf_recipes.py) | Compiled manifest + bytecode extractor for all `78` GTNH 2.9 DTPF recipes across `27` families. |
-| [`tools/test_offline.py`](tools/test_offline.py) | `19`-suite offline Lua 5.3 + `JNLua` regression test, width-1 Unifont glyph audit & memory check. |
-| [`LICENSE`](LICENSE) | MIT License. |
+- **[DESIGN.md](DESIGN.md)** — Full hardware tables, Option A vs. Option B bridge notes, scheduler math, catalyst policy, and multi-rack protocol details.
+- **`tools/test_offline.py`** — Offline Lua 5.3 + JNLua heap & UI test suite.
+- **`tools/extract_dtpf_recipes.py`** — GTNH recipe extractor feeding `lib/recipes_db.lua`.
+- **License:** [MIT](LICENSE)
