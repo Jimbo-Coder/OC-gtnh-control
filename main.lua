@@ -51,6 +51,10 @@ local function resolveScriptDir()
     end
     local pwd = (os and os.getenv and os.getenv("PWD")) or ""
     if pwd ~= "" then
+        local pwdRepo = filesystem.concat(pwd, "gtnh-dtpf-control")
+        if filesystem.exists(filesystem.concat(pwdRepo, "lib/hardware.lua")) then
+            return pwdRepo
+        end
         local pwdSub = filesystem.concat(pwd, "dtpf")
         if filesystem.exists(filesystem.concat(pwdSub, "lib/hardware.lua")) then
             return pwdSub

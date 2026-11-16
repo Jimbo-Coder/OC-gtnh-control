@@ -914,9 +914,10 @@ function UI:renderHeader()
     end
     self:drawText(63, 2, padOrTrunc(leftMsg, math.max(12, odX - 65)), armed and COLORS.green or COLORS.yellow, COLORS.headerBg)
 
-    -- Row 3 (Full Width): Alert / Paused Safety Notice OR Live Catalyst & DTR Reserve Bar
+    -- Row 3 (Full Width): Alert / Paused Safety Notice OR Live Catalyst & DTR Reserve Bar (omitted on Overview)
     local floorsBtnW = 9
     local epWarnings = (self.discoveredEndpoints and self.discoveredEndpoints.warnings) or {}
+    local showHeaderReserves = (#conflictNames > 0) or (#epWarnings > 0) or (not armed) or (self.tab ~= TAB_OVERVIEW)
     if #conflictNames > 0 then
         self:fillRect(1, 3, self.w, 1, " ", COLORS.darkRed)
         local msg = "! COVER OVERRIDE on " .. table.concat(conflictNames, ", ")
@@ -929,6 +930,9 @@ function UI:renderHeader()
         self:fillRect(1, 3, self.w, 1, " ", COLORS.amberBg)
         local msg = "PAUSED (SAFE PREVIEW): Live telemetry with ZERO hardware writes. Click [○ PAUSED] above to arm."
         self:drawText(2, 3, padOrTrunc(msg, self.w - floorsBtnW - 4), COLORS.yellow, COLORS.amberBg)
+    elseif self.tab == TAB_OVERVIEW then
+        self:fillRect(1, 3, self.w, 1, " ", COLORS.bg)
+        self:drawText(1, 3, string.rep("─", self.w), COLORS.border, COLORS.bg)
     else
         self:fillRect(1, 3, self.w, 1, " ", COLORS.panelBg)
         self:drawText(2, 3, "◈ RESERVES", COLORS.accent, COLORS.panelBg)
@@ -976,9 +980,11 @@ function UI:renderHeader()
         end
     end
 
-    self:drawButton(self.w - floorsBtnW - 1, 3, "[Floors…]", COLORS.cyan, COLORS.btnBg, function()
-        self.tab = TAB_SETUP
-    end)
+    if showHeaderReserves then
+        self:drawButton(self.w - floorsBtnW - 1, 3, "[Floors…]", COLORS.cyan, COLORS.btnBg, function()
+            self.tab = TAB_SETUP
+        end)
+    end
 end
 
 local function findModeIndex(list, val, defaultIdx)
@@ -2464,7 +2470,7 @@ local function gatherOverviewStats(ui)
     end
     if nOnline == 0 then minD, maxD = 0, 0 end
 
-    local nEnabled, nFull, nRunRec, nLoopRec, nQueuedRec, nBlockedRec = 0, 0, 0, 0, 0, 0
+    local nEnabled, nTargetRec, nFull, nRunRec, nLoopRec, nQueuedRec, nBlockedRec = 0, 0, 0, 0, 0, 0, 0
     local fullNames = {}
     for i = 1, #RecipesDB.FAMILIES do
         local fam = RecipesDB.FAMILIES[i]
@@ -2472,6 +2478,9 @@ local function gatherOverviewStats(ui)
         local rSt = ui.state and ui.state.recipeStatus and ui.state.recipeStatus[fam.id]
         if rc and rc.enabled then
             nEnabled = nEnabled + 1
+            if not rc.forever then
+                nTargetRec = nTargetRec + 1
+            end
             if rSt then
                 if #(rSt.activeDtpfs or {}) > 0 then
                     if rSt.isForever then nLoopRec = nLoopRec + 1 else nRunRec = nRunRec + 1 end
@@ -2491,10 +2500,17 @@ local function gatherOverviewStats(ui)
         nTotal = nTotal, nOnline = nOnline, nActive = nActive,
         nRun = nRun, nLoop = nLoop, nOd = nOd, nIdle = nIdle,
         nIssues = nIssues, convOn = convOn, minD = minD, maxD = maxD,
-        nEnabled = nEnabled, nFull = nFull, nRunRec = nRunRec,
+        nEnabled = nEnabled, nTargetRec = nTargetRec, nFull = nFull, nRunRec = nRunRec,
         nLoopRec = nLoopRec, nQueuedRec = nQueuedRec, nBlockedRec = nBlockedRec,
         fullNames = fullNames,
     }
+end
+
+local function formatCleanBridgeStatus(raw)
+    local s = tostring(raw or "Idle")
+    if s == "Idle (0 calls)" then return "Idle" end
+    if s == "Ready (0 overhead)" then return "Ready" end
+    return s
 end
 
 function UI:renderOverviewKpis(ov)
@@ -2502,16 +2518,6 @@ function UI:renderOverviewKpis(ov)
     local bns = (self.state and self.state.bottlenecks) or {}
     local meta = (self.state and self.state.lastPollMeta) or {}
     local upStr = formatLogUptime(meta.uptime or (self.state and self.state._lastPollUptime))
-    local lvlObj = LOG_LEVELS[findModeIndex(LOG_LEVELS, self.cfg.logLevel or "normal", 2)]
-
-    self:drawText(2, 4, "◈ SYSTEM OVERVIEW", COLORS.accent, COLORS.bg)
-    local metaTxt = string.format("Uptime %s · Step #%d · Poll %.0fs", upStr, (self.state and self.state.stepCount) or 0, tonumber(self.cfg.pollInterval) or 2)
-    local lvlBtnTxt = "[Log:" .. lvlObj.label .. "]"
-    local lvlX = self.w - unicode.wlen(lvlBtnTxt)
-    self:drawButton(lvlX, 4, lvlBtnTxt, COLORS.cyan, COLORS.btnBg, function(step)
-        cycleLogLevel(self, step)
-    end)
-    self:drawText(math.max(22, lvlX - unicode.wlen(metaTxt) - 2), 4, metaTxt, COLORS.muted, COLORS.bg)
 
     -- Card 1: System Health (x = 2..40, w = 39) -> click opens [Log]
     local hBorder = (#bns > 0 or not armed) and COLORS.yellow or COLORS.green
@@ -2521,16 +2527,16 @@ function UI:renderOverviewKpis(ov)
         self.logModalScroll = 0
     end)
     self:drawText(4, 6, "SYSTEM HEALTH", COLORS.muted, COLORS.panelBg)
-    self:drawText(33, 6, "[Log →]", COLORS.cyan, COLORS.panelBg)
+    self:drawText(math.max(20, 40 - unicode.wlen(upStr) - 1), 6, upStr, COLORS.muted, COLORS.panelBg)
     if not armed then
         self:drawText(4, 7, "○ PAUSED (SAFE PREVIEW)", COLORS.yellow, COLORS.panelBg)
-        self:drawText(4, 8, padOrTrunc((#bns > 0) and ("! " .. tostring(bns[1].name) .. ": " .. tostring(bns[1].reason)) or "Read-only; 0 hardware writes", 35), COLORS.muted, COLORS.panelBg)
+        self:drawText(4, 8, padOrTrunc((#bns > 0) and ("! " .. tostring(bns[1].name) .. ": " .. tostring(bns[1].reason)) or "Read-only monitor; 0 writes", 35), COLORS.muted, COLORS.panelBg)
     elseif #bns > 0 then
-        self:drawText(4, 7, string.format("! %d ISSUE(S) FLAGGED", #bns), COLORS.yellow, COLORS.panelBg)
+        self:drawText(4, 7, string.format("! %d ALERT(S)", #bns), COLORS.yellow, COLORS.panelBg)
         self:drawText(4, 8, padOrTrunc(tostring(bns[1].name or "?") .. ": " .. tostring(bns[1].reason or "Blocked"), 35), COLORS.fg, COLORS.panelBg)
     else
-        self:drawText(4, 7, "✓ HEALTHY · 0 ISSUES", COLORS.green, COLORS.panelBg)
-        self:drawText(4, 8, "All enabled recipes & DTPFs OK", COLORS.muted, COLORS.panelBg)
+        self:drawText(4, 7, "✓ ALL SYSTEMS HEALTHY", COLORS.green, COLORS.panelBg)
+        self:drawText(4, 8, "All DTPFs & stock targets nominal", COLORS.muted, COLORS.panelBg)
     end
 
     -- Card 2: DTPF Fleet (x = 42..80, w = 39) -> click opens Fleet tab
@@ -2538,23 +2544,31 @@ function UI:renderOverviewKpis(ov)
     self:drawFrame(42, 5, 39, 5, fBorder, COLORS.panelBg, "round")
     self:addHitbox(42, 5, 80, 9, function() self.tab = TAB_FLEET end)
     self:drawText(44, 6, "DTPF FLEET", COLORS.muted, COLORS.panelBg)
-    local discTxt = (ov.minD == ov.maxD) and string.format("Disc:%d%%", ov.maxD) or string.format("Disc:%d-%d%%", ov.minD, ov.maxD)
-    self:drawText(57, 6, padOrTrunc(string.format("%s · ⚡4x:%d/%d", discTxt, ov.convOn, ov.nOnline), 22), COLORS.cyan, COLORS.panelBg)
+    self:drawText(66, 6, "[2: Fleet →]", COLORS.cyan, COLORS.panelBg)
+    local discTxt = (ov.minD == ov.maxD) and string.format("Disc %d%%", ov.maxD) or string.format("Disc %d-%d%%", ov.minD, ov.maxD)
     local fleetTop = (ov.nIssues > 0)
-        and string.format("%d/%d Online · ! %d Issue(s)", ov.nOnline, ov.nTotal, ov.nIssues)
-        or string.format("%d/%d Online · %d/%d Active", ov.nOnline, ov.nTotal, ov.nActive, ov.nTotal)
+        and string.format("%d/%d Active · ! %d Issue(s)", ov.nActive, ov.nTotal, ov.nIssues)
+        or string.format("%d/%d Active · %s", ov.nActive, ov.nTotal, discTxt)
     self:drawText(44, 7, padOrTrunc(fleetTop, 35), (ov.nIssues > 0 or ov.nOnline < ov.nTotal) and COLORS.yellow or COLORS.fg, COLORS.panelBg)
-    self:drawText(44, 8, padOrTrunc(string.format("Run:%d  Loop:%d  OD:%d  Idle:%d", ov.nRun, ov.nLoop, ov.nOd, ov.nIdle), 35), COLORS.muted, COLORS.panelBg)
+    local fleetSub = (ov.nOd > 0)
+        and string.format("Queue:%d · Loop:%d · OD:%d · ⚡4x:%d", ov.nRun, ov.nLoop, ov.nOd, ov.convOn)
+        or string.format("Queue:%d · Loop:%d · ⚡4x:%d/%d", ov.nRun, ov.nLoop, ov.convOn, ov.nOnline)
+    self:drawText(44, 8, padOrTrunc(fleetSub, 35), COLORS.muted, COLORS.panelBg)
 
-    -- Card 3: Recipe Queue (x = 82..120, w = 39) -> click opens Recipes tab
+    -- Card 3: Stock Targets (x = 82..120, w = 39) -> click opens Recipes tab
     local qBorder = (ov.nEnabled == 0 or ov.nBlockedRec > 0) and COLORS.yellow or COLORS.accent
     self:drawFrame(82, 5, 39, 5, qBorder, COLORS.panelBg, "round")
     self:addHitbox(82, 5, 120, 9, function() self.tab = TAB_RECIPES end)
-    self:drawText(84, 6, "RECIPE QUEUE", COLORS.muted, COLORS.panelBg)
-    self:drawText(109, 6, "[Recipes →]", COLORS.cyan, COLORS.panelBg)
-    self:drawText(84, 7, padOrTrunc(string.format("%d / %d Enabled · %s", ov.nEnabled, #RecipesDB.FAMILIES, self.cfg.allowParallelSameRecipe and "Parallel" or "Distinct"), 35), COLORS.fg, COLORS.panelBg)
-    self:drawText(84, 8, padOrTrunc(string.format("✓%d Full · ▶%d Run · ↻%d Loop · !%d Blk", ov.nFull, ov.nRunRec, ov.nLoopRec, ov.nBlockedRec), 35),
-        (ov.nBlockedRec > 0) and COLORS.yellow or COLORS.green, COLORS.panelBg)
+    self:drawText(84, 6, "STOCK TARGETS", COLORS.muted, COLORS.panelBg)
+    self:drawText(104, 6, "[3: Recipes →]", COLORS.cyan, COLORS.panelBg)
+    local targetRow = ((ov.nTargetRec or 0) > 0)
+        and string.format("%d / %d Targets Full", ov.nFull, ov.nTargetRec)
+        or string.format("%d Active Loop(s)", ov.nLoopRec)
+    local targetCol = ((ov.nTargetRec or 0) > 0 and ov.nFull == ov.nTargetRec) and COLORS.green or COLORS.fg
+    self:drawText(84, 7, padOrTrunc(targetRow, 35), targetCol, COLORS.panelBg)
+    self:drawText(84, 8, padOrTrunc(string.format("▶%d Crafting · ↻%d Loop%s · !%d Blocked",
+        ov.nRunRec, ov.nLoopRec, (ov.nLoopRec == 1) and "" or "s", ov.nBlockedRec), 35),
+        (ov.nBlockedRec > 0) and COLORS.yellow or COLORS.muted, COLORS.panelBg)
 
     -- Card 4: On-Demand & Bridge (x = 122..159, w = 38) -> click opens Setup tab
     local od = (self.state and self.state.onDemand) or {}
@@ -2591,134 +2605,19 @@ function UI:renderOverviewKpis(ov)
     else
         self:drawText(124, 7, "IDLE (Passive Queue Active)", COLORS.green, COLORS.panelBg)
     end
-    self:drawText(124, 8, padOrTrunc("Bridge: " .. tostring((self.state and self.state.odBridgeStatus) or "Idle"), 34), COLORS.muted, COLORS.panelBg)
+    self:drawText(124, 8, padOrTrunc("Bridge: " .. formatCleanBridgeStatus(self.state and self.state.odBridgeStatus), 34), COLORS.muted, COLORS.panelBg)
 end
 
-function UI:renderOverviewFleetCard()
-    self:drawFrame(2, 11, 79, 24, COLORS.border, COLORS.panelBg, "round")
-    self:drawText(4, 11, " ◈ DTPF FLEET AT A GLANCE ", COLORS.accent, COLORS.panelBg)
-    self:drawButton(65, 11, "[Fleet Grid →]", COLORS.cyan, COLORS.btnBg, function()
-        self.tab = TAB_FLEET
-    end)
-
-    self:fillRect(3, 12, 77, 1, " ", COLORS.headerBg)
-    self:drawText(4, 12, "ST", COLORS.muted, COLORS.headerBg)
-    self:drawText(7, 12, "MACHINE", COLORS.muted, COLORS.headerBg)
-    self:drawText(20, 12, "MODE", COLORS.muted, COLORS.headerBg)
-    self:drawText(28, 12, "RECIPE / STATE", COLORS.muted, COLORS.headerBg)
-    self:drawText(51, 12, "PROGRESS", COLORS.muted, COLORS.headerBg)
-    self:drawText(67, 12, "DISC", COLORS.muted, COLORS.headerBg)
-    self:drawText(73, 12, "CONV", COLORS.muted, COLORS.headerBg)
-
-    local nD = #self.cfg.dtpfs
-    if nD == 0 then
-        self:drawText(4, 14, "No DTPFs discovered yet - check [4] SETUP.", COLORS.yellow, COLORS.panelBg)
-        return
-    end
-
-    local twoLine = (nD <= 10)
-    local maxShow = twoLine and 10 or 21
-    local maxScroll = math.max(0, nD - maxShow)
-    self.overviewDtpfScroll = math.max(0, math.min(maxScroll, self.overviewDtpfScroll or 0))
-    local showN = math.min(maxShow, nD - self.overviewDtpfScroll)
-
-    for k = 1, showN do
-        local idx = k + self.overviewDtpfScroll
-        local d = self.cfg.dtpfs[idx]
-        local st = (self.state and self.state.dtpfStatus and self.state.dtpfStatus[idx]) or {}
-        local ry = 13 + (k - 1) * (twoLine and 2 or 1)
-        local rBg = (k % 2 == 0) and COLORS.rowAltBg or COLORS.panelBg
-        self:fillRect(3, ry, 77, twoLine and 2 or 1, " ", rBg)
-        self:addHitbox(3, ry, 79, ry + (twoLine and 1 or 0), function()
-            self.selectedDtpf = idx
-            self:ensureDtpfVisible(idx)
-            self.tab = TAB_FLEET
-        end)
-
-        local stCh, modeStr, mCol = "○", "IDLE", COLORS.yellow
-        if not st.online then
-            stCh, modeStr, mCol = "✗", "OFFLINE", COLORS.red
-        elseif d.enabled == false then
-            stCh, modeStr, mCol = "○", "OFF", COLORS.red
-        elseif st.coverConflict then
-            stCh, modeStr, mCol = "!", "COVER!", COLORS.yellow
-        elseif st.passiveStalled then
-            stCh, modeStr, mCol = "!", "STALL!", COLORS.yellow
-        elseif st.jobMode == "ON-DEMAND" then
-            stCh, modeStr, mCol = "⚡", "OD", COLORS.purple
-        elseif st.jobMode == "FALLBACK" then
-            stCh, modeStr, mCol = "↻", "LOOP", COLORS.cyan
-        elseif st.jobMode == "PASSIVE" then
-            stCh, modeStr, mCol = "▶", "PASSIVE", COLORS.green
-        end
-
-        local prog, maxProg = getEffectiveProgress(self, st)
-        local pct = (maxProg > 0) and math.min(100, math.floor((prog / maxProg) * 100 + 0.5)) or 0
-        local ratio = (maxProg > 0) and math.max(0, math.min(1, prog / maxProg)) or 0
-        local jobClean = tostring(st.jobLabel or "Idle"):gsub("^[*◆▶]%s*", "")
-        local barStr = (maxProg > 0) and (buildProgressBar(ratio, 8) .. string.format(" %3d%%", pct)) or "[░░░░░░░░]  --%"
-        local discStr = st.online and string.format("%3.0f%%", tonumber(st.discountPct) or 0) or "  -"
-        local convTag, convCol = "2x", COLORS.muted
-        if st.supportsConvControl == false then
-            convTag = st.convergenceEnabled and "Man⚡" or "Man"
-            convCol = st.convergenceEnabled and COLORS.purple or COLORS.yellow
-        elseif st.convergenceEnabled then
-            convTag, convCol = "⚡4x", COLORS.purple
-        end
-
-        self:drawText(4, ry, stCh, mCol, rBg)
-        self:drawText(7, ry, padOrTrunc(d.name or ("DTPF #" .. idx), 12), COLORS.fg, rBg)
-        self:drawText(20, ry, padOrTrunc(modeStr, 7), mCol, rBg)
-        self:drawText(28, ry, padOrTrunc(compactRecipeName(jobClean, 22), 22), COLORS.fg, rBg)
-        self:drawText(51, ry, padOrTrunc(barStr, 15), st.active and COLORS.cyan or COLORS.muted, rBg)
-        self:drawText(67, ry, discStr, ((st.discountPct or 0) >= 49.9) and COLORS.green or COLORS.yellow, rBg)
-        self:drawText(73, ry, convTag, convCol, rBg)
-
-        if twoLine then
-            local _, _, coilName = getCoilTierInfo(st.coilHeat)
-            local coilLbl = st.coilHeat and (self:isCoilNameMode() and coilName or (tostring(st.coilHeat) .. "K")) or "?"
-            local warmEta = (st.active and (st.discountPct or 0) < 49.9 and st.warmupEtaSec)
-                and (" | ~" .. (UI.formatDurationShort(st.warmupEtaSec) or "") .. " to 50%") or ""
-            local catCode = CATALYST_SHORT[(st.catalystTier or d.catOverride or self.cfg.defaultCatalystTier or 4)] or "DTEC"
-            local subTxt
-            if st.coverConflict then
-                subTxt = "! South Machine Controller Cover overriding Work toggle"
-            elseif st.passiveStalled then
-                subTxt = "! Armed >=4 polls at 0% - check Circuit / NC Aux / Hatch"
-            else
-                subTxt = string.format("Coil:%s | Ch:%s | Cat:%s%s", coilLbl, tostring(d.channelId or "ch1"), catCode, warmEta)
-            end
-            self:drawText(7, ry + 1, padOrTrunc(subTxt, 71),
-                (st.coverConflict or st.passiveStalled) and COLORS.yellow or COLORS.muted, rBg)
-        end
-    end
-
-    if nD > maxShow then
-        self:drawButton(4, 34, "[▲]", (self.overviewDtpfScroll > 0) and COLORS.fg or COLORS.muted, COLORS.btnBg, function()
-            self.overviewDtpfScroll = math.max(0, self.overviewDtpfScroll - 3)
-        end)
-        self:drawButton(8, 34, "[▼]", (self.overviewDtpfScroll < maxScroll) and COLORS.fg or COLORS.muted, COLORS.btnBg, function()
-            self.overviewDtpfScroll = math.min(maxScroll, self.overviewDtpfScroll + 3)
-        end)
-        self:drawText(12, 34, string.format(" %d-%d/%d ", self.overviewDtpfScroll + 1, self.overviewDtpfScroll + showN, nD), COLORS.muted, COLORS.panelBg)
-    end
-end
-
-function UI:renderOverviewQueueCard(ov)
-    self:drawFrame(82, 11, 78, 24, COLORS.border, COLORS.panelBg, "round")
-    self:drawText(84, 11, " ◈ ACTIVE PRODUCTION & ALERTS ", COLORS.accent, COLORS.panelBg)
-    self:drawButton(143, 11, "[Recipes →]", COLORS.cyan, COLORS.btnBg, function()
-        self.tab = TAB_RECIPES
-    end)
-
-    self:fillRect(83, 12, 76, 1, " ", COLORS.headerBg)
-    self:drawText(84, 12, "ST", COLORS.muted, COLORS.headerBg)
-    self:drawText(87, 12, "RECIPE", COLORS.muted, COLORS.headerBg)
-    self:drawText(112, 12, "DTPFS", COLORS.muted, COLORS.headerBg)
-    self:drawText(120, 12, "STOCK / TARGET", COLORS.muted, COLORS.headerBg)
-    self:drawText(140, 12, "PROGRESS / NOTE", COLORS.muted, COLORS.headerBg)
-
+local function gatherProductionOverviewItems(self)
     local rows = {}
+    local bns = (self.state and self.state.bottlenecks) or {}
+    for bi = 1, #bns do
+        local b = bns[bi]
+        if b and not b.familyId then
+            rows[#rows + 1] = { group = 0, prio = bi, bottleneck = b }
+        end
+    end
+
     for i = 1, #RecipesDB.FAMILIES do
         local fam = RecipesDB.FAMILIES[i]
         local rc = self.cfg.recipes[fam.id]
@@ -2738,101 +2637,142 @@ function UI:renderOverviewQueueCard(ov)
         if a.group ~= b.group then return a.group < b.group end
         return a.prio < b.prio
     end)
+    return rows
+end
 
-    local maxRows = 20
-    local maxScroll = math.max(0, #rows - maxRows)
-    self.overviewRecScroll = math.max(0, math.min(maxScroll, self.overviewRecScroll or 0))
-    if #rows == 0 then
-        self:drawText(84, 14, (ov.nEnabled > 0) and "✓ All enabled targets are satisfied!" or "No passive recipes enabled.",
+function UI:renderOverviewProductionPanel(ov)
+    -- Left Panel: Spacious Recipe-Aggregated Production & Alerts (x = 2..79, y = 11..48)
+    self:drawFrame(2, 11, 78, 38, COLORS.border, COLORS.panelBg, "round")
+    self:drawText(4, 11, " ◈ ACTIVE PRODUCTION & ALERTS ", COLORS.accent, COLORS.panelBg)
+    self:drawButton(65, 11, "[Recipes →]", COLORS.cyan, COLORS.btnBg, function()
+        self.tab = TAB_RECIPES
+    end)
+
+    local rows = gatherProductionOverviewItems(self)
+    local total = #rows
+    if total == 0 then
+        self:drawText(5, 14, (ov.nEnabled > 0) and "✓ All enabled targets are satisfied!" or "No passive recipes enabled.",
             (ov.nEnabled > 0) and COLORS.green or COLORS.yellow, COLORS.panelBg)
     else
-        for r = 1, math.min(maxRows, #rows - self.overviewRecScroll) do
-            local item = rows[r + self.overviewRecScroll]
-            local fam, rc, st = item.fam, item.rc, item.st
-            local ry = 12 + r
-            local rBg = (r % 2 == 0) and COLORS.rowAltBg or COLORS.panelBg
-            self:fillRect(83, ry, 76, 1, " ", rBg)
-            self:addHitbox(83, ry, 158, ry, function()
-                self.selectedFamilyId = fam.id
-                self.tab = TAB_RECIPES
-            end)
+        local stride = (total <= 8) and 3 or 2
+        local maxVis = math.max(1, math.floor(32 / stride))
+        local maxScroll = math.max(0, total - maxVis)
+        self.overviewRecScroll = math.max(0, math.min(maxScroll, self.overviewRecScroll or 0))
+        local showN = math.min(maxVis, total - self.overviewRecScroll)
 
-            local isFl = st.trackedOutput and (st.trackedOutput.isFluid or st.trackedOutput.type == "fluid")
-            local stkTxt = st.isForever
-                and string.format("%s / 24/7", fmtCompactNum(st.currentStock or 0, isFl))
-                or string.format("%s / %s", fmtCompactNum(st.currentStock or 0, isFl), fmtCompactNum(rc.target or 1, isFl))
+        for k = 1, showN do
+            local item = rows[k + self.overviewRecScroll]
+            local by = 13 + (k - 1) * stride
+            local titleLeft, titleCol, rightTag, rightCol, subTxt, subCol
 
-            local ico, col, unitTxt, noteTxt
-            if item.group == 1 then
-                ico, col, unitTxt = "!", COLORS.yellow, "Blk"
-                noteTxt = compactStatusText(localizeCoilStatus(self, st.stateStr or "Blocked"), 18)
-            elseif item.group == 2 then
-                ico, col = "▶", COLORS.green
-                unitTxt = formatDtpfIdList(st.activeDtpfs, 3)
-                local etaStr = (st.etaSec and st.etaSec > 0) and (" ~" .. (UI.formatDurationShort(st.etaSec) or "")) or ""
-                noteTxt = buildProgressBar(st.ratio or 0, 6) .. string.format(" %2.0f%%%s", math.min(99, (st.ratio or 0) * 100), etaStr)
-            elseif item.group == 3 then
-                ico, col = "↻", COLORS.cyan
-                unitTxt = formatDtpfIdList(st.activeDtpfs, 3)
-                local rate = st.ratePerMin
-                noteTxt = (rate and math.abs(rate) >= 1)
-                    and string.format("%s%s/m", (rate >= 0) and "+" or "", fmtCompactNum(rate, isFl))
-                    or "24/7 Active"
+            if item.group == 0 then
+                local b = item.bottleneck
+                titleLeft = "! " .. tostring(b.name or "System Alert")
+                titleCol = COLORS.yellow
+                rightTag = "ALERT"
+                rightCol = COLORS.yellow
+                subTxt = tostring(b.reason or "Check [4] SETUP")
+                subCol = COLORS.yellow
+                self:addHitbox(4, by, 77, by + 1, function() self.tab = TAB_SETUP end)
             else
-                ico, col, unitTxt = "…", COLORS.accent, "Wait"
-                noteTxt = "Queued for DTPF"
+                local fam, rc, st = item.fam, item.rc, item.st
+                local isFl = st.trackedOutput and (st.trackedOutput.isFluid or st.trackedOutput.type == "fluid")
+                self:addHitbox(4, by, 77, by + 1, function()
+                    self.selectedFamilyId = fam.id
+                    self.tab = TAB_RECIPES
+                end)
+
+                if item.group == 1 then
+                    titleLeft = "! " .. tostring(fam.name)
+                    titleCol = COLORS.yellow
+                    rightTag = "BLOCKED"
+                    rightCol = COLORS.yellow
+                    subTxt = localizeCoilStatus(self, st.stateStr or "Blocked")
+                    subCol = COLORS.yellow
+                elseif item.group == 2 then
+                    local nAct = #(st.activeDtpfs or {})
+                    local dList = formatDtpfIdList(st.activeDtpfs, 4)
+                    titleLeft = "▶ " .. tostring(fam.name)
+                    titleCol = COLORS.fg
+                    rightTag = string.format("x%d DTPF%s (%s)", nAct, (nAct == 1) and "" or "s", dList)
+                    rightCol = COLORS.green
+                elseif item.group == 3 then
+                    local dList = formatDtpfIdList(st.activeDtpfs, 4)
+                    titleLeft = "↻ " .. tostring(fam.name)
+                    titleCol = COLORS.fg
+                    rightTag = "24/7 Loop (" .. dList .. ")"
+                    rightCol = COLORS.cyan
+                    local rate = st.ratePerMin
+                    local rateTxt = (rate and math.abs(rate) >= 1)
+                        and string.format("Rate: %s%s/m", (rate >= 0) and "+" or "", fmtCompactNum(rate, isFl))
+                        or "Continuous discount keeper"
+                    subTxt = string.format("Stock: %s   %s", fmtCompactNum(st.currentStock or 0, isFl), rateTxt)
+                    subCol = COLORS.muted
+                else
+                    titleLeft = "… " .. tostring(fam.name)
+                    titleCol = COLORS.fg
+                    rightTag = "QUEUED"
+                    rightCol = COLORS.accent
+                    subTxt = string.format("Stock: %s / %s   Waiting for free DTPF",
+                        fmtCompactNum(st.currentStock or 0, isFl), fmtCompactNum(rc.target or 1, isFl))
+                    subCol = COLORS.muted
+                end
             end
 
-            self:drawText(84, ry, ico, col, rBg)
-            self:drawText(87, ry, padOrTrunc(compactRecipeName(fam.name, 24), 24), COLORS.fg, rBg)
-            self:drawText(112, ry, padOrTrunc(unitTxt, 7), col, rBg)
-            self:drawText(120, ry, padOrTrunc(stkTxt, 19), (item.group == 3) and COLORS.cyan or COLORS.fg, rBg)
-            self:drawText(140, ry, padOrTrunc(noteTxt, 18), col, rBg)
+            local rightW = unicode.wlen(rightTag)
+            local leftMax = math.max(16, 72 - rightW - 2)
+            self:drawText(5, by, padOrTrunc(titleLeft, leftMax), titleCol, COLORS.panelBg)
+            self:drawText(math.max(5, 77 - rightW), by, rightTag, rightCol, COLORS.panelBg)
+
+            if item.group == 2 then
+                local st, rc = item.st, item.rc
+                local isFl = st.trackedOutput and (st.trackedOutput.isFluid or st.trackedOutput.type == "fluid")
+                local pct = math.min(99, math.floor((st.ratio or 0) * 100 + 0.5))
+                local etaStr = (st.etaSec and st.etaSec > 0) and ("   ~" .. (UI.formatDurationShort(st.etaSec) or "")) or ""
+                local barStr = buildProgressBar(st.ratio or 0, 20)
+                self:drawText(7, by + 1, barStr, COLORS.cyan, COLORS.panelBg)
+                local detail = string.format("%3d%%   %s / %s%s",
+                    pct, fmtCompactNum(st.currentStock or 0, isFl), fmtCompactNum(rc.target or 1, isFl), etaStr)
+                self:drawText(30, by + 1, padOrTrunc(detail, 47), COLORS.muted, COLORS.panelBg)
+            else
+                self:drawText(7, by + 1, padOrTrunc(subTxt or "", 70), subCol or COLORS.muted, COLORS.panelBg)
+            end
+        end
+
+        if total > maxVis then
+            self:drawButton(4, 48, "[▲]", (self.overviewRecScroll > 0) and COLORS.fg or COLORS.muted, COLORS.btnBg, function()
+                self.overviewRecScroll = math.max(0, self.overviewRecScroll - 3)
+            end)
+            self:drawButton(8, 48, "[▼]", (self.overviewRecScroll < maxScroll) and COLORS.fg or COLORS.muted, COLORS.btnBg, function()
+                self.overviewRecScroll = math.min(maxScroll, self.overviewRecScroll + 3)
+            end)
         end
     end
 
-    local footTxt, footCol
+    self:drawText(4, 45, string.rep("─", 74), COLORS.border, COLORS.panelBg)
     if #ov.fullNames > 0 then
         local shown = {}
         for k = 1, math.min(3, #ov.fullNames) do
-            shown[k] = compactRecipeName(ov.fullNames[k], 16)
+            shown[k] = compactRecipeName(ov.fullNames[k], 15)
         end
-        local suffix = (#ov.fullNames > 3) and string.format(" (+%d more)", #ov.fullNames - 3) or ""
-        footTxt = string.format("✓ %d Target(s) Full: %s%s", #ov.fullNames, table.concat(shown, ", "), suffix)
-        footCol = COLORS.green
+        local suffix = (#ov.fullNames > 3) and string.format(" (+%d)", #ov.fullNames - 3) or ""
+        local fullMsg = string.format("✓ %d Stock Target(s) Full: %s%s", #ov.fullNames, table.concat(shown, ", "), suffix)
+        self:drawText(5, 46, padOrTrunc(fullMsg, 72), COLORS.green, COLORS.panelBg)
     else
-        footTxt = string.format("Fallback: %s | Parallel Split: %s | Click any row -> Inspect",
-            self.cfg.fallbackEnabled and "ON" or "OFF",
-            self.cfg.allowParallelSameRecipe and "ON" or "OFF")
-        footCol = COLORS.muted
-    end
-    self:fillRect(83, 33, 76, 1, " ", COLORS.headerBg)
-    self:drawText(84, 33, padOrTrunc(footTxt, 74), footCol, COLORS.headerBg)
-
-    if #rows > maxRows then
-        self:drawButton(84, 34, "[▲]", (self.overviewRecScroll > 0) and COLORS.fg or COLORS.muted, COLORS.btnBg, function()
-            self.overviewRecScroll = math.max(0, self.overviewRecScroll - 5)
-        end)
-        self:drawButton(88, 34, "[▼]", (self.overviewRecScroll < maxScroll) and COLORS.fg or COLORS.muted, COLORS.btnBg, function()
-            self.overviewRecScroll = math.min(maxScroll, self.overviewRecScroll + 5)
-        end)
+        local emptyMsg = (ov.nTargetRec == 0)
+            and "All active DTPFs dedicated to 24/7 loops"
+            or "No stock targets filled yet — active items running above"
+        self:drawText(5, 46, padOrTrunc(emptyMsg, 72), COLORS.muted, COLORS.panelBg)
     end
 end
 
-function UI:renderOverviewBottomStrip()
-    -- Bottom Left: Reserves & Global Policy Summary (x = 2..80, y = 36..49)
-    self:drawFrame(2, 36, 79, 14, COLORS.border, COLORS.panelBg, "round")
-    self:drawText(4, 36, " ◈ CATALYST & DTR RESERVES ", COLORS.accent, COLORS.panelBg)
-    self:drawButton(61, 36, "[Setup & Floors →]", COLORS.cyan, COLORS.btnBg, function()
+function UI:renderOverviewRightPanel()
+    -- Right Panel: Spacious Catalyst & DTR Reserves + Human-Only Recent Milestones (x = 82..159, y = 11..48)
+    self:drawFrame(82, 11, 78, 38, COLORS.border, COLORS.panelBg, "round")
+    self:drawText(84, 11, " ◈ CATALYST & DTR RESERVES ", COLORS.accent, COLORS.panelBg)
+    self:drawButton(148, 11, "[Setup →]", COLORS.cyan, COLORS.btnBg, function()
         self.tab = TAB_SETUP
     end)
-
-    self:fillRect(3, 37, 77, 1, " ", COLORS.headerBg)
-    self:drawText(4, 37, "FLUID", COLORS.muted, COLORS.headerBg)
-    self:drawText(15, 37, "AE2 STOCK", COLORS.muted, COLORS.headerBg)
-    self:drawText(27, 37, "FLOOR", COLORS.muted, COLORS.headerBg)
-    self:drawText(38, 37, "LEVEL vs FLOOR", COLORS.muted, COLORS.headerBg)
-    self:drawText(60, 37, "STATUS / RATE", COLORS.muted, COLORS.headerBg)
 
     local fluids = (self.state and self.state.stock and self.state.stock.fluids) or {}
     local reserveRows = {}
@@ -2850,10 +2790,8 @@ function UI:renderOverviewBottomStrip()
 
     for i = 1, 6 do
         local rr = reserveRows[i]
-        local ry = 37 + i
-        local rBg = (i % 2 == 0) and COLORS.rowAltBg or COLORS.panelBg
-        self:fillRect(3, ry, 77, 1, " ", rBg)
-        self:addHitbox(3, ry, 79, ry, function() self.tab = TAB_SETUP end)
+        local ry = 13 + (i - 1) * 3
+        self:addHitbox(84, ry, 157, ry, function() self.tab = TAB_SETUP end)
 
         local ok = (rr.amt > rr.floor)
         local col = (rr.amt <= 0) and COLORS.red or (ok and COLORS.green or COLORS.yellow)
@@ -2866,7 +2804,8 @@ function UI:renderOverviewBottomStrip()
                 norm = 0.25 + 0.75 * math.min(1.0, (math.log(ratio) / 2.302585092994046) / 3.0)
             end
         end
-        local filled = math.max(0, math.min(16, math.floor(norm * 16 + 0.5)))
+        local filled = math.max(0, math.min(24, math.floor(norm * 24 + 0.5)))
+
         local note
         if rr.isDtr and self.state and self.state.dtrRatePerMin and math.abs(self.state.dtrRatePerMin) >= 1 then
             local r = self.state.dtrRatePerMin
@@ -2880,73 +2819,54 @@ function UI:renderOverviewBottomStrip()
         else
             note = "OK"
         end
-        self:drawText(4, ry, rr.name, COLORS.fg, rBg)
-        self:drawText(15, ry, padOrTrunc(UI.formatNumber(rr.amt, true), 11), col, rBg)
-        self:drawText(27, ry, padOrTrunc(UI.formatNumber(rr.floor, true), 10), COLORS.muted, rBg)
-        self:drawText(38, ry, "[", COLORS.muted, rBg)
+
+        self:drawText(85, ry, rr.name, COLORS.fg, COLORS.panelBg)
+        self:drawText(92, ry, "[", COLORS.muted, COLORS.panelBg)
         if filled > 0 then
-            self:drawText(39, ry, string.rep("━", filled), col, rBg)
+            self:drawText(93, ry, string.rep("━", filled), col, COLORS.panelBg)
         end
-        if filled < 16 then
-            self:drawText(39 + filled, ry, string.rep("─", 16 - filled), COLORS.border, rBg)
+        if filled < 24 then
+            self:drawText(93 + filled, ry, string.rep("─", 24 - filled), COLORS.border, COLORS.panelBg)
         end
-        self:drawText(55, ry, "]", COLORS.muted, rBg)
-        self:drawText(60, ry, padOrTrunc(note, 18), col, rBg)
+        self:drawText(117, ry, "]", COLORS.muted, COLORS.panelBg)
+
+        local amtStr = UI.formatNumber(rr.amt, true)
+        local flrStr = " / " .. UI.formatNumber(rr.floor, true)
+        self:drawText(120, ry, padOrTrunc(amtStr, 9), col, COLORS.panelBg)
+        self:drawText(120 + math.min(9, unicode.wlen(amtStr)), ry, padOrTrunc(flrStr, 12), COLORS.muted, COLORS.panelBg)
+        self:drawText(143, ry, padOrTrunc(note, 15), col, COLORS.panelBg)
     end
 
-    self:drawText(4, 44, string.rep("─", 75), COLORS.border, COLORS.panelBg)
-    local catCode = CATALYST_SHORT[self.cfg.defaultCatalystTier or 4] or "DTEC"
-    local convLbl = self:isConvControlSupported() and tostring(self.cfg.globalConvMode or "auto") or "Manual (No OC Patch)"
-    self:drawText(4, 45, padOrTrunc(string.format("Convergence: %-20s  Primary Cat: %s (Fallback: %s)",
-        convLbl, catCode, self.cfg.catalystAutoFallback and "ON" or "OFF"), 75), COLORS.fg, COLORS.panelBg)
-    self:drawText(4, 46, padOrTrunc(string.format("On AE2 Craft: %-18s Queue Split: %-11s NC Aux: %s",
-        self.cfg.pausePassivesOnOD and "Pause Queue" or "Keep Queue",
-        self.cfg.allowParallelSameRecipe and "Parallel" or "Distinct",
-        self.cfg.uniformNcSubnet and "Color 0" or "Main Net"), 75), COLORS.muted, COLORS.panelBg)
-    self:drawText(4, 47, padOrTrunc(string.format("OC Rack Workers: %d   |   Click [2] FLEET to adjust live policies",
-        (self.state and self.state.workerCount) or 0), 75), COLORS.muted, COLORS.panelBg)
-
-    -- Bottom Right: Recent Activity Stream (x = 82..159, y = 36..49)
-    self:drawFrame(82, 36, 78, 14, COLORS.border, COLORS.panelBg, "round")
-    self:drawText(84, 36, " ◈ RECENT ACTIVITY ", COLORS.accent, COLORS.panelBg)
-    local lvlObj = LOG_LEVELS[findModeIndex(LOG_LEVELS, self.cfg.logLevel or "normal", 2)]
-    local lvlBtn = "[Lvl:" .. lvlObj.label .. "]"
-    local openBtn = "[Open Log →]"
-    self:drawButton(158 - unicode.wlen(openBtn), 36, openBtn, COLORS.cyan, COLORS.btnBg, function()
+    self:drawText(84, 31, string.rep("─", 74), COLORS.border, COLORS.panelBg)
+    self:drawText(85, 31, " ◈ RECENT MILESTONES ", COLORS.accent, COLORS.panelBg)
+    self:drawButton(149, 31, "[Log →]", COLORS.cyan, COLORS.panelBg, function()
         self.logModalActive = true
         self.logModalScroll = 0
     end)
-    self:drawButton(158 - unicode.wlen(openBtn) - unicode.wlen(lvlBtn) - 1, 36, lvlBtn, COLORS.fg, COLORS.btnBg, function(step)
-        cycleLogLevel(self, step)
-    end)
-
-    self:fillRect(83, 37, 76, 1, " ", COLORS.headerBg)
-    self:drawText(84, 37, "TIME", COLORS.muted, COLORS.headerBg)
-    self:drawText(95, 37, "STAGE", COLORS.muted, COLORS.headerBg)
-    self:drawText(102, 37, "EVENT", COLORS.muted, COLORS.headerBg)
 
     local events = (self.state and self.state.events) or {}
-    if #events == 0 then
-        self:drawText(84, 39, "No controller transitions recorded yet.", COLORS.muted, COLORS.panelBg)
-        self:drawText(84, 41, "Steady-state polls produce 0 chatter in Quiet / Normal mode.", COLORS.muted, COLORS.panelBg)
-        self:drawText(84, 42, "Switch to [Lvl:Raw] above for live IN/DEC/OUT trace per poll.", COLORS.muted, COLORS.panelBg)
+    local milestones = {}
+    for i = 1, #events do
+        local ev = events[i]
+        if ev and (tonumber(ev.minLevel) or 1) <= 1 then
+            milestones[#milestones + 1] = ev
+            if #milestones >= 7 then break end
+        end
+    end
+
+    if #milestones == 0 then
+        self:drawText(85, 35, "All systems steady - no recent transitions.", COLORS.muted, COLORS.panelBg)
     else
-        for r = 1, 11 do
-            local ry = 37 + r
-            local rBg = (r % 2 == 0) and COLORS.rowAltBg or COLORS.panelBg
-            self:fillRect(83, ry, 76, 1, " ", rBg)
-            local ev = events[r]
-            if ev then
-                self:addHitbox(83, ry, 158, ry, function()
-                    self.logModalActive = true
-                    self.logModalScroll = 0
-                end)
-                local stg = ev.stage or "DEC"
-                local stStyle = STAGE_STYLE[stg] or STAGE_STYLE.DEC
-                self:drawText(84, ry, formatLogUptime(ev.uptime), COLORS.muted, rBg)
-                self:drawText(95, ry, stStyle.badge, stStyle.col, rBg)
-                self:drawText(102, ry, padOrTrunc(tostring(ev.text or ""), 56), getEventLineColor(ev), rBg)
-            end
+        local mStride = (#milestones <= 6) and 2 or 1
+        for k = 1, #milestones do
+            local ev = milestones[k]
+            local ry = 33 + (k - 1) * mStride
+            self:addHitbox(84, ry, 157, ry, function()
+                self.logModalActive = true
+                self.logModalScroll = 0
+            end)
+            self:drawText(85, ry, formatLogUptime(ev.uptime), COLORS.muted, COLORS.panelBg)
+            self:drawText(96, ry, padOrTrunc(tostring(ev.text or ""), 61), getEventLineColor(ev), COLORS.panelBg)
         end
     end
 end
@@ -2954,9 +2874,8 @@ end
 function UI:renderOverviewTab()
     local ov = gatherOverviewStats(self)
     self:renderOverviewKpis(ov)
-    self:renderOverviewFleetCard()
-    self:renderOverviewQueueCard(ov)
-    self:renderOverviewBottomStrip()
+    self:renderOverviewProductionPanel(ov)
+    self:renderOverviewRightPanel()
 end
 
 function UI:renderRecipeListPane(list, pinnedByFam, rankById)
@@ -5138,11 +5057,7 @@ function UI:handleScroll(dir, x, y)
         return
     end
     if self.tab == TAB_OVERVIEW then
-        if x and x < 81 then
-            self.overviewDtpfScroll = math.max(0, (self.overviewDtpfScroll or 0) - dir)
-        else
-            self.overviewRecScroll = math.max(0, (self.overviewRecScroll or 0) - (dir * 3))
-        end
+        self.overviewRecScroll = math.max(0, (self.overviewRecScroll or 0) - dir)
     elseif self.tab == TAB_FLEET then
         if x and x < 80 then
             self.dtpfRowScroll = math.max(0, (self.dtpfRowScroll or 0) - dir)

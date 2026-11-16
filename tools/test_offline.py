@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline Lua 5.3 + OpenComputers JNLua test suite for OCScripts/dtpf."""
+"""Offline Lua 5.3 + OpenComputers JNLua test suite for gtnh-dtpf-control."""
 
 from __future__ import annotations
 
@@ -3554,10 +3554,13 @@ do
     for _, s in ipairs(gpu._calls) do _G.__RENDERED_GPU_CALLS[#_G.__RENDERED_GPU_CALLS + 1] = s end
     local ovTxt = gpu._allText()
     assert(ovTxt:find("SYSTEM HEALTH", 1, true), "T18k Overview renders SYSTEM HEALTH card")
-    assert(ovTxt:find("DTPF FLEET AT A GLANCE", 1, true), "T18k Overview renders DTPF FLEET AT A GLANCE card")
+    assert(ovTxt:find("DTPF FLEET", 1, true), "T18k Overview renders DTPF FLEET card")
+    assert(ovTxt:find("STOCK TARGETS", 1, true), "T18k Overview renders STOCK TARGETS card")
     assert(ovTxt:find("ACTIVE PRODUCTION & ALERTS", 1, true), "T18k Overview renders ACTIVE PRODUCTION card")
     assert(ovTxt:find("CATALYST & DTR RESERVES", 1, true), "T18k Overview renders CATALYST & DTR RESERVES card")
-    assert(ovTxt:find("RECENT ACTIVITY", 1, true), "T18k Overview renders RECENT ACTIVITY stream")
+    assert(ovTxt:find("RECENT MILESTONES", 1, true), "T18k Overview renders RECENT MILESTONES feed")
+    assert((not ovTxt:find("[DEC]", 1, true)) and (not ovTxt:find("hw writes", 1, true)),
+        "T18k Overview keeps raw debug trace chatter out of Recent Milestones")
 
     local function click18k(needle, xMin, xMax, yMin, yMax)
         for i = #ui.hitboxes, 1, -1 do
