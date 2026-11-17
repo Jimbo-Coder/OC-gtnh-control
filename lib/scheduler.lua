@@ -2909,7 +2909,7 @@ local function stepAssignPassiveChannels(cfg, runtimeState, ctx, needyQueue, cur
                 local fam = FAMILY_BY_ID[chosen.familyId]
                 local rc = cfg.recipes[chosen.familyId]
                 local chJobMode = chosen.isForever and "FALLBACK" or "PASSIVE"
-                local chWantsConv = doesChannelWantConv(ch.id, chJobMode, rc)
+                local chWantsConv = doesChannelWantConv(ch.id, chJobMode, rc, chosen.convBelowTarget)
                 local mod, tCode, tIdx, tData, catFluid, _, meta = Scheduler.resolveRecipe(fam, rc, cfg, stock, {
                     wantConvergence = chWantsConv,
                     isFallback = chosen.isForever or (chosen.familyId == cfg.fallbackFamilyId),
