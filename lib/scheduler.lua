@@ -6,6 +6,13 @@ local RecipesDB = require("lib.recipes_db")
 
 local Scheduler = {}
 
+Scheduler.DEFAULT_FALLBACK_CHAIN = {
+    "molten_infinity",
+    "molten_cosmic_neutronium",
+    "molten_neutronium",
+    "molten_bedrockium",
+}
+
 local MAX_CHANNELS = 64
 local MAX_LOG_EVENTS = 64
 local MAX_RATE_SAMPLES = 24
@@ -529,6 +536,37 @@ function Scheduler.ensureConfig(cfg)
         cfg.fallbackEnabled = true
     end
     cfg.fallbackFamilyId = cfg.fallbackFamilyId or "molten_infinity"
+    if type(cfg.fallbackChain) ~= "table" or #cfg.fallbackChain == 0 then
+        local defChain = {}
+        local seenFb = {}
+        if type(cfg.fallbackFamilyId) == "string" and FAMILY_BY_ID[cfg.fallbackFamilyId] then
+            defChain[1] = cfg.fallbackFamilyId
+            seenFb[cfg.fallbackFamilyId] = true
+        end
+        for _, fid in ipairs(Scheduler.DEFAULT_FALLBACK_CHAIN) do
+            if FAMILY_BY_ID[fid] and not seenFb[fid] then
+                defChain[#defChain + 1] = fid
+                seenFb[fid] = true
+            end
+        end
+        cfg.fallbackChain = defChain
+    else
+        local cleanChain = {}
+        local seenFb = {}
+        for _, fid in ipairs(cfg.fallbackChain) do
+            if type(fid) == "string" and FAMILY_BY_ID[fid] and not seenFb[fid] then
+                cleanChain[#cleanChain + 1] = fid
+                seenFb[fid] = true
+            end
+        end
+        if #cleanChain == 0 then
+            for _, fid in ipairs(Scheduler.DEFAULT_FALLBACK_CHAIN) do
+                cleanChain[#cleanChain + 1] = fid
+            end
+        end
+        cfg.fallbackChain = cleanChain
+        cfg.fallbackFamilyId = cfg.fallbackChain[1]
+    end
     if cfg.allowParallelSameRecipe == nil then
         cfg.allowParallelSameRecipe = false
     end
@@ -1185,6 +1223,56 @@ function Scheduler.checkRecipeRunnable(cfg, stock, fam, rc, isCurrentlyRunning, 
     end
 
     return true, "Ready", catFluidName, meta
+end
+
+-- Count how many whole batches of (fam, rc) current AE stock can support after floors/reserves
+function Scheduler.countAvailableBatches(cfg, stock, fam, rc, opts)
+    if not stock then return math.huge end
+    opts = opts or {}
+    local mod, tCode, _, tData, catFluidName, tInfo = Scheduler.resolveRecipe(fam, rc, cfg, stock, {
+        wantConvergence = opts.wantConvergence,
+        isFallback = opts.isFallback,
+        catOverride = opts.catOverride,
+    })
+    if not mod or not tData then
+        return 0
+    end
+
+    local isRunning = (opts.isCurrentlyRunning == true)
+    local minBatches = math.huge
+
+    if tInfo.usesCatalyst and catFluidName then
+        local catNeed = math.max(1, tData.catalystAmount or 1000)
+        local floor = getCatalystFloor(cfg, tCode)
+        local catHave = stock.fluids[catFluidName] or 0
+        minBatches = math.min(minBatches, math.floor(math.max(0, catHave - floor) / catNeed))
+    end
+
+    if (tData.dtrIn or 0) > 0 and (cfg.dtrReserveFloor or 0) > 0 then
+        local dtrHave = stock.fluids["dimensionallytranscendentresidue"] or 0
+        local floor = isRunning and math.floor(cfg.dtrReserveFloor * 0.98) or cfg.dtrReserveFloor
+        minBatches = math.min(minBatches, math.floor(math.max(0, dtrHave - floor) / tData.dtrIn))
+    end
+
+    for i = 1, #(tData.fluidsIn or {}) do
+        local fi = tData.fluidsIn[i]
+        local have = stock.fluids[fi.name] or 0
+        local need = math.max(1, fi.amount or 144)
+        minBatches = math.min(minBatches, math.floor(have / need))
+    end
+
+    for i = 1, #(tData.itemsIn or {}) do
+        local ii = tData.itemsIn[i]
+        local isNC = (ii.nonConsumed == true) or ((ii.amount or 0) == 0)
+        if not (cfg.uniformNcSubnet and isNC) then
+            local key = ii.name .. ":" .. tostring(ii.damage or 0)
+            local have = stock.items[key] or 0
+            local need = math.max(1, ii.amount or 1)
+            minBatches = math.min(minBatches, math.floor(have / need))
+        end
+    end
+
+    return math.max(0, minBatches)
 end
 
 local function effectiveDTPFConvMode(cfg, d)
@@ -2507,7 +2595,20 @@ local function stepEvaluateRecipes(cfg, runtimeState, ctx, nowSec, pushEvent)
         local fam = RecipesDB.FAMILIES[i]
         local rc = cfg.recipes[fam.id]
         local isForever = (rc.forever == true)
-        local isFbFamily = isForever or (cfg.fallbackEnabled and fam.id == cfg.fallbackFamilyId)
+        local isInFbChain = false
+        if cfg.fallbackEnabled then
+            if fam.id == cfg.fallbackFamilyId then
+                isInFbChain = true
+            elseif type(cfg.fallbackChain) == "table" then
+                for _, fid in ipairs(cfg.fallbackChain) do
+                    if fid == fam.id then
+                        isInFbChain = true
+                        break
+                    end
+                end
+            end
+        end
+        local isFbFamily = isForever or isInFbChain
         local previewJobMode = (isForever or (isFbFamily and not rc.enabled)) and "FALLBACK" or "PASSIVE"
         local convBelowTarget = (rc.convMode == "below_tgt")
             and Scheduler.isRecipeBelowConvTarget(cfg, stock, fam, rc, runtimeState._convBelowActive[fam.id] == true)
@@ -2553,6 +2654,14 @@ local function stepEvaluateRecipes(cfg, runtimeState, ctx, nowSec, pushEvent)
             wantConvergence = recWantsConv,
             maxCoilHeat = fleetCoilLimit,
         })
+        local availBatches = 0
+        if runnable then
+            availBatches = Scheduler.countAvailableBatches(cfg, stock, fam, rc, {
+                wantConvergence = recWantsConv,
+                isFallback = isFbFamily,
+                isCurrentlyRunning = isRunning,
+            })
+        end
 
         local ratio = currentStock / targetStock
         local stateStr = "Disabled"
@@ -2600,6 +2709,7 @@ local function stepEvaluateRecipes(cfg, runtimeState, ctx, nowSec, pushEvent)
             convBelowTarget = convBelowTarget,
             needsStock = needsStock,
             runnable = runnable,
+            availBatches = availBatches,
             reason = reason,
             stateStr = stateStr,
             catalystFluid = catFluid,
@@ -2797,6 +2907,16 @@ local function stepAssignPassiveChannels(cfg, runtimeState, ctx, needyQueue, cur
             end
         else
             local chosen = nil
+            local chUnits = countChannelDtpfs(ch.id)
+            local function isFallbackFam(fid)
+                if fid == cfg.fallbackFamilyId then return true end
+                if type(cfg.fallbackChain) == "table" then
+                    for _, f in ipairs(cfg.fallbackChain) do
+                        if f == fid then return true end
+                    end
+                end
+                return false
+            end
             local function canChannelRunCand(cand)
                 if ((cand.tierData and cand.tierData.coilHeat) or 0) > chHeatLimit then
                     return false
@@ -2819,7 +2939,8 @@ local function stepAssignPassiveChannels(cfg, runtimeState, ctx, needyQueue, cur
                 end
             end
 
-            -- Pass 2: if parallel sharing is enabled, parallelize <Tgt recipes (balanced) before doubling 24/7 loops
+            -- Pass 2: if parallel sharing is enabled, parallelize <Tgt recipes (balanced) before doubling 24/7 loops,
+            -- skipping recipes whose remaining stock cannot sustain another concurrent DTPF batch without starving.
             if not chosen and cfg.allowParallelSameRecipe then
                 local bestScore = nil
                 for q = 1, #needyQueue do
@@ -2827,7 +2948,8 @@ local function stepAssignPassiveChannels(cfg, runtimeState, ctx, needyQueue, cur
                     local candRc = cfg.recipes[cand.familyId]
                     local maxD = (candRc and tonumber(candRc.maxDtpfs)) or 0
                     local curDtpfs = assignedDtpfCount[cand.familyId] or 0
-                    if canChannelRunCand(cand) and (maxD <= 0 or curDtpfs < maxD) then
+                    local availB = cand.availBatches or math.huge
+                    if canChannelRunCand(cand) and (maxD <= 0 or curDtpfs < maxD) and availB >= (curDtpfs + chUnits) then
                         local loopRank = cand.isForever and 1 or 0
                         local cnt = assignedCount[cand.familyId] or 0
                         if (not chosen)
@@ -2843,14 +2965,14 @@ local function stepAssignPassiveChannels(cfg, runtimeState, ctx, needyQueue, cur
             if chosen then
                 usedRecipes[chosen.familyId] = true
                 assignedCount[chosen.familyId] = (assignedCount[chosen.familyId] or 0) + 1
-                assignedDtpfCount[chosen.familyId] = (assignedDtpfCount[chosen.familyId] or 0) + countChannelDtpfs(ch.id)
+                assignedDtpfCount[chosen.familyId] = (assignedDtpfCount[chosen.familyId] or 0) + chUnits
                 local fam = FAMILY_BY_ID[chosen.familyId]
                 local rc = cfg.recipes[chosen.familyId]
                 local chJobMode = chosen.isForever and "FALLBACK" or "PASSIVE"
                 local chWantsConv = doesChannelWantConv(ch.id, chJobMode, rc)
                 local mod, tCode, tIdx, tData, catFluid, _, meta = Scheduler.resolveRecipe(fam, rc, cfg, stock, {
                     wantConvergence = chWantsConv,
-                    isFallback = chosen.isForever or (chosen.familyId == cfg.fallbackFamilyId),
+                    isFallback = chosen.isForever or isFallbackFam(chosen.familyId),
                     catOverride = chCatOv,
                 })
                 applyAndRecordChannelJob(cfg, stock, runtimeState, ch, {
@@ -2871,42 +2993,95 @@ local function stepAssignPassiveChannels(cfg, runtimeState, ctx, needyQueue, cur
                     chosen.stateStr = (cfg.armed and "Running (" or "Would Run (") .. ch.id .. ")"
                 end
             elseif cfg.fallbackEnabled and not (chRole.hasAny and chRole.allPassiveOnly) then
-                local fbId = cfg.fallbackFamilyId or "molten_infinity"
-                local fbFam = FAMILY_BY_ID[fbId]
-                local fbRc = fbFam and cfg.recipes[fbId]
-                local fbSt = runtimeState.recipeStatus[fbId]
-                local chFbWantsConv = doesChannelWantConv(ch.id, "FALLBACK", fbRc, fbSt and fbSt.convBelowTarget)
-                local fbMod, fbCode, fbIdx, fbData, fbCatFluid, _, fbMeta = Scheduler.resolveRecipe(fbFam, fbRc, cfg, stock, {
-                    wantConvergence = chFbWantsConv,
-                    isFallback = true,
-                    catOverride = chCatOv,
-                })
-                local fbOk = fbFam and Scheduler.checkRecipeRunnable(cfg, stock, fbFam, fbRc, currentlyRunningMap[fbId] == true, true, {
-                    wantConvergence = chFbWantsConv,
-                    maxCoilHeat = chHeatLimit,
-                    catOverride = chCatOv,
-                })
-                if fbOk and fbData then
+                local fbOrder = {}
+                local seenFb = {}
+                local function pushFb(fid)
+                    if type(fid) == "string" and FAMILY_BY_ID[fid] and not seenFb[fid] then
+                        fbOrder[#fbOrder + 1] = fid
+                        seenFb[fid] = true
+                    end
+                end
+                pushFb(cfg.fallbackFamilyId)
+                for _, fid in ipairs(cfg.fallbackChain or Scheduler.DEFAULT_FALLBACK_CHAIN) do
+                    pushFb(fid)
+                end
+
+                local pickFb = nil
+                local firstReason = "No inputs"
+                local fbCandidates = {}
+                for k = 1, #fbOrder do
+                    local fbId = fbOrder[k]
+                    local fbFam = FAMILY_BY_ID[fbId]
+                    local fbRc = fbFam and cfg.recipes[fbId]
+                    local fbSt = runtimeState.recipeStatus[fbId]
+                    local maxD = (fbRc and tonumber(fbRc.maxDtpfs)) or 0
+                    local curDtpfs = assignedDtpfCount[fbId] or 0
+                    if fbFam and (maxD <= 0 or curDtpfs < maxD) then
+                        local chFbWantsConv = doesChannelWantConv(ch.id, "FALLBACK", fbRc, fbSt and fbSt.convBelowTarget)
+                        local fbMod, fbCode, fbIdx, fbData, fbCatFluid, _, fbMeta = Scheduler.resolveRecipe(fbFam, fbRc, cfg, stock, {
+                            wantConvergence = chFbWantsConv,
+                            isFallback = true,
+                            catOverride = chCatOv,
+                        })
+                        local fbRunning = (currentlyRunningMap[fbId] == true)
+                        local fbOk, fbWhy = Scheduler.checkRecipeRunnable(cfg, stock, fbFam, fbRc, fbRunning, true, {
+                            wantConvergence = chFbWantsConv,
+                            maxCoilHeat = chHeatLimit,
+                            catOverride = chCatOv,
+                        })
+                        if fbOk and fbData then
+                            local fbAvail = Scheduler.countAvailableBatches(cfg, stock, fbFam, fbRc, {
+                                wantConvergence = chFbWantsConv,
+                                isFallback = true,
+                                catOverride = chCatOv,
+                                isCurrentlyRunning = fbRunning,
+                            })
+                            local entryFb = {
+                                famId = fbId, fam = fbFam, rc = fbRc, st = fbSt,
+                                mod = fbMod, code = fbCode, idx = fbIdx, data = fbData,
+                                catFluid = fbCatFluid, meta = fbMeta,
+                                curDtpfs = curDtpfs, avail = fbAvail,
+                            }
+                            fbCandidates[#fbCandidates + 1] = entryFb
+                            if fbAvail >= (curDtpfs + chUnits) then
+                                pickFb = entryFb
+                                break
+                            end
+                        elseif k == 1 then
+                            firstReason = tostring(fbWhy or (fbSt and fbSt.reason) or "No inputs")
+                        end
+                    elseif k == 1 and fbFam and maxD > 0 then
+                        firstReason = string.format("Max %d DTPFs", maxD)
+                    end
+                end
+                if not pickFb and #fbCandidates > 0 then
+                    pickFb = fbCandidates[1]
+                end
+
+                if pickFb then
+                    usedRecipes[pickFb.famId] = true
+                    assignedCount[pickFb.famId] = (assignedCount[pickFb.famId] or 0) + 1
+                    assignedDtpfCount[pickFb.famId] = (assignedDtpfCount[pickFb.famId] or 0) + chUnits
                     applyAndRecordChannelJob(cfg, stock, runtimeState, ch, {
                         mode = "FALLBACK",
-                        famId = fbId,
-                        fam = fbFam,
-                        mod = fbMod,
-                        tCode = fbCode,
-                        tIdx = fbIdx,
-                        tData = fbData,
-                        catFluid = fbCatFluid,
-                        meta = fbMeta,
+                        famId = pickFb.famId,
+                        fam = pickFb.fam,
+                        mod = pickFb.mod,
+                        tCode = pickFb.code,
+                        tIdx = pickFb.idx,
+                        tData = pickFb.data,
+                        catFluid = pickFb.catFluid,
+                        meta = pickFb.meta,
                         labelPrefix = "Fallback: ",
                     }, ctx.useCache, pushEvent)
-                    if fbSt then
-                        fbSt.stateStr = (cfg.armed and "Fallback (" or "Would FB (") .. ch.id .. ")"
+                    if pickFb.st then
+                        pickFb.st.stateStr = (cfg.armed and "Fallback (" or "Would FB (") .. ch.id .. ")"
                     end
                 else
                     if cfg.armed then
                         clearPassiveChannelWithLog(ch, stock, runtimeState, ctx.useCache, pushEvent, "fallback blocked")
                     end
-                    local fbReason = tostring((fbSt and fbSt.reason) or "No inputs")
+                    local fbReason = firstReason
                     runtimeState.channelStatus[ch.id] = {
                         mode = "IDLE",
                         label = "Idle (Fallback blocked: " .. fbReason .. ")",

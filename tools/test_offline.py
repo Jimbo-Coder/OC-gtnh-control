@@ -4372,6 +4372,138 @@ do
     component._reset()
 end
 
+-- ============================================================================
+-- TEST 22: Batch-Starvation Guard, Fallback Chain Cascade & Non-Clobbering
+-- ============================================================================
+do
+    Hardware.resetClusterState()
+    local env, fluids, items, odFluids, odItems, fsbSlots, fsbCalls, isbSlots, isbCalls, dtpfStates = setupStandardEnv()
+    -- Register 2 more Storage Bus pairs so ch1, ch2, ch3 run distinct channels concurrently
+    component._register("t22-fsb2", "fluid_storagebus", (makeStorageBus("t22-fsb2", 0, true)))
+    component._register("t22-isb2", "me_storagebus", (makeStorageBus("t22-isb2", 0, false)))
+    component._register("t22-fsb3", "fluid_storagebus", (makeStorageBus("t22-fsb3", 0, true)))
+    component._register("t22-isb3", "me_storagebus", (makeStorageBus("t22-isb3", 0, false)))
+    Scheduler.syncHardware(env)
+    for i = 1, 3 do env.dtpfs[i].channelId = "ch" .. i end
+    for _, rc in pairs(env.recipes) do
+        rc.enabled = false
+        rc.forever = false
+        rc.maxDtpfs = 0
+    end
+    -- Zero out pre-populated items/fluids except catalysts & DTR so batch counts are exact
+    for k in pairs(items) do items[k] = 0 end
+    for k in pairs(fluids) do
+        if not k:find("^exciteddt") and k ~= "dimensionallytranscendentresidue" then
+            fluids[k] = 0
+        end
+    end
+
+    local RecipesDB22 = require("lib.recipes_db")
+    local function stockExactBatches(famId, batches)
+        local fam = RecipesDB22.BY_ID[famId]
+        local rc = env.recipes[famId]
+        local _, _, _, tData = Scheduler.resolveRecipe(fam, rc, env, nil, { wantConvergence = false })
+        for _, fi in ipairs(tData.fluidsIn or {}) do
+            fluids[fi.name] = (fluids[fi.name] or 0) + (fi.amount or 144) * batches
+        end
+        for _, ii in ipairs(tData.itemsIn or {}) do
+            local key = ii.name .. ":" .. tostring(ii.damage or 0)
+            local amt = math.max(1, ii.amount or 1)
+            items[key] = (items[key] or 0) + (amt * batches)
+        end
+    end
+
+    -- Give raw_tesseract exactly 1 batch; molten_infinity 0 batches; cosmic_neutronium 3 batches; neutronium 2 batches
+    env.recipes["raw_tesseract"].enabled = true
+    env.recipes["raw_tesseract"].priority = 1
+    env.recipes["raw_tesseract"].target = 1000000
+    env.allowParallelSameRecipe = true
+    env.fallbackEnabled = true
+    env.fallbackChain = { "molten_infinity", "molten_cosmic_neutronium", "molten_neutronium" }
+    env.fallbackFamilyId = "molten_infinity"
+
+    stockExactBatches("raw_tesseract", 1)
+    stockExactBatches("molten_cosmic_neutronium", 3)
+    stockExactBatches("molten_neutronium", 2)
+
+    local st22 = {}
+    Scheduler.step(env, st22)
+
+    assertEq(st22.recipeStatus["raw_tesseract"].availBatches, 1, "T22 countAvailableBatches exact 1-batch detection")
+    assertEq(st22.channelStatus["ch1"].familyId, "raw_tesseract", "T22 ch1 picks priority raw_tesseract")
+    assertEq(st22.channelStatus["ch2"].mode, "FALLBACK", "T22 Pass 2 starvation guard blocks doubling 1-batch raw_tesseract")
+    assertEq(st22.channelStatus["ch2"].familyId, "molten_cosmic_neutronium", "T22 ch2 skips empty molten_infinity -> molten_cosmic_neutronium")
+    assertEq(st22.channelStatus["ch3"].mode, "FALLBACK", "T22 ch3 enters fallback")
+    assertEq(st22.channelStatus["ch3"].familyId, "molten_cosmic_neutronium", "T22 ch3 runs cosmic_neutronium when >=3 batches exist")
+
+    -- Enforce maxDtpfs=1 on molten_cosmic_neutronium -> ch3 must cascade down chain to molten_neutronium
+    env.recipes["molten_cosmic_neutronium"].maxDtpfs = 1
+    Scheduler.step(env, st22)
+    assertEq(st22.channelStatus["ch2"].familyId, "molten_cosmic_neutronium", "T22 ch2 holds 1st cosmic_neutronium slot")
+    assertEq(st22.channelStatus["ch3"].familyId, "molten_neutronium", "T22 ch3 respects maxDtpfs=1 -> cascades to molten_neutronium")
+
+    -- Non-clobbering toggle test via WebBridge + UI
+    local UI = require("lib.ui")
+    local WebBridge = require("lib.web_bridge")
+    component.gpu = component._newMockGPU(160, 50)
+    local ui22 = UI.new(env, st22, function() end)
+    local wb22 = WebBridge.new(env, st22, ui22, function() end, Scheduler, Hardware)
+
+    env.fallbackFamilyId = "raw_tesseract"
+    env.fallbackEnabled = true
+    local okP1 = wb22:applyPatch({ familyId = "raw_tesseract", enabled = false })
+    assertEq(okP1, true, "T22 WebBridge disabled raw_tesseract")
+    assertEq(env.fallbackEnabled, true, "T22 disabling raw_tesseract does NOT clobber fallbackEnabled=false")
+
+    ui22.tab = 3
+    ui22.selectedFamilyId = "raw_tesseract"
+    env.recipes["raw_tesseract"].enabled = true
+    ui22:render()
+    local clickedRow8 = false
+    for _, hb in ipairs(ui22.hitboxes) do
+        if hb.y1 == 8 and hb.y2 == 8 and hb.x1 == 87 then
+            ui22:handleTouch(87, 8, 0)
+            clickedRow8 = true
+            break
+        end
+    end
+    assert(clickedRow8, "T22 clicked Tab 3 row-8 ON/OFF toggle hitbox at x=87")
+    assertEq(env.recipes["raw_tesseract"].enabled, false, "T22 UI row-8 toggle disabled raw_tesseract")
+    assertEq(env.fallbackEnabled, true, "T22 UI row-8 toggle does NOT clobber fallbackEnabled=false")
+
+    local snap22 = wb22:buildSnapshot()
+    assert(type(snap22.policy.fallbackChain) == "table" and #snap22.policy.fallbackChain >= 2,
+        "T22 WebBridge snapshot includes policy.fallbackChain")
+    local okChain = wb22:applyPatch({ fallbackChain = { "molten_neutronium", "molten_bedrockium" } })
+    assertEq(okChain, true, "T22 WebBridge fallbackChain patch succeeded")
+    assertEq(env.fallbackChain[1], "molten_neutronium", "T22 fallbackChain[1] updated")
+    assertEq(env.fallbackChain[2], "molten_bedrockium", "T22 fallbackChain[2] updated")
+    assertEq(env.fallbackFamilyId, "molten_neutronium", "T22 fallbackFamilyId synced to fallbackChain[1]")
+
+    -- Verify main.lua saves & Scheduler.ensureConfig reloads fallbackChain cleanly
+    local evQ22 = require("event")._queue
+    while #evQ22 > 0 do table.remove(evQ22) end
+    evQ22[1] = { "key_down", "kbd", string.byte("q"), 16 }
+    local mainPath22 = _G.__DTPF_ROOT .. "/main.lua"
+    local cfgPath22 = _G.__DTPF_ROOT .. "/config.cfg"
+    __py_write_file(cfgPath22, '{ armed = false, fallbackEnabled = true, fallbackFamilyId = "molten_neutronium", fallbackChain = { "molten_neutronium", "molten_bedrockium" } }\n')
+    local m22, mErr22 = load(assert(__py_read_file(mainPath22)), "@" .. mainPath22)
+    assert(m22, mErr22)
+    m22()
+    local saved22 = assert(__py_read_file(cfgPath22), "T22 main.lua wrote config.cfg")
+    assert(saved22:find('fallbackChain = { "molten_neutronium", "molten_bedrockium" }', 1, true), "T22 main.lua persisted fallbackChain")
+    local parsed22 = assert(load("return " .. saved22:match("(%b{})")), "T22 valid saved Lua config")()
+    local hydrated22 = Scheduler.ensureConfig(parsed22)
+    assertEq(hydrated22.fallbackFamilyId, "molten_neutronium", "T22 hydrated fallbackFamilyId")
+    assertEq(hydrated22.fallbackChain[1], "molten_neutronium", "T22 hydrated fallbackChain[1]")
+    assertEq(hydrated22.fallbackChain[2], "molten_bedrockium", "T22 hydrated fallbackChain[2]")
+    __py_remove_vfs(cfgPath22)
+
+    component.gpu = nil
+    Hardware.resetClusterState()
+    component._reset()
+end
+
 return "OK"
 """
             res = host.exec_lua(test_suite, "test_suite")
@@ -4443,7 +4575,7 @@ return "OK"
             finally:
                 mem_host.close()
 
-            print(f"ALL 21 OFFLINE TEST SUITES PASSED (0 bad-width glyphs, {live_kb} KB live JNLua heap, Lua 5.3 + OpenOS verified).")
+            print(f"ALL 22 OFFLINE TEST SUITES PASSED (0 bad-width glyphs, {live_kb} KB live JNLua heap, Lua 5.3 + OpenOS verified).")
             print("--- Sample main.lua --check output ---")
             for line in check_out.splitlines():
                 print("  " + line)

@@ -287,6 +287,14 @@ local function saveConfig(cfg)
     add("  },")
     addKV("  ", "fallbackEnabled", (cfg.fallbackEnabled ~= false))
     addKV("  ", "fallbackFamilyId", cfg.fallbackFamilyId or "molten_infinity")
+    local fbChain = (type(cfg.fallbackChain) == "table" and #cfg.fallbackChain > 0)
+        and cfg.fallbackChain
+        or { cfg.fallbackFamilyId or "molten_infinity" }
+    local fbParts = {}
+    for _, fid in ipairs(fbChain) do
+        fbParts[#fbParts + 1] = string.format("%q", tostring(fid))
+    end
+    add("  fallbackChain = { " .. table.concat(fbParts, ", ") .. " },")
     addKV("  ", "allowParallelSameRecipe", (cfg.allowParallelSameRecipe == true))
     addKV("  ", "uiAnimations", (cfg.uiAnimations ~= false))
     addKV("  ", "coilDisplayMode", (cfg.coilDisplayMode == "temp") and "temp" or "name")

@@ -2264,9 +2264,6 @@ function UI:renderPriorityQueueCard()
                 self:drawButton(87, y, isOn and "[ON]" or "[--]",
                     isOn and COLORS.green or COLORS.muted, COLORS.btnBg, function()
                         rc.enabled = not isOn
-                        if not rc.enabled and self.cfg.fallbackFamilyId == fam.id then
-                            self.cfg.fallbackEnabled = false
-                        end
                         self:save((rc.enabled and "Enabled " or "Disabled ") .. fam.name)
                     end)
 
@@ -2300,16 +2297,10 @@ function UI:renderPriorityQueueCard()
                     function()
                         if isLoop then
                             rc.forever = false
-                            if self.cfg.fallbackFamilyId == fam.id then
-                                self.cfg.fallbackEnabled = false
-                            end
                             self:save(fam.name .. " mode -> Stop at Target (<Tgt)")
                         else
                             rc.forever = true
                             rc.enabled = true
-                            if self.cfg.fallbackFamilyId == fam.id then
-                                self.cfg.fallbackEnabled = false
-                            end
                             self:save(fam.name .. " mode -> Run 24/7 (ignores target)")
                         end
                     end)
@@ -3128,9 +3119,6 @@ function UI:renderRecipeInspectorPane(fam, pinnedByFam, rankById)
     local bx = self:drawButton(87, 8, rc.enabled and "[● ON ]" or "[○ OFF]",
         rc.enabled and COLORS.green or COLORS.muted, rc.enabled and COLORS.darkGreen or COLORS.btnBg, function()
             rc.enabled = not rc.enabled
-            if not rc.enabled and self.cfg.fallbackFamilyId == fam.id then
-                self.cfg.fallbackEnabled = false
-            end
             self:save(fam.name .. " enabled -> " .. (rc.enabled and "ON" or "OFF"))
         end) + 2
     self:drawText(bx, 8, "Mode:", COLORS.muted, COLORS.panelBg)
@@ -3140,9 +3128,6 @@ function UI:renderRecipeInspectorPane(fam, pinnedByFam, rankById)
         (not isLoopMode) and COLORS.btnActiveBg or COLORS.btnBg,
         function()
             rc.forever = false
-            if self.cfg.fallbackFamilyId == fam.id then
-                self.cfg.fallbackEnabled = false
-            end
             self:save(fam.name .. " mode -> Stop at Target (<Target)")
         end) + 1
     self:drawButton(bx, 8, "[24/7 Loop]",
@@ -3151,9 +3136,6 @@ function UI:renderRecipeInspectorPane(fam, pinnedByFam, rankById)
         function()
             rc.forever = true
             rc.enabled = true
-            if self.cfg.fallbackFamilyId == fam.id then
-                self.cfg.fallbackEnabled = false
-            end
             self:save(fam.name .. " mode -> Run 24/7 (Priority Queue)")
         end)
 
