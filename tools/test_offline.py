@@ -4499,6 +4499,176 @@ do
     component._reset()
 end
 
+-- ============================================================================
+-- TEST 23: 24/7 Discount Coverage Warning & DTPF GUI QoL
+-- ============================================================================
+do
+    Hardware.resetClusterState()
+    local RecipesDB = require("lib.recipes_db")
+    local env, fluids, items, _, _, _, _, _, _, dtpfStates = setupStandardEnv()
+    -- Enable Infinity Comb + Catalyst Dust ingredients for molten_infinity & Raw Tesseract rods
+    items["gregtech:gt.metaitem.01:28032"] = 100000 -- Iron/Infinity Catalyst Dust check
+    fluids["exciteddtcc"] = 500000
+    fluids["exciteddtpc"] = 500000
+    fluids["exciteddtrc"] = 500000
+    fluids["exciteddtec"] = 500000
+    fluids["exciteddtsc"] = 500000
+    -- Give molten_infinity & raw_tesseract their required ingredients dynamically via RecipesDB
+    for _, fid in ipairs({ "molten_infinity", "raw_tesseract" }) do
+        local fam = RecipesDB.BY_ID[fid]
+        for _, mod in ipairs((fam and fam.modifiers) or {}) do
+            for _, tKey in ipairs({ "DTRC", "DTEC", "DTSC" }) do
+                local tier = mod and mod.tiers and mod.tiers[tKey]
+                if tier then
+                    for _, ii in ipairs(tier.itemsIn or {}) do
+                        items[tostring(ii.name) .. ":" .. tostring(ii.damage or 0)] = 100000
+                    end
+                    for _, fi in ipairs(tier.fluidsIn or {}) do
+                        fluids[fi.name] = 10000000
+                    end
+                end
+            end
+        end
+    end
+    for _, rc in pairs(env.recipes) do
+        rc.enabled = false
+        rc.forever = false
+        rc.maxDtpfs = 0
+    end
+    env.armed = true
+    env.allowParallelSameRecipe = true
+    env.fallbackEnabled = true
+    env.fallbackFamilyId = "molten_infinity"
+    env.recipes["raw_tesseract"].enabled = true
+    env.recipes["raw_tesseract"].forever = true
+    env.recipes["raw_tesseract"].maxDtpfs = 2
+
+    local st23 = {}
+    -- Test 0/5 covered on shared ch1 when Fallback is OFF & no 24/7 recipe is enabled
+    env.recipes["raw_tesseract"].enabled = false
+    env.fallbackEnabled = false
+    Scheduler.step(env, st23)
+    assert(st23.coverageWarning ~= nil, "T23 Fallback OFF + 0 24/7 recipes triggers coverageWarning")
+    assertEq(st23.coverageWarning.covered, 0, "T23 0/5 covered when no 24/7 or Fallback")
+
+    -- Configure 5 independent channels (ch1..ch5) like the live base so Max DTPFs = 2 covers 2/5
+    env.channels = {}
+    for c = 1, 5 do
+        env.channels[c] = { id = "ch" .. c, name = "Passive ch" .. c, mode = "storage_bus", shareOnDemand = true, enabled = true, hatchAddr = "sb-fluid-1", busAddr = "sb-item-1" }
+        env.dtpfs[c].channelId = "ch" .. c
+    end
+    env.fallbackEnabled = true
+    env.fallbackFamilyId = "molten_infinity"
+    env.recipes["raw_tesseract"].enabled = true
+    env.recipes["raw_tesseract"].forever = true
+    env.recipes["raw_tesseract"].maxDtpfs = 2
+    Scheduler.step(env, st23)
+    assert(st23.coverageWarning == nil, "T23 unexpected warning: " .. tostring(st23.coverageWarning and st23.coverageWarning.reason))
+
+    -- Disable Fallback -> only 2/5 DTPFs covered by Raw Tesseract Max 2
+    env.fallbackEnabled = false
+    Scheduler.step(env, st23)
+    assert(st23.coverageWarning ~= nil, "T23 Fallback OFF with Max 2 triggers coverageWarning")
+    assertEq(st23.coverageWarning.kind, "unconfigured", "T23 partial Max-DTPF coverage kind is unconfigured")
+    assertEq(st23.coverageWarning.covered, 2, "T23 partial Max-DTPF covered = 2")
+    assertEq(st23.coverageWarning.uncovered, 3, "T23 partial Max-DTPF uncovered = 3")
+
+    -- Re-enable Fallback, then remove Infinity Comb/Catalyst -> Fallback blocked
+    env.fallbackEnabled = true
+    local infFam = RecipesDB.BY_ID["molten_infinity"]
+    local infMod = infFam.modifiers[env.recipes["molten_infinity"].modifierIndex or 1] or infFam.modifiers[1]
+    local infTier = infMod.tiers.DTEC or infMod.tiers.DTRC
+    local removedKey = tostring(infTier.itemsIn[1].name) .. ":" .. tostring(infTier.itemsIn[1].damage or 0)
+    local savedInfAmt = items[removedKey]
+    items[removedKey] = 0
+    Scheduler.step(env, st23)
+    assert(st23.coverageWarning ~= nil, "T23 blocked Fallback emits coverageWarning")
+    assertEq(st23.coverageWarning.kind, "blocked", "T23 blocked Fallback kind is blocked")
+    assertEq(st23.coverageWarning.familyId, "molten_infinity", "T23 blocked Fallback targets molten_infinity")
+    items[removedKey] = savedInfAmt
+
+    -- Per-DTPF role restrictions: passive_only and pinned warn; pinned_loop covers
+    env.dtpfs[5].roleOverride = "passive_only"
+    Scheduler.step(env, st23)
+    assert(st23.coverageWarning ~= nil and st23.coverageWarning.kind == "unconfigured", "T23 passive_only DTPF warns on idle discount loss")
+    env.dtpfs[5].roleOverride = "pinned"
+    env.dtpfs[5].pinnedFamilyId = "raw_tesseract"
+    Scheduler.step(env, st23)
+    assert(st23.coverageWarning ~= nil and st23.coverageWarning.kind == "unconfigured", "T23 pinned <Tgt DTPF warns on idle discount loss")
+    env.dtpfs[5].roleOverride = "pinned_loop"
+    Scheduler.step(env, st23)
+    assert(st23.coverageWarning == nil, "T23 pinned_loop DTPF cleanly covers 24/7 discount")
+    env.dtpfs[5].roleOverride = "auto"
+    env.dtpfs[5].pinnedFamilyId = nil
+
+    -- UI verification: Tab 2 Row 9 warning + Fallback bar, Tab 1 Overview, [Log] modal, Tab 3 24/7 Max + [*Fallback]
+    for k = 1, 5 do
+        dtpfStates[k].active = true
+        dtpfStates[k].maxProgress = 100
+        dtpfStates[k].progress = 25
+    end
+    env.fallbackEnabled = false
+    local stUi23 = {}
+    Scheduler.step(env, stUi23)
+    local UI = require("lib.ui")
+    local gpu23 = component._newMockGPU(160, 50)
+    local ui23 = UI.new(env, stUi23, function() end)
+
+    local function clickT23(needle, yMin, yMax, xMin, xMax)
+        for i = #ui23.hitboxes, 1, -1 do
+            local hb = ui23.hitboxes[i]
+            if (not yMin or hb.y1 >= yMin) and (not yMax or hb.y2 <= yMax)
+                and (not xMin or hb.x1 >= xMin) and (not xMax or hb.x2 <= xMax) then
+                local row = gpu23._rowText(hb.y1)
+                if unicode.sub(row, hb.x1, hb.x2):find(needle, 1, true) then
+                    ui23:handleTouch(hb.x1, hb.y1, 0)
+                    ui23:render()
+                    for _, s in ipairs(gpu23._calls) do _G.__RENDERED_GPU_CALLS[#_G.__RENDERED_GPU_CALLS + 1] = s end
+                    return true
+                end
+            end
+        end
+        return false
+    end
+
+    ui23.tab = 1; ui23:render()
+    for _, s in ipairs(gpu23._calls) do _G.__RENDERED_GPU_CALLS[#_G.__RENDERED_GPU_CALLS + 1] = s end
+    assert(gpu23._allText():find("24/7 DISCOUNT WARN", 1, true), "T23 Tab 1 Overview displays 24/7 DISCOUNT WARN")
+
+    ui23.tab = 2; ui23:render()
+    for _, s in ipairs(gpu23._calls) do _G.__RENDERED_GPU_CALLS[#_G.__RENDERED_GPU_CALLS + 1] = s end
+    assert(gpu23._rowText(9):find("[Fallback:ON]", 1, true), "T23 Tab 2 Row 9 displays warning + [Fallback:ON] button")
+    assert(clickT23("[Fallback:ON]", 9, 9, 82, 160), "T23 clicked [Fallback:ON] on Tab 2 Row 9")
+    assertEq(env.fallbackEnabled, true, "T23 [Fallback:ON] enabled Fallback")
+    Scheduler.step(env, stUi23)
+    ui23:render()
+    for _, s in ipairs(gpu23._calls) do _G.__RENDERED_GPU_CALLS[#_G.__RENDERED_GPU_CALLS + 1] = s end
+    assert(gpu23._rowText(9):find("24/7 OK", 1, true), "T23 Tab 2 Row 9 shows 24/7 OK after Fallback enabled")
+
+    ui23.tab = 3
+    ui23.selectedFamilyId = "raw_tesseract"
+    ui23:render()
+    for _, s in ipairs(gpu23._calls) do _G.__RENDERED_GPU_CALLS[#_G.__RENDERED_GPU_CALLS + 1] = s end
+    assert(gpu23._rowText(9):find("[Max:2 DTPF]", 1, true), "T23 Tab 3 Row 9 shows [Max:2 DTPF] on 24/7 Raw Tesseract")
+    assert(clickT23("[Max:2 DTPF]", 9, 9, 85, 160), "T23 clicked [Max:2 DTPF] on 24/7 Raw Tesseract")
+    assertEq(env.recipes["raw_tesseract"].maxDtpfs, 3, "T23 [Max:2 DTPF] cycled to 3")
+    env.recipes["raw_tesseract"].maxDtpfs = 2
+    assert(clickT23("[Fallback]", 8, 8, 85, 160), "T23 clicked [Fallback] button on Tab 3 Row 8")
+    assertEq(env.fallbackFamilyId, "raw_tesseract", "T23 [Fallback] switched fallbackFamilyId to raw_tesseract")
+
+    ui23.logModalActive = true
+    ui23.logModalTab = 1
+    env.fallbackEnabled = false
+    Scheduler.step(env, stUi23)
+    ui23:render()
+    for _, s in ipairs(gpu23._calls) do _G.__RENDERED_GPU_CALLS[#_G.__RENDERED_GPU_CALLS + 1] = s end
+    assert(gpu23._allText():find("24/7 Coverage", 1, true), "T23 Log Modal displays 24/7 Coverage alert")
+
+    component.gpu = nil
+    Hardware.resetClusterState()
+    component._reset()
+end
+
 return "OK"
 """
             res = host.exec_lua(test_suite, "test_suite")
@@ -4570,7 +4740,7 @@ return "OK"
             finally:
                 mem_host.close()
 
-            print(f"ALL 22 OFFLINE TEST SUITES PASSED (0 bad-width glyphs, {live_kb} KB live JNLua heap, Lua 5.3 + OpenOS verified).")
+            print(f"ALL 23 OFFLINE TEST SUITES PASSED (0 bad-width glyphs, {live_kb} KB live JNLua heap, Lua 5.3 + OpenOS verified).")
             print("--- Sample main.lua --check output ---")
             for line in check_out.splitlines():
                 print("  " + line)

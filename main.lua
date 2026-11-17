@@ -431,7 +431,11 @@ local function runCheck()
     if cfg.fallbackEnabled then
         local fbId = cfg.fallbackFamilyId
         local fbSt = runtimeState.recipeStatus[fbId] or {}
-        print(string.format("  * Legacy Fallback (%s): ON -> %s", tostring(fbId), tostring(fbSt.stateStr)))
+        print(string.format("  * Global Fallback (%s): ON -> %s", tostring(fbId), tostring(fbSt.stateStr)))
+    end
+    if runtimeState.coverageWarning then
+        local cw = runtimeState.coverageWarning
+        print(string.format("  ! 24/7 Discount Warning: %s - %s", tostring(cw.summary), tostring(cw.reason)))
     end
     local qEnabled = {}
     for i = 1, #RecipesDB.FAMILIES do

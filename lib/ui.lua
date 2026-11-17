@@ -889,6 +889,7 @@ function UI:renderHeader()
     end
     local odX = math.max(96, self.w - unicode.wlen(odStr))
     self:drawText(odX, 2, odStr, odCol, COLORS.headerBg)
+    self:addHitbox(odX, 2, self.w, 2, function() self.tab = TAB_SETUP end)
 
     local leftMsg
     if #self.cfg.channels > 1 then
@@ -914,6 +915,7 @@ function UI:renderHeader()
             onlineCount, #self.cfg.dtpfs, tostring(ch1St.label or "Idle"))
     end
     self:drawText(63, 2, padOrTrunc(leftMsg, math.max(12, odX - 65)), armed and COLORS.green or COLORS.yellow, COLORS.headerBg)
+    self:addHitbox(63, 2, math.max(63, odX - 2), 2, function() self.tab = TAB_FLEET end)
 
     -- Row 3 (Full Width): Alert / Paused Safety Notice OR Live Catalyst & DTR Reserve Bar (omitted on Overview & Setup)
     local floorsBtnW = 9
@@ -2155,6 +2157,83 @@ function UI:renderGlobalSettingsCard()
 end
 
 function UI:renderPriorityQueueCard()
+    -- Row 9 (`x=82..159, y=9`): 24/7 Discount-Retention Warning OR Concise Fallback Controls
+    local cw = self.state and self.state.coverageWarning
+    if cw then
+        self:fillRect(82, 9, 78, 1, " ", COLORS.amberBg)
+        local btnLbl, btnFn
+        if not self.cfg.fallbackEnabled then
+            btnLbl = "[Fallback:ON]"
+            btnFn = function()
+                self.cfg.fallbackFamilyId = self.cfg.fallbackFamilyId or "molten_infinity"
+                self.cfg.fallbackEnabled = true
+                local fbFam = FAMILY_BY_ID[self.cfg.fallbackFamilyId]
+                self:save("Enabled Fallback (" .. (fbFam and fbFam.name or self.cfg.fallbackFamilyId) .. ")")
+            end
+        elseif cw.familyId then
+            btnLbl = "[Inspect ->]"
+            btnFn = function()
+                self.selectedFamilyId = cw.familyId
+                self.tab = TAB_RECIPES
+            end
+        else
+            btnLbl = "[Fix ->]"
+            btnFn = function()
+                if cw.dtpfIdx then
+                    self.selectedDtpf = cw.dtpfIdx
+                    self:ensureDtpfVisible(cw.dtpfIdx)
+                else
+                    self.queueShowAll = true
+                    self.activeScroll = 0
+                end
+            end
+        end
+        local bx = 160 - unicode.wlen(btnLbl) + 1
+        self:drawButton(bx, 9, btnLbl, COLORS.yellow, COLORS.btnBg, btnFn)
+        local wTxt = "! " .. tostring(cw.shortReason or cw.summary) .. " - " .. tostring(cw.reason)
+        self:drawText(83, 9, padOrTrunc(wTxt, math.max(12, bx - 84)), COLORS.yellow, COLORS.amberBg)
+    else
+        self:fillRect(82, 9, 78, 1, " ", COLORS.bg)
+        self:drawText(82, 9, "Fallback:", COLORS.muted, COLORS.bg)
+        local fx = self:drawButton(92, 9, self.cfg.fallbackEnabled and "[ON ]" or "[OFF]",
+            self.cfg.fallbackEnabled and COLORS.green or COLORS.muted,
+            self.cfg.fallbackEnabled and COLORS.darkGreen or COLORS.btnBg,
+            function()
+                self.cfg.fallbackEnabled = not (self.cfg.fallbackEnabled == true)
+                self:save("Global Fallback -> " .. (self.cfg.fallbackEnabled and "ON" or "OFF"))
+            end) + 1
+        if self.cfg.fallbackEnabled then
+            local fbId = self.cfg.fallbackFamilyId or "molten_infinity"
+            local fbFam = FAMILY_BY_ID[fbId]
+            local fbName = fbFam and compactRecipeName(fbFam.name, 22) or fbId
+            fx = self:drawButton(fx, 9, "[" .. padOrTrunc(fbName, 22):gsub("%s+$", "") .. "]",
+                COLORS.cyan, COLORS.btnBg, function()
+                    self.selectedFamilyId = fbId
+                    self.tab = TAB_RECIPES
+                end) + 1
+            if self:isConvControlSupported() then
+                local fbConvModes = {
+                    { id = "global", lbl = "Def",  col = COLORS.muted },
+                    { id = "on",     lbl = "⚡50%", col = COLORS.cyan  },
+                    { id = "off",    lbl = "◇OFF", col = COLORS.yellow },
+                }
+                local fbC = self.cfg.fallbackConvMode or "global"
+                local fbIdx = 1
+                for k = 1, #fbConvModes do if fbConvModes[k].id == fbC then fbIdx = k break end end
+                local curFc = fbConvModes[fbIdx]
+                self:drawText(fx, 9, "Conv:", COLORS.muted, COLORS.bg)
+                fx = self:drawButton(fx + 5, 9, "[" .. curFc.lbl .. "]", curFc.col, COLORS.btnBg, function(step)
+                    local nxt = fbConvModes[((fbIdx - 1 + (step or 1)) % #fbConvModes) + 1]
+                    self.cfg.fallbackConvMode = nxt.id
+                    self:save("Fallback Convergence -> " .. nxt.lbl)
+                end) + 1
+            end
+        end
+        if fx <= 150 then
+            self:drawText(151, 9, "✓ 24/7 OK", COLORS.green, COLORS.bg)
+        end
+    end
+
     -- RIGHT PANE Card 2: Expanded Unified Priority Queue (rows 10..47, 36 visible rows)
     local enabledList, allSortedList = {}, {}
     for i = 1, #RecipesDB.FAMILIES do
@@ -2512,11 +2591,12 @@ end
 function UI:renderOverviewKpis(ov)
     local armed = (self.cfg.armed == true)
     local bns = (self.state and self.state.bottlenecks) or {}
+    local cw = self.state and self.state.coverageWarning
     local meta = (self.state and self.state.lastPollMeta) or {}
     local upStr = formatLogUptime(meta.uptime or (self.state and self.state._lastPollUptime))
 
     -- Card 1: System Health (x = 2..40, w = 39) -> click opens [Log]
-    local hBorder = (#bns > 0 or not armed) and COLORS.yellow or COLORS.green
+    local hBorder = (#bns > 0 or cw ~= nil or not armed) and COLORS.yellow or COLORS.green
     self:drawFrame(2, 5, 39, 5, hBorder, COLORS.panelBg, "round")
     self:addHitbox(2, 5, 40, 9, function()
         self.logModalActive = true
@@ -2526,10 +2606,16 @@ function UI:renderOverviewKpis(ov)
     self:drawText(math.max(20, 40 - unicode.wlen(upStr) - 1), 6, upStr, COLORS.muted, COLORS.panelBg)
     if not armed then
         self:drawText(4, 7, "○ PAUSED (SAFE PREVIEW)", COLORS.yellow, COLORS.panelBg)
-        self:drawText(4, 8, padOrTrunc((#bns > 0) and ("! " .. tostring(bns[1].name) .. ": " .. tostring(bns[1].reason)) or "Read-only monitor; 0 writes", 35), COLORS.muted, COLORS.panelBg)
+        local subWarn = (#bns > 0) and ("! " .. tostring(bns[1].name) .. ": " .. tostring(bns[1].reason))
+            or (cw and ("! " .. tostring(cw.shortReason or cw.reason)))
+            or "Read-only monitor; 0 writes"
+        self:drawText(4, 8, padOrTrunc(subWarn, 35), COLORS.muted, COLORS.panelBg)
     elseif #bns > 0 then
         self:drawText(4, 7, string.format("! %d ALERT(S)", #bns), COLORS.yellow, COLORS.panelBg)
         self:drawText(4, 8, padOrTrunc(tostring(bns[1].name or "?") .. ": " .. tostring(bns[1].reason or "Blocked"), 35), COLORS.fg, COLORS.panelBg)
+    elseif cw then
+        self:drawText(4, 7, "! 24/7 DISCOUNT WARN", COLORS.yellow, COLORS.panelBg)
+        self:drawText(4, 8, padOrTrunc(cw.shortReason or cw.reason, 35), COLORS.fg, COLORS.panelBg)
     else
         self:drawText(4, 7, "✓ ALL SYSTEMS HEALTHY", COLORS.green, COLORS.panelBg)
         self:drawText(4, 8, "All DTPFs & stock targets nominal", COLORS.muted, COLORS.panelBg)
@@ -2606,6 +2692,20 @@ end
 
 local function gatherProductionOverviewItems(self)
     local rows = {}
+    local cw = self.state and self.state.coverageWarning
+    if cw then
+        rows[#rows + 1] = {
+            group = 0,
+            prio = 0,
+            bottleneck = {
+                name = cw.summary,
+                reason = cw.reason,
+                familyId = cw.familyId,
+                dtpfIdx = cw.dtpfIdx,
+                isCoverage = true,
+            },
+        }
+    end
     local bns = (self.state and self.state.bottlenecks) or {}
     for bi = 1, #bns do
         local b = bns[bi]
@@ -2687,7 +2787,20 @@ function UI:renderOverviewProductionPanel(ov)
                 rightCol = COLORS.yellow
                 subTxt = tostring(b.reason or "Check [4] SETUP")
                 subCol = COLORS.yellow
-                self:addHitbox(4, by, 77, by + 1, function() self.tab = TAB_SETUP end)
+                self:addHitbox(4, by, 77, by + 1, function()
+                    if b.familyId then
+                        self.selectedFamilyId = b.familyId
+                        self.tab = TAB_RECIPES
+                    elseif b.dtpfIdx or b.isCoverage then
+                        if b.dtpfIdx then
+                            self.selectedDtpf = b.dtpfIdx
+                            self:ensureDtpfVisible(b.dtpfIdx)
+                        end
+                        self.tab = TAB_FLEET
+                    else
+                        self.tab = TAB_SETUP
+                    end
+                end)
             else
                 local fam, rc, st = item.fam, item.rc, item.st
                 local isFl = st.trackedOutput and (st.trackedOutput.isFluid or st.trackedOutput.type == "fluid")
@@ -2843,7 +2956,18 @@ function UI:renderOverviewRightPanel()
     for i = 1, 6 do
         local rr = reserveRows[i]
         local ry = 13 + (i - 1) * 3
-        self:addHitbox(84, ry, 157, ry, function() self.tab = TAB_SETUP end)
+        self:addHitbox(84, ry, 157, ry, function()
+            local promptTitle = rr.isDtr and "DTR Reserve Floor (L):" or (rr.name .. " Reserve Floor (L):")
+            self:openNumberPrompt(promptTitle, UI.formatNumber(rr.floor, true), function(num)
+                if rr.isDtr then
+                    self.cfg.dtrReserveFloor = num
+                else
+                    self.cfg.catalystFloors = self.cfg.catalystFloors or {}
+                    self.cfg.catalystFloors[rr.name] = num
+                end
+                self:save(rr.name .. " reserve floor -> " .. UI.formatNumber(num, true))
+            end)
+        end)
 
         local ok = (rr.amt > rr.floor)
         local col = (rr.amt <= 0) and COLORS.red or (ok and COLORS.green or COLORS.yellow)
@@ -3130,13 +3254,27 @@ function UI:renderRecipeInspectorPane(fam, pinnedByFam, rankById)
             rc.forever = false
             self:save(fam.name .. " mode -> Stop at Target (<Target)")
         end) + 1
-    self:drawButton(bx, 8, "[24/7 Loop]",
+    bx = self:drawButton(bx, 8, "[24/7 Loop]",
         isLoopMode and COLORS.fg or COLORS.cyan,
         isLoopMode and COLORS.btnActiveBg or COLORS.btnBg,
         function()
             rc.forever = true
             rc.enabled = true
             self:save(fam.name .. " mode -> Run 24/7 (Priority Queue)")
+        end) + 1
+    local isFbPrimary = (self.cfg.fallbackEnabled == true) and (self.cfg.fallbackFamilyId == fam.id)
+    self:drawButton(bx, 8, isFbPrimary and "[*Fallback]" or "[Fallback]",
+        isFbPrimary and COLORS.cyan or COLORS.muted,
+        isFbPrimary and COLORS.btnActiveBg or COLORS.btnBg,
+        function()
+            if isFbPrimary then
+                self.cfg.fallbackEnabled = false
+                self:save("Disabled global Fallback (" .. fam.name .. ")")
+            else
+                self.cfg.fallbackFamilyId = fam.id
+                self.cfg.fallbackEnabled = true
+                self:save("Fallback recipe -> " .. fam.name)
+            end
         end)
 
     local myRank = rankById[fam.id] or 1
@@ -3167,7 +3305,7 @@ function UI:renderRecipeInspectorPane(fam, pinnedByFam, rankById)
         pinSummary = "Running on: " .. formatDtpfIdList(st.activeDtpfs, 8)
         pinCol = COLORS.green
     end
-    local showMaxBtn = (not isLoopMode) and (self.cfg.allowParallelSameRecipe == true)
+    local showMaxBtn = (self.cfg.allowParallelSameRecipe == true)
     local pinSummaryW = 51
     if showMaxBtn then
         local maxCap = math.max(0, math.floor(tonumber(rc.maxDtpfs) or 0))
@@ -4985,36 +5123,67 @@ end
 
 function UI:renderLogActivityPane(mx, my, mw, mh)
     local bottlenecks = (self.state and self.state.bottlenecks) or {}
-    self:drawText(mx + 2, my + 3, string.format("BOTTLENECKS & ALERTS (%d):", #bottlenecks), COLORS.accent, COLORS.headerBg)
+    local cw = self.state and self.state.coverageWarning
+    local alertList = {}
+    for k = 1, #bottlenecks do
+        alertList[#alertList + 1] = bottlenecks[k]
+    end
+    if cw then
+        alertList[#alertList + 1] = {
+            kind = "coverage",
+            name = cw.summary,
+            reason = cw.reason,
+            familyId = cw.familyId,
+            dtpfIdx = cw.dtpfIdx,
+        }
+    end
+    self:drawText(mx + 2, my + 3, string.format("BOTTLENECKS & ALERTS (%d):", #alertList), COLORS.accent, COLORS.headerBg)
     local divY
-    if #bottlenecks == 0 then
+    if #alertList == 0 then
         self:fillRect(mx + 1, my + 4, mw - 2, 1, " ", COLORS.panelBg)
         self:drawText(mx + 2, my + 4, "✓ 0 Bottlenecks - all enabled passive recipes & DTPFs are runnable.", COLORS.green, COLORS.panelBg)
         divY = my + 5
     else
-        local showBn = math.min(6, #bottlenecks)
+        local showBn = math.min(6, #alertList)
         for k = 1, showBn do
             local y = my + 3 + k
-            local bn = bottlenecks[k]
+            local bn = alertList[k]
             local rBg = (k % 2 == 0) and COLORS.rowAltBg or COLORS.panelBg
             self:fillRect(mx + 1, y, mw - 2, 1, " ", rBg)
             local bnCol = (bn.kind == "cover" or bn.kind == "offline") and COLORS.red or COLORS.yellow
             local txt = string.format("! %s - %s", tostring(bn.name or "?"), tostring(bn.reason or "Blocked"))
             self:drawText(mx + 2, y, padOrTrunc(txt, mw - 18), bnCol, rBg)
-            if bn.familyId then
+            if bn.kind == "coverage" then
+                self:drawButton(mx + mw - 14, y, "[Fix 24/7 →]", COLORS.yellow, COLORS.btnBg, function()
+                    self.logModalActive = false
+                    if bn.familyId then
+                        self.selectedFamilyId = bn.familyId
+                        self.tab = TAB_RECIPES
+                    else
+                        if bn.dtpfIdx then
+                            self.selectedDtpf = bn.dtpfIdx
+                            self:ensureDtpfVisible(bn.dtpfIdx)
+                        end
+                        self.tab = TAB_FLEET
+                    end
+                    self:setStatus("24/7 Coverage: " .. tostring(bn.reason or ""))
+                end)
+            elseif bn.familyId then
                 self:drawButton(mx + mw - 14, y, "[Inspect →]", COLORS.cyan, COLORS.btnBg, function()
                     self.logModalActive = false
                     self.selectedFamilyId = bn.familyId
                     self.tab = TAB_RECIPES
                     self:setStatus("Inspecting bottleneck: " .. tostring(bn.name or bn.familyId))
                 end)
-            elseif bn.dtpfIdx then
-                self:drawButton(mx + mw - 14, y, "[Focus →]", COLORS.cyan, COLORS.btnBg, function()
+            elseif bn.dtpfIdx or bn.kind == "coverage" then
+                self:drawButton(mx + mw - 14, y, bn.dtpfIdx and "[Focus →]" or "[Fleet →]", COLORS.cyan, COLORS.btnBg, function()
                     self.logModalActive = false
-                    self.selectedDtpf = bn.dtpfIdx
-                    self:ensureDtpfVisible(bn.dtpfIdx)
+                    if bn.dtpfIdx then
+                        self.selectedDtpf = bn.dtpfIdx
+                        self:ensureDtpfVisible(bn.dtpfIdx)
+                    end
                     self.tab = TAB_FLEET
-                    self:setStatus("Focused " .. tostring(bn.name or ("DTPF #" .. bn.dtpfIdx)))
+                    self:setStatus("Focused " .. tostring(bn.name or "DTPF Fleet"))
                 end)
             end
         end

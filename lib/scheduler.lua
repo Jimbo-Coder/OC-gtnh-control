@@ -3396,6 +3396,231 @@ local function emitRawStepTrace(cfg, runtimeState, ctx, pushEvent)
     pushEvent("info", inMsg, { stage = "IN", minLevel = 3, allowRepeat = true })
 end
 
+-- Check whether every enabled DTPF has 24/7 or Fallback work once <Tgt stocks fill and OD is idle
+function Scheduler.evaluate247Coverage(cfg, runtimeState)
+    local dtpfs = (cfg and cfg.dtpfs) or {}
+    local enabledCount = 0
+    for i = 1, #dtpfs do
+        if dtpfs[i].enabled ~= false then enabledCount = enabledCount + 1 end
+    end
+    if enabledCount == 0 then return nil end
+
+    local rStatuses = runtimeState and runtimeState.recipeStatus
+    local hasLive = (type(rStatuses) == "table") and (next(rStatuses) ~= nil)
+    local dtpfStatuses = (runtimeState and runtimeState.dtpfStatus) or {}
+
+    local chMap, chOrder = {}, {}
+    for i = 1, #((cfg and cfg.channels) or {}) do
+        local ch = cfg.channels[i]
+        chMap[ch.id] = { id = ch.id, enabled = (ch.enabled ~= false), list = {} }
+        chOrder[#chOrder + 1] = chMap[ch.id]
+    end
+    for i = 1, #dtpfs do
+        local d = dtpfs[i]
+        if d.enabled ~= false then
+            local cid = d.channelId or "ch1"
+            if not chMap[cid] then
+                chMap[cid] = { id = cid, enabled = true, list = {} }
+                chOrder[#chOrder + 1] = chMap[cid]
+            end
+            chMap[cid].list[#chMap[cid].list + 1] = { idx = i, d = d, name = d.name or ("DTPF #" .. i) }
+        end
+    end
+
+    local function simulate(requireRunnable)
+        local uncovered, names, roleReason, firstDtpfIdx, firstFamId = 0, {}, nil, nil, nil
+        local function markUncov(u, rsn, fid)
+            uncovered = uncovered + 1
+            names[#names + 1] = u.name
+            if not firstDtpfIdx then firstDtpfIdx = u.idx end
+            if rsn and not roleReason then roleReason = rsn end
+            if fid and not firstFamId then firstFamId = fid end
+        end
+
+        local foreverList, blockedList = {}, {}
+        for idx = 1, #RecipesDB.FAMILIES do
+            local fam = RecipesDB.FAMILIES[idx]
+            local rc = cfg.recipes and cfg.recipes[fam.id]
+            if rc and rc.enabled == true and rc.forever == true then
+                local rSt = hasLive and rStatuses[fam.id] or nil
+                local heat = (rSt and rSt.tierData and rSt.tierData.coilHeat) or 0
+                local maxD = tonumber(rc.maxDtpfs) or 0
+                local ok = (not requireRunnable) or (not rSt) or (rSt.runnable ~= false)
+                local rec = { id = fam.id, name = fam.name, priority = tonumber(rc.priority) or idx, order = idx, heat = heat, maxDtpfs = maxD, reason = rSt and rSt.reason }
+                if ok then foreverList[#foreverList + 1] = rec else blockedList[#blockedList + 1] = rec end
+            end
+        end
+        table.sort(foreverList, function(a, b) return (a.priority ~= b.priority) and (a.priority < b.priority) or (a.order < b.order) end)
+
+        local fbId = cfg.fallbackFamilyId
+        local fbFam = (cfg.fallbackEnabled == true) and fbId and FAMILY_BY_ID[fbId] or nil
+        local fbRc = fbFam and cfg.recipes and cfg.recipes[fbId]
+        local fbSt = (fbFam and hasLive) and rStatuses[fbId] or nil
+        if requireRunnable and fbFam and fbSt and fbSt.runnable == false then
+            blockedList[#blockedList + 1] = { id = fbId, name = fbFam.name, reason = fbSt.reason }
+        end
+
+        local autoQueue = {}
+        for cIdx = 1, #chOrder do
+            local grp = chOrder[cIdx]
+            local autoUnits, pinOk, pinBlocked, chHeatLimit = {}, false, nil, math.huge
+            if requireRunnable then
+                local bestH
+                for k = 1, #grp.list do
+                    local st = dtpfStatuses[grp.list[k].idx]
+                    if st and st.online and (st.coilHeat or 0) > 0 then
+                        bestH = bestH and math.min(bestH, st.coilHeat) or st.coilHeat
+                    end
+                end
+                if bestH then chHeatLimit = bestH end
+            end
+            for k = 1, #grp.list do
+                local u = grp.list[k]
+                local role = u.d.roleOverride or "auto"
+                if role == "od_only" then markUncov(u, "OD-Only role stops when On-Demand is idle")
+                elseif role == "passive_only" then markUncov(u, "Passive-Only role stops once <Tgt stocks fill")
+                elseif role == "pinned" then markUncov(u, "Pin (<Tgt) stops at target; use Pin 24/7", u.d.pinnedFamilyId)
+                elseif role == "pinned_loop" then
+                    local pf = u.d.pinnedFamilyId and FAMILY_BY_ID[u.d.pinnedFamilyId]
+                    if not pf then
+                        markUncov(u, "Pin 24/7 has no recipe selected")
+                    else
+                        local rSt = (requireRunnable and hasLive) and rStatuses[pf.id] or nil
+                        if rSt and rSt.runnable == false then
+                            pinBlocked = { id = pf.id, name = pf.name, reason = tostring(rSt.reason or "Blocked") }
+                            markUncov(u, pf.name .. " (" .. pinBlocked.reason .. ")", pf.id)
+                        else
+                            pinOk = true
+                        end
+                    end
+                elseif not grp.enabled then
+                    markUncov(u, "Channel " .. tostring(grp.id) .. " disabled")
+                else
+                    autoUnits[#autoUnits + 1] = u
+                end
+            end
+            if #autoUnits > 0 then
+                if pinBlocked then
+                    for k = 1, #autoUnits do markUncov(autoUnits[k], pinBlocked.name .. " (" .. pinBlocked.reason .. ")", pinBlocked.id) end
+                elseif not pinOk then
+                    autoQueue[#autoQueue + 1] = { units = autoUnits, heatLimit = chHeatLimit }
+                end
+            end
+        end
+
+        local used, assigned = {}, {}
+        for qIdx = 1, #autoQueue do
+            local chQ = autoQueue[qIdx]
+            local chUnits = #chQ.units
+            local chosenId = nil
+            for f = 1, #foreverList do
+                local cand = foreverList[f]
+                if (not used[cand.id]) and cand.heat <= chQ.heatLimit then
+                    chosenId = cand.id
+                    break
+                end
+            end
+            if not chosenId and cfg.allowParallelSameRecipe ~= false then
+                local bestCnt = nil
+                for f = 1, #foreverList do
+                    local cand = foreverList[f]
+                    local cur = assigned[cand.id] or 0
+                    if cand.heat <= chQ.heatLimit and (cand.maxDtpfs <= 0 or cur < cand.maxDtpfs) and ((not bestCnt) or cur < bestCnt) then
+                        chosenId, bestCnt = cand.id, cur
+                    end
+                end
+            end
+            if chosenId then
+                used[chosenId] = true
+                assigned[chosenId] = (assigned[chosenId] or 0) + chUnits
+            elseif fbFam then
+                local fbMax = (fbRc and tonumber(fbRc.maxDtpfs)) or 0
+                local fbCur = assigned[fbId] or 0
+                local fbHeat = (fbSt and fbSt.tierData and fbSt.tierData.coilHeat) or 0
+                local fbOk = (fbMax <= 0 or fbCur < fbMax) and ((not requireRunnable) or (((not fbSt) or fbSt.runnable ~= false) and fbHeat <= chQ.heatLimit))
+                if fbOk then
+                    assigned[fbId] = fbCur + chUnits
+                else
+                    for k = 1, chUnits do markUncov(chQ.units[k], nil, fbId) end
+                end
+            else
+                for k = 1, chUnits do markUncov(chQ.units[k]) end
+            end
+        end
+        return uncovered, names, roleReason, firstDtpfIdx, firstFamId, #foreverList, fbFam, fbRc, blockedList
+    end
+
+    local uncov, names, roleRsn, dtpfIdx, famId, nForever, fbFam, fbRc = simulate(false)
+    if uncov > 0 then
+        local covered = enabledCount - uncov
+        local shortRsn, reason
+        if roleRsn then
+            local nameStr = table.concat(names, ", ")
+            if not cfg.fallbackEnabled and nForever == 0 and #names > 1 then
+                shortRsn = "Fallback OFF (0 24/7 recipes)"
+                reason = string.format("Fallback is OFF & role stops idle DTPFs (%s)", nameStr)
+            else
+                shortRsn = roleRsn
+                reason = string.format("%s (%s) - %d/%d DTPFs will lose 50%% discount", roleRsn, nameStr, uncov, enabledCount)
+            end
+        elseif not cfg.fallbackEnabled then
+            if nForever == 0 then
+                shortRsn = "Fallback OFF (0 24/7 recipes)"
+                reason = "Fallback is OFF and 0 recipes are 24/7 - fleet will stop & lose 50% discount once <Tgt fills"
+            elseif cfg.allowParallelSameRecipe == false then
+                shortRsn = "Fallback OFF (Parallel OFF)"
+                reason = "Fallback is OFF and Parallel is OFF - enable Fallback or add 24/7 recipes so all DTPFs keep 50% discount"
+            else
+                shortRsn = "Fallback OFF (Max-DTPF caps)"
+                reason = string.format("Fallback is OFF and 24/7 Max-DTPF caps cover only %d/%d DTPFs - enable Fallback or raise Max DTPFs", covered, enabledCount)
+            end
+        else
+            local fbName = fbFam and fbFam.name or "Fallback"
+            shortRsn = string.format("%s Max:%d leaves idle", fbName:sub(1, 14), tonumber(fbRc and fbRc.maxDtpfs) or 0)
+            reason = string.format("Fallback (%s) Max-DTPF cap leaves %d/%d DTPFs uncovered - set Max DTPFs to All", fbName, uncov, enabledCount)
+            famId = famId or (fbFam and fbFam.id)
+        end
+        return {
+            kind = "unconfigured",
+            covered = covered,
+            uncovered = uncov,
+            total = enabledCount,
+            names = names,
+            summary = string.format("24/7 Coverage (%d/%d Covered)", covered, enabledCount),
+            shortReason = shortRsn,
+            reason = reason,
+            familyId = famId,
+            dtpfIdx = dtpfIdx,
+        }
+    end
+
+    if hasLive then
+        local bUncov, bNames, bRoleRsn, bDtpfIdx, bFamId, _, _, _, blockedList = simulate(true)
+        if bUncov > 0 then
+            local covered = enabledCount - bUncov
+            local bEntry = blockedList[1]
+            local bId = (bEntry and bEntry.id) or bFamId
+            local bName = (bEntry and bEntry.name) or "24/7 Recipe"
+            local bWhy = tostring((bEntry and bEntry.reason) or bRoleRsn or "Blocked")
+            return {
+                kind = "blocked",
+                covered = covered,
+                uncovered = bUncov,
+                total = enabledCount,
+                names = bNames,
+                summary = string.format("24/7 Coverage Blocked (%d/%d Covered)", covered, enabledCount),
+                shortReason = string.format("%d/%d lack 24/7: %s", bUncov, enabledCount, bName),
+                reason = string.format("%s (%s) - %d/%d DTPFs (%s) will stop & lose 50%% discount once <Tgt stocks fill",
+                    bName, bWhy, bUncov, enabledCount, table.concat(bNames, ", ")),
+                familyId = bId,
+                dtpfIdx = bDtpfIdx,
+            }
+        end
+    end
+
+    return nil
+end
+
 -- Execute one full scheduling / monitor cycle (only mutates hardware when cfg.armed == true)
 function Scheduler.step(cfg, runtimeState, opts)
     opts = opts or {}
@@ -3461,6 +3686,7 @@ function Scheduler.step(cfg, runtimeState, opts)
     if (cfg.logLevel == "raw") and (not ctx.useCache) and (not opts.interactive) then
         emitRawStepTrace(cfg, runtimeState, ctx, pushEvent)
     end
+    runtimeState.coverageWarning = Scheduler.evaluate247Coverage(cfg, runtimeState)
     local s = runtimeState.stepStats
     runtimeState.lastPollMeta = {
         uptime = nowSec,

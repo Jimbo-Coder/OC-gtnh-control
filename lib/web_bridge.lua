@@ -310,6 +310,7 @@ function WebBridge:buildSnapshot()
             familyId = dst.familyId,
             passiveStalled = (dst.passiveStalled == true),
             coverConflict = (dst.coverConflict == true),
+            warmupEtaSec = dst.warmupEtaSec,
         }
     end
 
@@ -347,6 +348,8 @@ function WebBridge:buildSnapshot()
             reason = rst.reason or "Ready",
             convBelowTarget = (rst.convBelowTarget == true),
             activeDtpfs = rst.activeDtpfs or {},
+            ratePerMin = rst.ratePerMin,
+            etaSec = rst.etaSec,
         }
     end
 
@@ -396,10 +399,12 @@ function WebBridge:buildSnapshot()
         dtr = {
             stock = stockFluids["dimensionallytranscendentresidue"] or 0,
             floor = tonumber(cfg.dtrReserveFloor) or 10000000,
+            ratePerMin = st.dtrRatePerMin,
         },
         dtpfs = dtpfs,
         recipes = recipes,
         bottlenecks = bnOut,
+        coverageWarning = st.coverageWarning,
         events = evOut,
     }
 end
