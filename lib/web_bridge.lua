@@ -390,7 +390,6 @@ function WebBridge:buildSnapshot()
             catalystAutoFallback = (cfg.catalystAutoFallback ~= false),
             fallbackEnabled = (cfg.fallbackEnabled == true),
             fallbackFamilyId = cfg.fallbackFamilyId or "molten_infinity",
-            fallbackChain = cfg.fallbackChain or { cfg.fallbackFamilyId or "molten_infinity" },
             allowParallelSameRecipe = (cfg.allowParallelSameRecipe ~= false),
         },
         catalysts = cats,
@@ -445,29 +444,7 @@ function WebBridge:applyPatch(patch)
     end
     if type(patch.fallbackFamilyId) == "string" and FAMILY_BY_ID[patch.fallbackFamilyId] then
         cfg.fallbackFamilyId = patch.fallbackFamilyId
-        local newChain = { patch.fallbackFamilyId }
-        for _, fid in ipairs(cfg.fallbackChain or {}) do
-            if type(fid) == "string" and FAMILY_BY_ID[fid] and fid ~= patch.fallbackFamilyId then
-                newChain[#newChain + 1] = fid
-            end
-        end
-        cfg.fallbackChain = newChain
         changed = true
-    end
-    if type(patch.fallbackChain) == "table" then
-        local cleanChain = {}
-        local seenFb = {}
-        for _, fid in ipairs(patch.fallbackChain) do
-            if type(fid) == "string" and FAMILY_BY_ID[fid] and not seenFb[fid] then
-                cleanChain[#cleanChain + 1] = fid
-                seenFb[fid] = true
-            end
-        end
-        if #cleanChain > 0 then
-            cfg.fallbackChain = cleanChain
-            cfg.fallbackFamilyId = cleanChain[1]
-            changed = true
-        end
     end
     if type(patch.allowParallelSameRecipe) == "boolean" then
         cfg.allowParallelSameRecipe = patch.allowParallelSameRecipe

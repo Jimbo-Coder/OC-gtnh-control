@@ -4413,34 +4413,30 @@ do
         end
     end
 
-    -- Give raw_tesseract exactly 1 batch; molten_infinity 0 batches; cosmic_neutronium 3 batches; neutronium 2 batches
+    -- Give raw_tesseract (<Tgt) exactly 1 batch; cosmic_neutronium (24/7, maxDtpfs=1) >=3 batches; molten_infinity as fallback
     env.recipes["raw_tesseract"].enabled = true
     env.recipes["raw_tesseract"].priority = 1
     env.recipes["raw_tesseract"].target = 1000000
+    env.recipes["molten_cosmic_neutronium"].enabled = true
+    env.recipes["molten_cosmic_neutronium"].forever = true
+    env.recipes["molten_cosmic_neutronium"].priority = 2
+    env.recipes["molten_cosmic_neutronium"].maxDtpfs = 1
     env.allowParallelSameRecipe = true
     env.fallbackEnabled = true
-    env.fallbackChain = { "molten_infinity", "molten_cosmic_neutronium", "molten_neutronium" }
     env.fallbackFamilyId = "molten_infinity"
 
     stockExactBatches("raw_tesseract", 1)
     stockExactBatches("molten_cosmic_neutronium", 3)
-    stockExactBatches("molten_neutronium", 2)
+    stockExactBatches("molten_infinity", 3)
 
     local st22 = {}
     Scheduler.step(env, st22)
 
     assertEq(st22.recipeStatus["raw_tesseract"].availBatches, 1, "T22 countAvailableBatches exact 1-batch detection")
     assertEq(st22.channelStatus["ch1"].familyId, "raw_tesseract", "T22 ch1 picks priority raw_tesseract")
-    assertEq(st22.channelStatus["ch2"].mode, "FALLBACK", "T22 Pass 2 starvation guard blocks doubling 1-batch raw_tesseract")
-    assertEq(st22.channelStatus["ch2"].familyId, "molten_cosmic_neutronium", "T22 ch2 skips empty molten_infinity -> molten_cosmic_neutronium")
-    assertEq(st22.channelStatus["ch3"].mode, "FALLBACK", "T22 ch3 enters fallback")
-    assertEq(st22.channelStatus["ch3"].familyId, "molten_cosmic_neutronium", "T22 ch3 runs cosmic_neutronium when >=3 batches exist")
-
-    -- Enforce maxDtpfs=1 on molten_cosmic_neutronium -> ch3 must cascade down chain to molten_neutronium
-    env.recipes["molten_cosmic_neutronium"].maxDtpfs = 1
-    Scheduler.step(env, st22)
-    assertEq(st22.channelStatus["ch2"].familyId, "molten_cosmic_neutronium", "T22 ch2 holds 1st cosmic_neutronium slot")
-    assertEq(st22.channelStatus["ch3"].familyId, "molten_neutronium", "T22 ch3 respects maxDtpfs=1 -> cascades to molten_neutronium")
+    assertEq(st22.channelStatus["ch2"].familyId, "molten_cosmic_neutronium", "T22 Pass 2 starvation guard skips doubling 1-batch raw_tesseract -> cosmic_neutronium")
+    assertEq(st22.channelStatus["ch3"].mode, "FALLBACK", "T22 ch3 respects maxDtpfs=1 on cosmic_neutronium -> Fallback")
+    assertEq(st22.channelStatus["ch3"].familyId, "molten_infinity", "T22 ch3 runs visible fallbackFamilyId molten_infinity")
 
     -- Non-clobbering toggle test via WebBridge + UI
     local UI = require("lib.ui")
@@ -4472,31 +4468,30 @@ do
     assertEq(env.fallbackEnabled, true, "T22 UI row-8 toggle does NOT clobber fallbackEnabled=false")
 
     local snap22 = wb22:buildSnapshot()
-    assert(type(snap22.policy.fallbackChain) == "table" and #snap22.policy.fallbackChain >= 2,
-        "T22 WebBridge snapshot includes policy.fallbackChain")
-    local okChain = wb22:applyPatch({ fallbackChain = { "molten_neutronium", "molten_bedrockium" } })
-    assertEq(okChain, true, "T22 WebBridge fallbackChain patch succeeded")
-    assertEq(env.fallbackChain[1], "molten_neutronium", "T22 fallbackChain[1] updated")
-    assertEq(env.fallbackChain[2], "molten_bedrockium", "T22 fallbackChain[2] updated")
-    assertEq(env.fallbackFamilyId, "molten_neutronium", "T22 fallbackFamilyId synced to fallbackChain[1]")
+    assertEq(snap22.policy.fallbackFamilyId, "raw_tesseract", "T22 WebBridge snapshot reports visible fallbackFamilyId")
+    assertEq(snap22.policy.fallbackChain, nil, "T22 WebBridge snapshot has no hidden fallbackChain")
+    local okFb = wb22:applyPatch({ fallbackFamilyId = "molten_infinity" })
+    assertEq(okFb, true, "T22 WebBridge fallbackFamilyId patch succeeded")
+    assertEq(env.fallbackFamilyId, "molten_infinity", "T22 fallbackFamilyId updated")
 
-    -- Verify main.lua saves & Scheduler.ensureConfig reloads fallbackChain cleanly
+    -- Verify main.lua saves & Scheduler.ensureConfig reloads fallbackFamilyId + maxDtpfs cleanly
     local evQ22 = require("event")._queue
     while #evQ22 > 0 do table.remove(evQ22) end
     evQ22[1] = { "key_down", "kbd", string.byte("q"), 16 }
     local mainPath22 = _G.__DTPF_ROOT .. "/main.lua"
     local cfgPath22 = _G.__DTPF_ROOT .. "/config.cfg"
-    __py_write_file(cfgPath22, '{ armed = false, fallbackEnabled = true, fallbackFamilyId = "molten_neutronium", fallbackChain = { "molten_neutronium", "molten_bedrockium" } }\n')
+    __py_write_file(cfgPath22, '{ armed = false, fallbackEnabled = true, fallbackFamilyId = "molten_infinity", recipes = { raw_tesseract = { enabled = true, forever = true, maxDtpfs = 2 } } }\n')
     local m22, mErr22 = load(assert(__py_read_file(mainPath22)), "@" .. mainPath22)
     assert(m22, mErr22)
     m22()
     local saved22 = assert(__py_read_file(cfgPath22), "T22 main.lua wrote config.cfg")
-    assert(saved22:find('fallbackChain = { "molten_neutronium", "molten_bedrockium" }', 1, true), "T22 main.lua persisted fallbackChain")
+    assert(saved22:find('fallbackFamilyId = "molten_infinity"', 1, true), "T22 main.lua persisted fallbackFamilyId")
+    assert(saved22:find('maxDtpfs = 2', 1, true), "T22 main.lua persisted maxDtpfs = 2")
+    assert(not saved22:find('fallbackChain', 1, true), "T22 main.lua does not write hidden fallbackChain")
     local parsed22 = assert(load("return " .. saved22:match("(%b{})")), "T22 valid saved Lua config")()
     local hydrated22 = Scheduler.ensureConfig(parsed22)
-    assertEq(hydrated22.fallbackFamilyId, "molten_neutronium", "T22 hydrated fallbackFamilyId")
-    assertEq(hydrated22.fallbackChain[1], "molten_neutronium", "T22 hydrated fallbackChain[1]")
-    assertEq(hydrated22.fallbackChain[2], "molten_bedrockium", "T22 hydrated fallbackChain[2]")
+    assertEq(hydrated22.fallbackFamilyId, "molten_infinity", "T22 hydrated fallbackFamilyId")
+    assertEq(hydrated22.recipes["raw_tesseract"].maxDtpfs, 2, "T22 hydrated maxDtpfs=2")
     __py_remove_vfs(cfgPath22)
 
     component.gpu = nil
