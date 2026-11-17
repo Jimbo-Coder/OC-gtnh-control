@@ -914,10 +914,10 @@ function UI:renderHeader()
     end
     self:drawText(63, 2, padOrTrunc(leftMsg, math.max(12, odX - 65)), armed and COLORS.green or COLORS.yellow, COLORS.headerBg)
 
-    -- Row 3 (Full Width): Alert / Paused Safety Notice OR Live Catalyst & DTR Reserve Bar (omitted on Overview)
+    -- Row 3 (Full Width): Alert / Paused Safety Notice OR Live Catalyst & DTR Reserve Bar (omitted on Overview & Setup)
     local floorsBtnW = 9
     local epWarnings = (self.discoveredEndpoints and self.discoveredEndpoints.warnings) or {}
-    local showHeaderReserves = (#conflictNames > 0) or (#epWarnings > 0) or (not armed) or (self.tab ~= TAB_OVERVIEW)
+    local showHeaderReserves = (#conflictNames > 0) or (#epWarnings > 0) or (not armed) or (self.tab ~= TAB_OVERVIEW and self.tab ~= TAB_SETUP)
     if #conflictNames > 0 then
         self:fillRect(1, 3, self.w, 1, " ", COLORS.darkRed)
         local msg = "! COVER OVERRIDE on " .. table.concat(conflictNames, ", ")
@@ -930,7 +930,7 @@ function UI:renderHeader()
         self:fillRect(1, 3, self.w, 1, " ", COLORS.amberBg)
         local msg = "PAUSED (SAFE PREVIEW): Live telemetry with ZERO hardware writes. Click [○ PAUSED] above to arm."
         self:drawText(2, 3, padOrTrunc(msg, self.w - floorsBtnW - 4), COLORS.yellow, COLORS.amberBg)
-    elseif self.tab == TAB_OVERVIEW then
+    elseif self.tab == TAB_OVERVIEW or self.tab == TAB_SETUP then
         self:fillRect(1, 3, self.w, 1, " ", COLORS.bg)
         self:drawText(1, 3, string.rep("─", self.w), COLORS.border, COLORS.bg)
     else
@@ -3653,300 +3653,6 @@ function UI:renderRecipesTab()
     self:renderRecipeInspectorPane(self:getSelectedFamily(), pinnedByFam, rankById)
 end
 
-function UI:renderWiringReservesCard()
-    -- Card 1: Reserve Floors & Safety Policies (rows 5..8)
-    self:fillRect(2, 5, self.w - 2, 4, " ", COLORS.panelBg)
-    for ry = 5, 8 do
-        self:drawText(2, ry, "┃", COLORS.accent, COLORS.panelBg)
-    end
-    self:drawText(4, 5, "◈ RESERVE FLOORS & SAFETY POLICIES", COLORS.accent, COLORS.panelBg)
-    self:drawText(40, 5, "(Click [Min:...] to set; R-click Catalyst = copy floor to all 5)", COLORS.muted, COLORS.panelBg)
-
-    local stockFluids = (self.state and self.state.stock and self.state.stock.fluids) or {}
-    local function drawFloorPicker(px, py, label, fluidKey, curFloor, onSet)
-        local amt = stockFluids[fluidKey] or 0
-        local ico = getTankGaugeChar(amt, curFloor)
-        local okCol = (amt == 0) and COLORS.red or ((amt > curFloor) and COLORS.green or COLORS.yellow)
-        self:drawText(px, py, padOrTrunc(string.format("%s%s %s", ico, label, fmtCompactNum(amt, true)), 16), okCol, COLORS.panelBg)
-        local btnTxt = padOrTrunc(string.format("[Min:%s]", fmtCompactNum(curFloor, true)), 15)
-        self:drawButton(px + 17, py, btnTxt, COLORS.cyan, COLORS.btnBg, onSet)
-    end
-
-    for i = 1, 5 do
-        local ct = RecipesDB.CATALYST_TIERS[i]
-        local flr = (self.cfg.catalystFloors and self.cfg.catalystFloors[ct.code]) or 100000
-        local rowY = (i <= 3) and 6 or 7
-        local colX = 4 + ((i <= 3) and (i - 1) or (i - 4)) * 50
-        drawFloorPicker(colX, rowY, ct.code .. " ", ct.fluid, flr, function(_, button)
-            if button == 1 then
-                for _, tier in ipairs(RecipesDB.CATALYST_TIERS) do
-                    self.cfg.catalystFloors[tier.code] = flr
-                end
-                self:save("Copied " .. UI.formatNumber(flr, true) .. " reserve floor to all 5 catalysts.")
-            else
-                self:openNumberPrompt("Set Reserve Floor for " .. ct.code .. " (" .. ct.label .. "):", UI.formatNumber(flr, false), function(val)
-                    local parsed = UI.parseNumber(val)
-                    if parsed and parsed >= 0 then
-                        self.cfg.catalystFloors[ct.code] = parsed
-                        self:save(ct.code .. " reserve floor -> " .. UI.formatNumber(parsed, true))
-                    end
-                end)
-            end
-        end)
-    end
-    drawFloorPicker(104, 7, "DTR  ", "dimensionallytranscendentresidue", self.cfg.dtrReserveFloor or 10000000, function()
-        self:openNumberPrompt("Set Global DTR Reserve Floor (protects Shirabon / SpaceTime):", UI.formatNumber(self.cfg.dtrReserveFloor, false), function(val)
-            local parsed = UI.parseNumber(val)
-            if parsed and parsed >= 0 then
-                self.cfg.dtrReserveFloor = parsed
-                self:save("Global DTR reserve floor -> " .. UI.formatNumber(parsed, true))
-            end
-        end)
-    end)
-
-    -- Row 8: Safety Policies (On-Demand Conv, Catalyst Auto-Fallback, NC Aux Subnet)
-    self:drawText(4, 8, "On-Demand Conv:", COLORS.muted, COLORS.panelBg)
-    local sx = 20
-    if not self:isConvControlSupported() then
-        sx = self:drawButton(sx, 8, "[Manual in DTPF GUI]", COLORS.yellow, COLORS.btnBg, function()
-            self:setStatus(NO_CONV_PATCH_MSG)
-        end) + 2
-    else
-        for i = 1, #OD_CONV_MODES do
-            local m = OD_CONV_MODES[i]
-            local active = (self.cfg.onDemandConvMode == m.id)
-            sx = self:drawButton(sx, 8, "[" .. m.label .. "]",
-                active and COLORS.fg or COLORS.muted,
-                active and COLORS.btnActiveBg or COLORS.btnBg,
-                function()
-                    self.cfg.onDemandConvMode = m.id
-                    self:save("On-Demand Convergence -> " .. m.label)
-                end) + 1
-        end
-        sx = sx + 2
-    end
-    self:drawText(sx, 8, "Cat Fallback:", COLORS.muted, COLORS.panelBg)
-    sx = self:drawButton(sx + 14, 8, self.cfg.catalystAutoFallback and "[AUTO]" or "[OFF ]",
-        self.cfg.catalystAutoFallback and COLORS.green or COLORS.muted, COLORS.btnBg, function()
-            self.cfg.catalystAutoFallback = not self.cfg.catalystAutoFallback
-            self:save("Catalyst Auto-Fallback -> " .. (self.cfg.catalystAutoFallback and "AUTO" or "OFF"))
-        end) + 3
-    self:drawText(sx, 8, "NC Items:", COLORS.muted, COLORS.panelBg)
-    self:drawButton(sx + 10, 8,
-        self.cfg.uniformNcSubnet and "[Aux Subnet (Color 0)]" or "[Push from Main Net ]",
-        self.cfg.uniformNcSubnet and COLORS.cyan or COLORS.yellow,
-        COLORS.btnBg,
-        function()
-            self.cfg.uniformNcSubnet = not self.cfg.uniformNcSubnet
-            for c = 1, #self.cfg.channels do self.cfg.channels[c].activeKey = nil end
-            self:save("Non-Consumed Items -> " .. (self.cfg.uniformNcSubnet and "Uniform Aux Subnet" or "Main Net"))
-        end)
-end
-
-function UI:renderWiringTopologyCard(ctx)
-    local ep, warnings = ctx.ep, ctx.warnings
-    local sNet, odNet = ctx.sNet, ctx.odNet
-    local nonStockNets = ctx.nonStockNets
-
-    -- Card 2: Compact Topology & AE2 Subnets (rows 10..15)
-    self:drawText(2, 10, "◈ TOPOLOGY & AE2 SUBNETS", COLORS.accent, COLORS.bg)
-    local topBtnX = self.w - 1
-    if #(ep.hatches or {}) > 0 or #(ep.buses or {}) > 0 then
-        local apOn = (ep.autoPullOnCount or 0) > 0
-        local lbl = "[ LOCK AUTOPULL OFF ]"
-        topBtnX = topBtnX - unicode.wlen(lbl)
-        self:drawButton(topBtnX, 10, lbl, apOn and COLORS.yellow or COLORS.green, COLORS.btnBg, function()
-            local chg, tot = Hardware.lockAllPassiveAutoPull()
-            self:refreshDiscovery()
-            self:setStatus(string.format("Locked autoPull=OFF (%d switched, %d checked).", chg or 0, tot or 0))
-        end)
-        topBtnX = topBtnX - 2
-    end
-    if #nonStockNets >= 2 and #self.cfg.dtpfs >= 2 then
-        local lbl = "[ 1:1 PAIR OD ]"
-        topBtnX = topBtnX - unicode.wlen(lbl)
-        self:drawButton(topBtnX, 10, lbl, COLORS.cyan, COLORS.btnBg, function()
-            local paired = Scheduler.pairPerDtpfOnDemand(self.cfg, self.discoveredNets)
-            self:save(string.format("1:1 paired %d DTPFs -> nearest Color 1 OD subnets.", paired))
-        end)
-    end
-
-    self:fillRect(2, 11, self.w - 2, 5, " ", COLORS.panelBg)
-    local topRailCol = (#warnings == 0 and ctx.coverConflicts == 0) and COLORS.cyan or COLORS.yellow
-    for ry = 11, 15 do
-        self:drawText(2, ry, "┃", topRailCol, COLORS.panelBg)
-    end
-
-    if #warnings > 0 then
-        self:drawText(4, 11, padOrTrunc("! WIRING WARNING: " .. warnings[1], self.w - 6), COLORS.yellow, COLORS.panelBg)
-    elseif ctx.coverConflicts > 0 then
-        self:drawText(4, 11, "! COVER OVERRIDE: Crowbar South Machine Controller Cover on flagged DTPFs so OC can toggle Work.", COLORS.yellow, COLORS.panelBg)
-    elseif ctx.isMfuMode then
-        self:drawText(4, 11, padOrTrunc("◈ TOPOLOGY: [Main AE2]◂═▸[Passive DI + OD DI]◂═(Transposer) ·· [OC Server]◂··(3x MFU/DTPF: Ctrl+Hatch+Bus)", self.w - 6), COLORS.cyan, COLORS.panelBg)
-    else
-        local topoLine = ctx.hasHatchMode
-            and "◈ TOPOLOGY: [Main AE2]══▸[Color 2 Hatch+Bus]◂··(Wireless MFU)··▸[OC Rack]··▸[DTPF]"
-            or  "◈ TOPOLOGY: [Main Dual IF]══▸[Extract FluidSB+ItemSB]══▸[Color 2 Subnet]══▸[DTPF]"
-        self:drawText(4, 11, padOrTrunc(topoLine, self.w - 6), COLORS.cyan, COLORS.panelBg)
-    end
-
-    local workerCnt = (self.state and self.state.workerCount) or 0
-    local dtpfBadge = (ctx.onlineDtpfs > 0 and ctx.coverConflicts == 0) and "[OK]" or "[! ]"
-    local dtpfCol = (ctx.onlineDtpfs > 0 and ctx.coverConflicts == 0) and COLORS.green or COLORS.yellow
-    self:drawText(4, 12, dtpfBadge, dtpfCol, COLORS.panelBg)
-    local dtpfLine = (workerCnt > 0)
-        and string.format("1. DTPFs: %d/%d online (Master + %d Worker Srv)", ctx.onlineDtpfs, #self.cfg.dtpfs, workerCnt)
-        or string.format("1. DTPFs: %d/%d online (Adapter + Wireless MFU)", ctx.onlineDtpfs, #self.cfg.dtpfs)
-    self:drawText(9, 12, padOrTrunc(dtpfLine, 70), COLORS.fg, COLORS.panelBg)
-
-    local stockOK = (sNet ~= nil)
-    self:drawText(82, 12, stockOK and "[OK]" or "[! ]", stockOK and COLORS.green or COLORS.yellow, COLORS.panelBg)
-    self:drawText(87, 12, padOrTrunc(string.format("2. Stock AE2: %s (%dI / %dF)",
-        sNet and sNet.address:sub(1, 8) or "Missing", sNet and sNet.itemTypes or 0, sNet and sNet.fluidTypes or 0), 70),
-        COLORS.fg, COLORS.panelBg)
-
-    if ctx.isMfuMode then
-        local hOk = (#warnings == 0) and (#(ep.hatches or {}) > 0) and (#(ep.buses or {}) > 0)
-        self:drawText(4, 13, hOk and "[OK]" or "[! ]", hOk and COLORS.green or COLORS.yellow, COLORS.panelBg)
-        self:drawText(9, 13, padOrTrunc(string.format("3. Passive MFUs: %dH + %dB MFU (3D Nearest Pair)",
-            #(ep.hatches or {}), #(ep.buses or {})), 70), COLORS.fg, COLORS.panelBg)
-    elseif ctx.hasHatchMode then
-        local hOk = (#warnings == 0) and (#(ep.hatches or {}) > 0)
-        self:drawText(4, 13, hOk and "[OK]" or "[! ]", hOk and COLORS.green or COLORS.yellow, COLORS.panelBg)
-        self:drawText(9, 13, padOrTrunc(string.format("3. Passive (Color 2): %dH + %dB MFU (Direct on Main AE2)",
-            #(ep.hatches or {}), #(ep.buses or {})), 70), COLORS.fg, COLORS.panelBg)
-    else
-        local sbOK = (#warnings == 0) and (#(ep.fluidStorageBuses or {}) > 0 and #(ep.itemStorageBuses or {}) > 0)
-        local sbSummary = sbOK
-            and string.format("%dF + %dI SB", #(ep.fluidStorageBuses or {}), #(ep.itemStorageBuses or {}))
-            or ((#warnings > 0) and "Mismatch" or "Missing")
-        self:drawText(4, 13, sbOK and "[OK]" or "[! ]", sbOK and COLORS.green or COLORS.yellow, COLORS.panelBg)
-        self:drawText(9, 13, padOrTrunc(string.format("3. Passive C2: %s | Extract-Only FluidSB+ItemSB on 2 cables",
-            sbSummary), 71), (#warnings > 0) and COLORS.yellow or COLORS.fg, COLORS.panelBg)
-    end
-
-    local odDistinct = (odNet ~= nil) and (odNet.address ~= self.cfg.stockNetAddr)
-    local odOk = odDistinct or (ctx.perDtpfOdCount > 0)
-    local odSummary = (#nonStockNets >= 2)
-        and string.format("%d OD Nets", #nonStockNets)
-        or (odDistinct and (odNet.address:sub(1, 8)) or (ctx.perDtpfOdCount > 0 and string.format("%d Bound", ctx.perDtpfOdCount) or "Not split"))
-    self:drawText(82, 13, odOk and "[OK]" or "[! ]", odOk and COLORS.green or COLORS.yellow, COLORS.panelBg)
-    self:drawText(87, 13, padOrTrunc("4. On-Demand C1: " .. odSummary, 70), COLORS.fg, COLORS.panelBg)
-
-    self:drawText(4, 14, "Stock AE2 Interface :", COLORS.muted, COLORS.panelBg)
-    self:drawButton(26, 14, string.format("[ %s (%s: %dI / %dF) ]",
-        self.cfg.stockNetAddr and self.cfg.stockNetAddr:sub(1, 10) or "None",
-        sNet and tostring(sNet.type or "net") or "-",
-        sNet and sNet.itemTypes or 0, sNet and sNet.fluidTypes or 0), COLORS.green, COLORS.btnBg, function()
-            if #self.discoveredNets == 0 then return end
-            local idx = 0
-            for i = 1, #self.discoveredNets do
-                if self.discoveredNets[i].address == self.cfg.stockNetAddr then idx = i break end
-            end
-            self.cfg.stockNetAddr = self.discoveredNets[(idx % #self.discoveredNets) + 1].address
-            Scheduler.syncSubnetsStruct(self.cfg)
-            self:save("Stock Net Interface -> " .. self.cfg.stockNetAddr:sub(1, 12))
-        end)
-
-    self:drawText(82, 14, "On-Demand Subnet :", COLORS.muted, COLORS.panelBg)
-    self:drawButton(101, 14, string.format("[ %s (%s: %dI / %dF) ]",
-        self.cfg.onDemandNetAddr and self.cfg.onDemandNetAddr:sub(1, 10) or "None",
-        odNet and tostring(odNet.type or "net") or "-",
-        odNet and odNet.itemTypes or 0, odNet and odNet.fluidTypes or 0), COLORS.purple, COLORS.btnBg, function()
-            if #self.discoveredNets == 0 then return end
-            local idx = 0
-            for i = 1, #self.discoveredNets do
-                if self.discoveredNets[i].address == self.cfg.onDemandNetAddr then idx = i break end
-            end
-            self.cfg.onDemandNetAddr = self.discoveredNets[(idx % #self.discoveredNets) + 1].address
-            Scheduler.syncSubnetsStruct(self.cfg)
-            self:save("On-Demand Interface -> " .. self.cfg.onDemandNetAddr:sub(1, 12))
-        end)
-
-    local hasTp = (#(self.discoveredTransposers or {}) > 0) or (self.cfg.transposerAddr and self.cfg.transposerAddr ~= "")
-    if hasTp then
-        self:drawText(4, 15, "Catalyst Bridge (OC):", COLORS.muted, COLORS.panelBg)
-        local bxTp = self:drawButton(26, 15, self.cfg.transposerEnabled and "[ON ]" or "[OFF]",
-            self.cfg.transposerEnabled and COLORS.green or COLORS.red, COLORS.btnBg, function()
-                self.cfg.transposerEnabled = not (self.cfg.transposerEnabled ~= false)
-                Scheduler.syncSubnetsStruct(self.cfg)
-                self:save("Transposer Catalyst Bridge -> " .. (self.cfg.transposerEnabled and "ON" or "OFF"))
-            end) + 1
-        local tpLabel = (self.cfg.transposerAddr == "none") and "None"
-            or (self.cfg.transposerAddr and self.cfg.transposerAddr:sub(1, 8) or "None")
-        bxTp = self:drawButton(bxTp, 15, string.format("[ %s ]", tpLabel), COLORS.cyan, COLORS.btnBg, function()
-            if #(self.discoveredTransposers or {}) == 0 then return end
-            local opts = {}
-            for k = 1, #self.discoveredTransposers do
-                opts[#opts + 1] = self.discoveredTransposers[k].address
-            end
-            opts[#opts + 1] = "none"
-            local curIdx = 0
-            for k = 1, #opts do
-                if opts[k] == self.cfg.transposerAddr then curIdx = k break end
-            end
-            self.cfg.transposerAddr = opts[(curIdx % #opts) + 1]
-            Scheduler.syncSubnetsStruct(self.cfg)
-            self:save("Bridge Transposer -> " .. tostring(self.cfg.transposerAddr):sub(1, 12))
-        end) + 1
-        local pSide = self.cfg.stockTransposerSide or 1
-        bxTp = self:drawButton(bxTp, 15, "[P:" .. (SIDE_NAMES[pSide] or "Up") .. "]", COLORS.green, COLORS.btnBg, function(step)
-            self.cfg.stockTransposerSide = ((self.cfg.stockTransposerSide or 1) + (step or 1) + 6) % 6
-            self.cfg._hasExplicitTpSides = true
-            Scheduler.syncSubnetsStruct(self.cfg)
-            self:save("Transposer Passive Side -> " .. (SIDE_NAMES[self.cfg.stockTransposerSide] or "?"))
-        end) + 1
-        local odSide = self.cfg.odTransposerSide or 0
-        bxTp = self:drawButton(bxTp, 15, "[OD:" .. (SIDE_NAMES[odSide] or "Down") .. "]", COLORS.purple, COLORS.btnBg, function(step)
-            self.cfg.odTransposerSide = ((self.cfg.odTransposerSide or 0) + (step or 1) + 6) % 6
-            self.cfg._hasExplicitTpSides = true
-            Scheduler.syncSubnetsStruct(self.cfg)
-            self:save("Transposer OD Side -> " .. (SIDE_NAMES[self.cfg.odTransposerSide] or "?"))
-        end) + 1
-
-        local afPolls = math.max(0, math.floor(tonumber(self.cfg.odAutoFlushPolls) or 0))
-        local afSec = math.floor(afPolls * (tonumber(self.cfg.pollInterval) or 2.0) + 0.5)
-        local afLbl = (afPolls > 0) and string.format("[AutoFlush:%ds]", afSec) or "[AutoFlush:OFF]"
-        bxTp = self:drawButton(bxTp, 15, afLbl, (afPolls > 0) and COLORS.yellow or COLORS.muted, COLORS.btnBg, function(step)
-            local presets = { 0, 8, 15, 30 }
-            local curP = 1
-            for pi = 1, #presets do
-                if presets[pi] == afPolls then curP = pi break end
-            end
-            local nxtIdx = ((curP - 1 + (step or 1) + #presets) % #presets) + 1
-            self.cfg.odAutoFlushPolls = presets[nxtIdx]
-            Scheduler.syncSubnetsStruct(self.cfg)
-            local nxtSec = math.floor(self.cfg.odAutoFlushPolls * (tonumber(self.cfg.pollInterval) or 2.0) + 0.5)
-            self:save("Stalled OD Auto-Flush -> " .. ((self.cfg.odAutoFlushPolls > 0) and (tostring(nxtSec) .. "s") or "OFF"))
-        end) + 1
-
-        local flushingNow = (self.state and self.state.odFlushActive == true)
-        local odBusyOrStalled = self.state and self.state.onDemand and (self.state.onDemand.stalled or self.state.onDemand.hasWork)
-        if flushingNow then
-            bxTp = self:drawButton(bxTp, 15, "[STOP FLUSH]", COLORS.red, COLORS.btnBg, function()
-                Scheduler.cancelOdFlush(self.cfg, self.state)
-                self:setStatus("Cancelled OD flush.")
-            end) + 1
-        else
-            bxTp = self:drawButton(bxTp, 15, "[FLUSH OD]", odBusyOrStalled and COLORS.yellow or COLORS.cyan, COLORS.btnBg, function()
-                Scheduler.requestOdFlush(self.state)
-                self:setStatus("Flushing Color 1 OD inputs -> Passive -> Main AE2...")
-            end) + 1
-        end
-
-        local stX = math.max(96, bxTp + 1)
-        self:drawText(stX, 15, "Status:", COLORS.muted, COLORS.panelBg)
-        local valX = stX + 8
-        local bSt = formatCleanBridgeStatus((self.state and self.state.odBridgeStatus) or "Idle")
-        local bCol = (bSt:find("^Blocked") or bSt:find("^! ") or bSt:find("^Flush err")) and COLORS.red
-            or ((bSt:find("^Flushing") or bSt:find("^Top%-Up") or bSt:find("^Draining") or bSt:find("^Preview")) and COLORS.yellow)
-            or COLORS.green
-        self:drawText(valX, 15, padOrTrunc(bSt, math.max(8, self.w - valX - 2)), bCol, COLORS.panelBg)
-    else
-        self:drawText(4, 15, "Color 1 (White) = On-Demand | Color 2 (Orange) = Passive | Color 0 = NC Aux Subnet", COLORS.muted, COLORS.panelBg)
-    end
-end
-
 local function pairDtpfsOneToOne(self, ep)
     local need = #self.cfg.dtpfs
     if #self.cfg.channels == 1
@@ -4002,9 +3708,280 @@ local function pairDtpfsOneToOne(self, ep)
     self:save(string.format("1:1 paired %d DTPFs -> ch1..ch%d.", need, need))
 end
 
-function UI:renderWiringChannelsCard(ep)
-    -- Card 3: Passive Channels (rows 17..)
-    local y = 17
+function UI:renderSetupActionBar(ctx)
+    local ep = ctx.ep or {}
+    local nD = #self.cfg.dtpfs
+    local apOn = (ep.autoPullOnCount or 0) > 0
+    local pairedCnt = 0
+    local chById = {}
+    for k = 1, #self.cfg.channels do chById[self.cfg.channels[k].id] = self.cfg.channels[k] end
+    for i = 1, nD do
+        local ch = chById[self.cfg.dtpfs[i].channelId or ("ch" .. i)]
+        if ch and ch.hatchAddr and ch.busAddr then pairedCnt = pairedCnt + 1 end
+    end
+    local allPaired = (nD > 0) and (pairedCnt == nD)
+    local hasTp = (#(self.discoveredTransposers or {}) > 0)
+        or (self.cfg.transposerAddr and self.cfg.transposerAddr ~= "" and self.cfg.transposerAddr ~= "none")
+    local flushingNow = (self.state and self.state.odFlushActive == true)
+    local odBusyOrStalled = self.state and self.state.onDemand and (self.state.onDemand.stalled or self.state.onDemand.hasWork)
+
+    local function drawBigActionBtn(bx, by, bw, label, fgCol, borderCol, bgCol, onClick)
+        self:drawFrame(bx, by, bw, 3, borderCol, bgCol, "round")
+        local txt = (unicode.wlen(label) > bw - 2) and unicode.sub(label, 1, bw - 2) or label
+        local tw = unicode.wlen(txt)
+        local tx = bx + math.max(1, math.floor((bw - tw) / 2))
+        self:drawText(tx, by + 1, txt, fgCol, bgCol)
+        self:addHitbox(bx, by, bx + bw - 1, by + 2, onClick)
+        self:addHitbox(tx, by + 1, tx + tw - 1, by + 1, onClick)
+    end
+
+    -- 4 symmetric 34x3 buttons centered across 160 columns (x=7, 45, 83, 121; 6-col outer margin, 4-col gaps)
+    drawBigActionBtn(7, 5, 34, "↻  RESCAN HARDWARE", COLORS.cyan, COLORS.cyan, COLORS.btnBg, function()
+        self:refreshDiscovery()
+        self:save("Rescanned all connected OpenComputers components.")
+    end)
+
+    drawBigActionBtn(45, 5, 34, "⚡  1:1 PAIR DTPFS", allPaired and COLORS.green or COLORS.cyan,
+        allPaired and COLORS.green or COLORS.cyan, COLORS.btnBg, function()
+            pairDtpfsOneToOne(self, ep)
+        end)
+
+    local apLbl = apOn and "!  LOCK AUTOPULL OFF" or "✓  LOCK AUTOPULL OFF"
+    drawBigActionBtn(83, 5, 34, apLbl, apOn and COLORS.yellow or COLORS.green,
+        apOn and COLORS.yellow or COLORS.green, apOn and COLORS.amberBg or COLORS.btnBg, function()
+            local chg, tot = Hardware.lockAllPassiveAutoPull()
+            self:refreshDiscovery()
+            self:setStatus(string.format("Locked autoPull=OFF (%d switched, %d checked).", chg or 0, tot or 0))
+        end)
+
+    local flLbl = flushingNow and "■  STOP FLUSH" or "⇄  FLUSH OD"
+    local flCol = flushingNow and COLORS.red or (odBusyOrStalled and COLORS.yellow or (hasTp and COLORS.purple or COLORS.muted))
+    local flBorder = flushingNow and COLORS.red or (odBusyOrStalled and COLORS.yellow or (hasTp and COLORS.purple or COLORS.border))
+    drawBigActionBtn(121, 5, 34, flLbl, flCol, flBorder, COLORS.btnBg, function()
+        if flushingNow then
+            Scheduler.cancelOdFlush(self.cfg, self.state)
+            self:setStatus("Cancelled OD flush.")
+        elseif hasTp then
+            Scheduler.requestOdFlush(self.state)
+            self:setStatus("Flushing Color 1 OD inputs -> Passive -> Main AE2...")
+        else
+            self:setStatus("Requires Transposer bridge between Passive & OD Dual IFs.")
+        end
+    end)
+end
+
+function UI:renderWiringReservesCard()
+    -- Left Card: Reserve Floors & Policy (x = 2..79, y = 9..17)
+    self:drawFrame(2, 9, 78, 9, COLORS.border, COLORS.panelBg, "round")
+    self:drawText(4, 9, " ◈ RESERVE FLOORS & POLICY ", COLORS.accent, COLORS.panelBg)
+
+    local stockFluids = (self.state and self.state.stock and self.state.stock.fluids) or {}
+    local function drawFloorCell(px, py, label, fluidKey, curFloor, onSet)
+        local amt = stockFluids[fluidKey] or 0
+        local ico = getTankGaugeChar(amt, curFloor)
+        local okCol = (amt == 0) and COLORS.red or ((amt > curFloor) and COLORS.green or COLORS.yellow)
+        self:drawText(px, py, string.format("%s %-4s", ico, label), okCol, COLORS.panelBg)
+        local flrTxt = string.format("[Min:%6s]", fmtCompactNum(curFloor, true))
+        self:drawButton(px + 8, py, flrTxt, COLORS.cyan, COLORS.btnBg, onSet)
+    end
+
+    for i = 1, 5 do
+        local ct = RecipesDB.CATALYST_TIERS[i]
+        local flr = (self.cfg.catalystFloors and self.cfg.catalystFloors[ct.code]) or 100000
+        local rowY = (i <= 3) and 11 or 13
+        local colX = 5 + ((i <= 3) and (i - 1) or (i - 4)) * 24
+        drawFloorCell(colX, rowY, ct.code, ct.fluid, flr, function(_, button)
+            if button == 1 then
+                for _, tier in ipairs(RecipesDB.CATALYST_TIERS) do
+                    self.cfg.catalystFloors[tier.code] = flr
+                end
+                self:save("Copied " .. UI.formatNumber(flr, true) .. " reserve floor to all 5 catalysts.")
+            else
+                self:openNumberPrompt("Set Reserve Floor for " .. ct.code .. " (" .. ct.label .. "):", UI.formatNumber(flr, false), function(val)
+                    local parsed = UI.parseNumber(val)
+                    if parsed and parsed >= 0 then
+                        self.cfg.catalystFloors[ct.code] = parsed
+                        self:save(ct.code .. " reserve floor -> " .. UI.formatNumber(parsed, true))
+                    end
+                end)
+            end
+        end)
+    end
+    drawFloorCell(53, 13, "DTR ", "dimensionallytranscendentresidue", self.cfg.dtrReserveFloor or 10000000, function()
+        self:openNumberPrompt("Set Global DTR Reserve Floor (protects Shirabon / SpaceTime):", UI.formatNumber(self.cfg.dtrReserveFloor, false), function(val)
+            local parsed = UI.parseNumber(val)
+            if parsed and parsed >= 0 then
+                self.cfg.dtrReserveFloor = parsed
+                self:save("Global DTR reserve floor -> " .. UI.formatNumber(parsed, true))
+            end
+        end)
+    end)
+
+    self:drawText(5, 15, "OD Conv:", COLORS.muted, COLORS.panelBg)
+    if not self:isConvControlSupported() then
+        self:drawButton(14, 15, "[Manual    ]", COLORS.yellow, COLORS.btnBg, function()
+            self:setStatus(NO_CONV_PATCH_MSG)
+        end)
+    else
+        local curMode = OD_CONV_MODES[1]
+        local curIdx = 1
+        for k = 1, #OD_CONV_MODES do
+            if OD_CONV_MODES[k].id == self.cfg.onDemandConvMode then
+                curMode = OD_CONV_MODES[k]
+                curIdx = k
+                break
+            end
+        end
+        self:drawButton(14, 15, "[" .. curMode.label .. "]", COLORS.purple, COLORS.btnBg, function(step)
+            local nxt = ((curIdx - 1 + (step or 1) + #OD_CONV_MODES) % #OD_CONV_MODES) + 1
+            self.cfg.onDemandConvMode = OD_CONV_MODES[nxt].id
+            self:save("On-Demand Convergence -> " .. OD_CONV_MODES[nxt].label)
+        end)
+    end
+
+    self:drawText(30, 15, "CatFB:", COLORS.muted, COLORS.panelBg)
+    self:drawButton(37, 15, self.cfg.catalystAutoFallback and "[AUTO]" or "[OFF ]",
+        self.cfg.catalystAutoFallback and COLORS.green or COLORS.muted, COLORS.btnBg, function()
+            self.cfg.catalystAutoFallback = not self.cfg.catalystAutoFallback
+            self:save("Catalyst Auto-Fallback -> " .. (self.cfg.catalystAutoFallback and "AUTO" or "OFF"))
+        end)
+
+    self:drawText(46, 15, "NC:", COLORS.muted, COLORS.panelBg)
+    self:drawButton(50, 15,
+        self.cfg.uniformNcSubnet and "[Aux Subnet]" or "[Main Net  ]",
+        self.cfg.uniformNcSubnet and COLORS.cyan or COLORS.yellow,
+        COLORS.btnBg,
+        function()
+            self.cfg.uniformNcSubnet = not self.cfg.uniformNcSubnet
+            for c = 1, #self.cfg.channels do self.cfg.channels[c].activeKey = nil end
+            self:save("Non-Consumed Items -> " .. (self.cfg.uniformNcSubnet and "Uniform Aux Subnet" or "Main Net"))
+        end)
+end
+
+function UI:renderWiringTopologyCard(ctx)
+    local ep, warnings = ctx.ep, ctx.warnings
+    local sNet, odNet = ctx.sNet, ctx.odNet
+    local nonStockNets = ctx.nonStockNets
+
+    -- Right Card: Subnets & Bridge (x = 82..159, y = 9..17)
+    self:drawFrame(82, 9, 78, 9, COLORS.border, COLORS.panelBg, "round")
+    self:drawText(84, 9, " ◈ SUBNETS & BRIDGE ", COLORS.accent, COLORS.panelBg)
+
+    local stockOK = (sNet ~= nil)
+    self:drawText(85, 11, "Passive DI :", COLORS.muted, COLORS.panelBg)
+    self:drawButton(98, 11, string.format("[ %s (%dI / %dF) ]",
+        self.cfg.stockNetAddr and self.cfg.stockNetAddr:sub(1, 8) or "None",
+        sNet and sNet.itemTypes or 0, sNet and sNet.fluidTypes or 0), COLORS.green, COLORS.btnBg, function()
+            if #self.discoveredNets == 0 then return end
+            local idx = 0
+            for i = 1, #self.discoveredNets do
+                if self.discoveredNets[i].address == self.cfg.stockNetAddr then idx = i break end
+            end
+            self.cfg.stockNetAddr = self.discoveredNets[(idx % #self.discoveredNets) + 1].address
+            Scheduler.syncSubnetsStruct(self.cfg)
+            self:save("Stock Net Interface -> " .. self.cfg.stockNetAddr:sub(1, 12))
+        end)
+    local passiveBadge = (stockOK and #warnings == 0) and "✓ OK" or "! Check"
+    self:drawText(158 - unicode.wlen(passiveBadge), 11, passiveBadge,
+        (stockOK and #warnings == 0) and COLORS.green or COLORS.yellow, COLORS.panelBg)
+
+    local odDistinct = (odNet ~= nil) and (odNet.address ~= self.cfg.stockNetAddr)
+    local odOk = odDistinct or (ctx.perDtpfOdCount > 0)
+    self:drawText(85, 13, "On-Demand  :", COLORS.muted, COLORS.panelBg)
+    self:drawButton(98, 13, string.format("[ %s (%dI / %dF) ]",
+        self.cfg.onDemandNetAddr and self.cfg.onDemandNetAddr:sub(1, 8) or "None",
+        odNet and odNet.itemTypes or 0, odNet and odNet.fluidTypes or 0), COLORS.purple, COLORS.btnBg, function()
+            if #self.discoveredNets == 0 then return end
+            local idx = 0
+            for i = 1, #self.discoveredNets do
+                if self.discoveredNets[i].address == self.cfg.onDemandNetAddr then idx = i break end
+            end
+            self.cfg.onDemandNetAddr = self.discoveredNets[(idx % #self.discoveredNets) + 1].address
+            Scheduler.syncSubnetsStruct(self.cfg)
+            self:save("On-Demand Interface -> " .. self.cfg.onDemandNetAddr:sub(1, 12))
+        end)
+    if #nonStockNets >= 2 and #self.cfg.dtpfs >= 2 then
+        self:drawButton(128, 13, "[ 1:1 PAIR OD ]", COLORS.cyan, COLORS.btnBg, function()
+            local paired = Scheduler.pairPerDtpfOnDemand(self.cfg, self.discoveredNets)
+            self:save(string.format("1:1 paired %d DTPFs -> nearest Color 1 OD subnets.", paired))
+        end)
+        local nLbl = string.format("%d OD Nets", #nonStockNets)
+        self:drawText(158 - unicode.wlen(nLbl), 13, nLbl, COLORS.cyan, COLORS.panelBg)
+    else
+        local odBadge = odOk and "✓ Split" or "! Unsplit"
+        self:drawText(158 - unicode.wlen(odBadge), 13, odBadge, odOk and COLORS.green or COLORS.yellow, COLORS.panelBg)
+    end
+
+    local hasTp = (#(self.discoveredTransposers or {}) > 0) or (self.cfg.transposerAddr and self.cfg.transposerAddr ~= "")
+    if hasTp then
+        self:drawText(85, 15, "Bridge (TP):", COLORS.muted, COLORS.panelBg)
+        local bxTp = self:drawButton(98, 15, self.cfg.transposerEnabled and "[ON]" or "[--]",
+            self.cfg.transposerEnabled and COLORS.green or COLORS.red, COLORS.btnBg, function()
+                self.cfg.transposerEnabled = not (self.cfg.transposerEnabled ~= false)
+                Scheduler.syncSubnetsStruct(self.cfg)
+                self:save("Transposer Catalyst Bridge -> " .. (self.cfg.transposerEnabled and "ON" or "OFF"))
+            end) + 1
+        local tpLabel = (self.cfg.transposerAddr == "none") and "None"
+            or (self.cfg.transposerAddr and self.cfg.transposerAddr:sub(1, 6) or "None")
+        bxTp = self:drawButton(bxTp, 15, string.format("[%s]", tpLabel), COLORS.cyan, COLORS.btnBg, function()
+            if #(self.discoveredTransposers or {}) == 0 then return end
+            local opts = {}
+            for k = 1, #self.discoveredTransposers do
+                opts[#opts + 1] = self.discoveredTransposers[k].address
+            end
+            opts[#opts + 1] = "none"
+            local curIdx = 0
+            for k = 1, #opts do
+                if opts[k] == self.cfg.transposerAddr then curIdx = k break end
+            end
+            self.cfg.transposerAddr = opts[(curIdx % #opts) + 1]
+            Scheduler.syncSubnetsStruct(self.cfg)
+            self:save("Bridge Transposer -> " .. tostring(self.cfg.transposerAddr):sub(1, 12))
+        end) + 1
+        local pSide = self.cfg.stockTransposerSide or 1
+        bxTp = self:drawButton(bxTp, 15, "[P:" .. (SIDE_NAMES[pSide] or "Up") .. "]", COLORS.green, COLORS.btnBg, function(step)
+            self.cfg.stockTransposerSide = ((self.cfg.stockTransposerSide or 1) + (step or 1) + 6) % 6
+            self.cfg._hasExplicitTpSides = true
+            Scheduler.syncSubnetsStruct(self.cfg)
+            self:save("Transposer Passive Side -> " .. (SIDE_NAMES[self.cfg.stockTransposerSide] or "?"))
+        end) + 1
+        local odSide = self.cfg.odTransposerSide or 0
+        bxTp = self:drawButton(bxTp, 15, "[OD:" .. (SIDE_NAMES[odSide] or "Down") .. "]", COLORS.purple, COLORS.btnBg, function(step)
+            self.cfg.odTransposerSide = ((self.cfg.odTransposerSide or 0) + (step or 1) + 6) % 6
+            self.cfg._hasExplicitTpSides = true
+            Scheduler.syncSubnetsStruct(self.cfg)
+            self:save("Transposer OD Side -> " .. (SIDE_NAMES[self.cfg.odTransposerSide] or "?"))
+        end) + 1
+
+        local afPolls = math.max(0, math.floor(tonumber(self.cfg.odAutoFlushPolls) or 0))
+        local afSec = math.floor(afPolls * (tonumber(self.cfg.pollInterval) or 2.0) + 0.5)
+        local afLbl = (afPolls > 0) and string.format("[AutoFlush:%ds]", afSec) or "[AutoFlush:OFF]"
+        bxTp = self:drawButton(bxTp, 15, afLbl, (afPolls > 0) and COLORS.yellow or COLORS.muted, COLORS.btnBg, function(step)
+            local presets = { 0, 8, 15, 30 }
+            local curP = 1
+            for pi = 1, #presets do
+                if presets[pi] == afPolls then curP = pi break end
+            end
+            local nxtIdx = ((curP - 1 + (step or 1) + #presets) % #presets) + 1
+            self.cfg.odAutoFlushPolls = presets[nxtIdx]
+            Scheduler.syncSubnetsStruct(self.cfg)
+            local nxtSec = math.floor(self.cfg.odAutoFlushPolls * (tonumber(self.cfg.pollInterval) or 2.0) + 0.5)
+            self:save("Stalled OD Auto-Flush -> " .. ((self.cfg.odAutoFlushPolls > 0) and (tostring(nxtSec) .. "s") or "OFF"))
+        end) + 1
+
+        local bSt = formatCleanBridgeStatus((self.state and self.state.odBridgeStatus) or "Idle")
+        local bCol = (bSt:find("^Blocked") or bSt:find("^! ") or bSt:find("^Flush err")) and COLORS.red
+            or ((bSt:find("^Flushing") or bSt:find("^Top%-Up") or bSt:find("^Draining") or bSt:find("^Preview")) and COLORS.yellow)
+            or COLORS.green
+        local remW = math.max(4, 158 - bxTp)
+        self:drawText(bxTp, 15, padOrTrunc(bSt, remW), bCol, COLORS.panelBg)
+    else
+        self:drawText(85, 15, "Bridge (TP): None (optional catalyst ramp & OD flush)", COLORS.muted, COLORS.panelBg)
+    end
+end
+
+function UI:renderWiringChannelsCard(ep, startY)
+    local y = startY or 19
     self:drawText(2, y, string.format("PASSIVE CHANNELS (%d)", #self.cfg.channels), COLORS.accent, COLORS.bg)
     local cxBtn = self:drawButton(24, y, "[ + ADD CHANNEL ]", COLORS.green, COLORS.btnBg, function()
         local newId = "ch" .. tostring(#self.cfg.channels + 1)
@@ -4029,8 +4006,8 @@ function UI:renderWiringChannelsCard(ep)
         end)
     end
 
-    local maxChShow = (#self.cfg.channels <= 2) and math.max(1, #self.cfg.channels) or 3
-    local chStep = (#self.cfg.channels <= 2) and 3 or 2
+    local maxChShow = math.max(1, math.min(2, #self.cfg.channels))
+    local chStep = 2
     local maxChScroll = math.max(0, #self.cfg.channels - maxChShow)
     self.wiringChScroll = math.max(0, math.min(maxChScroll, self.wiringChScroll or 0))
     if #self.cfg.channels > maxChShow then
@@ -4164,8 +4141,8 @@ function UI:renderWiringChannelsCard(ep)
 end
 
 function UI:renderWiringControllersTable(yStart, nonStockNets)
-    -- Card 4: Discovered DTPF Controllers table (click [DTPF #N] or row to focus in Fleet view)
-    local y = math.max(yStart + 1, 26)
+    -- Card 4 (SB Mode): Discovered DTPF Controllers table
+    local y = math.max(yStart + 1, 27)
     if y > self.h - 4 then return end
 
     local maxShow = math.max(1, (self.h - 1) - (y + 2))
@@ -4306,7 +4283,7 @@ function UI:renderUnifiedMfuPairingPanel(ctx)
 
     local function formatEndpointBadge(addr, coordsMap, dtpf, missingLabel, maxInnerW)
         if not addr or addr == "" then
-            return "[" .. missingLabel .. "]", COLORS.red, nil
+            return "[" .. missingLabel .. "]", COLORS.red
         end
         local c = coordsMap and coordsMap[addr]
         local dist = nil
@@ -4316,106 +4293,68 @@ function UI:renderUnifiedMfuPairingPanel(ctx)
             local dy = (c.y or dtpf.y or 0) - (dtpf.y or c.y or 0)
             local dz = c.z - dtpf.z
             dist = math.floor(math.sqrt(dx * dx + dy * dy + dz * dz) + 0.5)
-            inner = string.format("%s @%d,%d,%d Δ%dm", addr:sub(1, 6), c.x, c.y or 0, c.z, dist)
+            inner = string.format("%s (%d,%d,%d) %dm", addr:sub(1, 6), c.x, c.y or 0, c.z, dist)
         elseif c and c.x and c.z then
-            inner = string.format("%s @%d,%d,%d", addr:sub(1, 6), c.x, c.y or 0, c.z)
+            inner = string.format("%s (%d,%d,%d)", addr:sub(1, 6), c.x, c.y or 0, c.z)
         else
             inner = addr:sub(1, 10)
         end
         local col = (dist and dist > 16) and COLORS.yellow or COLORS.green
-        return "[" .. padOrTrunc(inner, maxInnerW):gsub("%s+$", "") .. "]", col, dist
+        return "[" .. padOrTrunc(inner, maxInnerW):gsub("%s+$", "") .. "]", col
     end
 
     local nD = #self.cfg.dtpfs
-    local pairedH, pairedB = 0, 0
-    for i = 1, nD do
-        local ch = chById[self.cfg.dtpfs[i].channelId or "ch1"]
-        if ch and ch.hatchAddr then pairedH = pairedH + 1 end
-        if ch and ch.busAddr then pairedB = pairedB + 1 end
-    end
-    local apOn = (ep.autoPullOnCount or 0) > 0
-    local allHealthy = (nD > 0) and (pairedH == nD) and (pairedB == nD) and (not apOn) and (#(ctx.warnings or {}) == 0)
-
-    -- Card 3 (MFU Mode): How 3x MFU Auto-Pairing Works & Pool Summary (rows 17..24)
-    self:drawFrame(2, 17, 158, 8, COLORS.border, COLORS.panelBg, "round")
-    self:drawText(4, 17, " ◈ DTPF 3x MFU AUTO-PAIRING ", COLORS.accent, COLORS.panelBg)
-    if nD > 0 or #hatches > 0 or #buses > 0 then
-        self:drawButton(34, 17, "[ 1:1 PAIR DTPFS ]", COLORS.cyan, COLORS.btnBg, function()
-            pairDtpfsOneToOne(self, ep)
-        end)
-    end
-
-    local poolTxt = string.format("Pool: %d Ctrl · %d/%d Hatch · %d/%d Bus", nD, pairedH, #hatches, pairedB, #buses)
-    local poolX = 158 - unicode.wlen(poolTxt)
-    self:drawText(poolX, 18, poolTxt, allHealthy and COLORS.green or COLORS.fg, COLORS.panelBg)
-
-    local ruleMsg
-    if nD == 0 then
-        ruleMsg = "! No DTPF Controllers found — bind 3 MFUs/DTPF (Ctrl+Hatch+Bus), place in Adapters, then click [ RESCAN HARDWARE ]."
-    elseif apOn then
-        ruleMsg = string.format("! %d Passive Hatch/Bus endpoints still have autoPull=ON — click [ LOCK AUTOPULL OFF ] before arming.", ep.autoPullOnCount or 0)
-    elseif pairedH < nD or pairedB < nD then
-        ruleMsg = "! Some DTPFs are missing a paired Passive Hatch or Bus MFU — click [ 1:1 PAIR DTPFS ] or click a red [None] slot below."
-    else
-        ruleMsg = "✓ Auto-paired each DTPF Controller MFU to nearest Passive Hatch + Bus MFU via 3D (x,y,z) coords"
-    end
-    self:drawText(4, 18, padOrTrunc(ruleMsg, math.max(20, poolX - 6)), allHealthy and COLORS.green or COLORS.yellow, COLORS.panelBg)
-
-    self:drawText(4, 19, "How 1:1 Auto-Pairing works (3 Wireless MFU Adapters per DTPF):", COLORS.muted, COLORS.panelBg)
-    self:drawText(4, 20, "  [1. DTPF Controller MFU @(x,y,z)]  ── nearest 3D Δ ──▸  [2. Passive Hatch MFU @(x,y,z)] + [3. Passive Bus MFU @(x,y,z)]", COLORS.cyan, COLORS.panelBg)
-    self:drawText(4, 21, "  Shared across all DTPFs (0 MFUs):  Outputs -> Main AE2   |   Color 1 OD Hatch+Bus (autoPull ON)   |   Color 0 NC Chest (autoPull ON)", COLORS.muted, COLORS.panelBg)
-    self:drawText(4, 22, string.rep("─", 154), COLORS.border, COLORS.panelBg)
-    self:drawText(4, 23, "Add a new DTPF: Sneak+R-click 3 MFUs (Ctrl + Passive Hatch + Bus) -> place in Adapters -> click [ RESCAN HARDWARE ] -> [ 1:1 PAIR DTPFS ].", COLORS.muted, COLORS.panelBg)
-
-    -- Card 4 (MFU Mode): Paired DTPF Triplets Matrix (rows 26..48, COIL anchored at x=67, y=27..48)
-    self:drawFrame(2, 26, 158, 23, COLORS.border, COLORS.panelBg, "round")
-    self:drawText(4, 26, string.format(" ◈ DISCOVERED DTPF CONTROLLERS — 3x MFU TRIPLETS (%d) ", nD), COLORS.accent, COLORS.panelBg)
-
-    local stride = (nD <= 6) and 3 or ((nD <= 10) and 2 or 1)
-    local maxShow = math.max(1, math.floor((20 + ((stride == 3) and 1 or 0)) / stride))
+    local workerCnt = (self.state and self.state.workerCount) or 0
+    local stride = (nD <= 13) and 2 or 1
+    local maxShow = (stride == 2) and 13 or 25
     local maxDScroll = math.max(0, nD - maxShow)
     self.wiringDtpfScroll = math.max(0, math.min(maxDScroll, self.wiringDtpfScroll or 0))
 
+    -- Bottom Table (MFU Mode): Unified Discovered DTPF Controllers & 3x MFU Pairing (rows 19..48)
+    self:drawFrame(2, 19, 158, 30, COLORS.border, COLORS.panelBg, "round")
+    self:drawText(4, 19, string.format(" ◈ DISCOVERED DTPF CONTROLLERS (%d) ", nD), COLORS.accent, COLORS.panelBg)
+    local poolBadge = (workerCnt > 0)
+        and string.format(" Master + %d Worker Srv · %dH + %dB MFU ", workerCnt, #hatches, #buses)
+        or string.format(" %dH + %dB MFU (nearest 3D x,y,z) ", #hatches, #buses)
+    self:drawText(41, 19, padOrTrunc(poolBadge, 94), COLORS.muted, COLORS.panelBg)
+
     if nD > maxShow then
-        self:drawButton(138, 26, "[▲]", (self.wiringDtpfScroll > 0) and COLORS.fg or COLORS.muted, COLORS.btnBg, function()
+        self:drawButton(138, 19, "[▲]", (self.wiringDtpfScroll > 0) and COLORS.fg or COLORS.muted, COLORS.btnBg, function()
             self.wiringDtpfScroll = math.max(0, self.wiringDtpfScroll - 1)
         end)
-        self:drawButton(142, 26, "[▼]", (self.wiringDtpfScroll < maxDScroll) and COLORS.fg or COLORS.muted, COLORS.btnBg, function()
+        self:drawButton(142, 19, "[▼]", (self.wiringDtpfScroll < maxDScroll) and COLORS.fg or COLORS.muted, COLORS.btnBg, function()
             self.wiringDtpfScroll = math.min(maxDScroll, self.wiringDtpfScroll + 1)
         end)
-        self:drawText(147, 26, string.format("%d-%d/%d", self.wiringDtpfScroll + 1, math.min(nD, self.wiringDtpfScroll + maxShow), nD), COLORS.muted, COLORS.panelBg)
+        self:drawText(147, 19, string.format("%d-%d/%d", self.wiringDtpfScroll + 1, math.min(nD, self.wiringDtpfScroll + maxShow), nD), COLORS.muted, COLORS.panelBg)
     end
 
-    local hdrY = 27
+    local hdrY = 21
     self:fillRect(3, hdrY, 156, 1, " ", COLORS.headerBg)
-    self:drawText(4, hdrY, "UNIT", COLORS.muted, COLORS.headerBg)
-    self:drawText(17, hdrY, "CTRL MFU @(x,y,z)", COLORS.muted, COLORS.headerBg)
-    self:drawText(41, hdrY, "OD NET", COLORS.muted, COLORS.headerBg)
-    self:drawText(53, hdrY, "WORK", COLORS.muted, COLORS.headerBg)
-    self:drawText(59, hdrY, "DISC", COLORS.muted, COLORS.headerBg)
-    self:drawText(67, hdrY, "COIL", COLORS.muted, COLORS.headerBg)
-    self:addHitbox(67, hdrY, 74, hdrY, function()
+    self:drawText(5, hdrY, "DTPF", COLORS.muted, COLORS.headerBg)
+    self:drawText(19, hdrY, "CONTROLLER (x,y,z)", COLORS.muted, COLORS.headerBg)
+    self:drawText(45, hdrY, "PASSIVE HATCH MFU", COLORS.muted, COLORS.headerBg)
+    self:drawText(79, hdrY, "PASSIVE BUS MFU", COLORS.muted, COLORS.headerBg)
+    self:drawText(113, hdrY, "OD SUBNET", COLORS.muted, COLORS.headerBg)
+    self:drawText(126, hdrY, "COIL", COLORS.muted, COLORS.headerBg)
+    self:addHitbox(126, hdrY, 134, hdrY, function()
         self:toggleCoilDisplay()
     end)
-    self:drawText(76, hdrY, "CONV", COLORS.muted, COLORS.headerBg)
-    self:drawText(82, hdrY, "CAT", COLORS.muted, COLORS.headerBg)
-    self:drawText(88, hdrY, "PASSIVE HATCH MFU (3D Δ)", COLORS.muted, COLORS.headerBg)
-    self:drawText(124, hdrY, "PASSIVE BUS MFU (3D Δ)", COLORS.muted, COLORS.headerBg)
+    self:drawText(136, hdrY, "DISC", COLORS.muted, COLORS.headerBg)
+    self:drawText(143, hdrY, "STATUS", COLORS.muted, COLORS.headerBg)
 
     if nD == 0 then
-        self:drawText(6, 30, "No DTPF Controllers paired yet — click [ RESCAN HARDWARE ] above once MFU Adapters are wired.", COLORS.muted, COLORS.panelBg)
+        self:drawText(6, 25, "No DTPF Controllers found — wire MFU Adapters and click RESCAN HARDWARE above.", COLORS.muted, COLORS.panelBg)
         return
     end
 
-    local ry = 28
+    local ry = 23
     for visD = 1, math.min(maxShow, nD - self.wiringDtpfScroll) do
         local i = visD + self.wiringDtpfScroll
         local d = self.cfg.dtpfs[i]
         local st = (self.state.dtpfStatus and self.state.dtpfStatus[i]) or {}
         local chId = d.channelId or ("ch" .. tostring(i))
         local ch = chById[chId]
-        local rowBg = (visD % 2 == 0) and COLORS.rowAltBg or COLORS.panelBg
-        self:fillRect(3, ry, 156, (stride >= 2) and 2 or 1, " ", rowBg)
+        local rowBg = COLORS.panelBg
 
         local function focusDtpfInFleet()
             self.selectedDtpf = i
@@ -4426,15 +4365,43 @@ function UI:renderUnifiedMfuPairingPanel(ctx)
         self:addHitbox(3, ry, 158, ry, focusDtpfInFleet)
 
         local unitLabel = padOrTrunc(d.name or ("DTPF #" .. i), 10):gsub("%s+$", "")
-        self:drawButton(4, ry, "[" .. unitLabel .. "]", COLORS.cyan, COLORS.btnBg, focusDtpfInFleet)
+        self:drawButton(5, ry, "[" .. unitLabel .. "]", COLORS.cyan, COLORS.btnBg, focusDtpfInFleet)
 
         local onlineDot = st.online and "●" or "○"
         local dotCol = (st.coverConflict) and COLORS.yellow or (st.online and COLORS.green or COLORS.red)
-        self:drawText(17, ry, onlineDot, dotCol, rowBg)
+        self:drawText(19, ry, onlineDot, dotCol, rowBg)
         local addrTxt = d.isRemote and ("W:" .. tostring(d.address):sub(1, 6)) or tostring(d.address):sub(1, 6)
-        local cStr = (d.x and d.z) and string.format("@%d,%d,%d", d.x, d.y or 0, d.z) or "@?"
+        local cStr = (d.x and d.z) and string.format("(%d,%d,%d)", d.x, d.y or 0, d.z) or "(?)"
         local baseCol = (st and st.coverConflict) and COLORS.yellow or COLORS.fg
-        self:drawText(19, ry, padOrTrunc(addrTxt .. " " .. cStr, 20), baseCol, rowBg)
+        self:drawText(21, ry, padOrTrunc(addrTxt .. " " .. cStr, 23), baseCol, rowBg)
+
+        local hLbl, hCol = formatEndpointBadge(ch and ch.hatchAddr, hatchCoords, d, "! Unbound Hatch", 30)
+        self:drawButton(45, ry, hLbl, hCol, COLORS.btnBg, function(step)
+            if #hatches == 0 then return end
+            local targetCh = ensureChannelForDtpf(i, d)
+            local cur = 0
+            for k = 1, #hatches do
+                if hatches[k] == targetCh.hatchAddr then cur = k break end
+            end
+            local nxt = ((cur - 1 + (step or 1) + #hatches) % #hatches) + 1
+            targetCh.hatchAddr = hatches[nxt]
+            targetCh.activeKey = nil
+            self:save((d.name or ("DTPF #" .. i)) .. " Passive Hatch -> " .. targetCh.hatchAddr:sub(1, 8))
+        end)
+
+        local bLbl, bCol = formatEndpointBadge(ch and ch.busAddr, busCoords, d, "! Unbound Bus", 30)
+        self:drawButton(79, ry, bLbl, bCol, COLORS.btnBg, function(step)
+            if #buses == 0 then return end
+            local targetCh = ensureChannelForDtpf(i, d)
+            local cur = 0
+            for k = 1, #buses do
+                if buses[k] == targetCh.busAddr then cur = k break end
+            end
+            local nxt = ((cur - 1 + (step or 1) + #buses) % #buses) + 1
+            targetCh.busAddr = buses[nxt]
+            targetCh.activeKey = nil
+            self:save((d.name or ("DTPF #" .. i)) .. " Passive Bus -> " .. targetCh.busAddr:sub(1, 8))
+        end)
 
         local odOptions = { "global" }
         for k = 1, #nonStockNets do
@@ -4453,7 +4420,7 @@ function UI:renderUnifiedMfuPairingPanel(ctx)
             odBtnTxt = string.format("[%-8s]", curOd:sub(1, 8))
             odBtnCol = (st and st.odActive) and COLORS.green or COLORS.cyan
         end
-        self:drawButton(41, ry, odBtnTxt, odBtnCol, COLORS.btnBg, function(step)
+        self:drawButton(113, ry, odBtnTxt, odBtnCol, COLORS.btnBg, function(step)
             local idx = 1
             for k = 1, #odOptions do
                 if odOptions[k] == curOd then idx = k break end
@@ -4466,9 +4433,6 @@ function UI:renderUnifiedMfuPairingPanel(ctx)
             self:save((d.name or ("DTPF #" .. i)) .. " OD Net -> " .. lbl)
         end)
 
-        self:drawText(53, ry, (st and st.workAllowed) and "YES" or "NO", (st and st.workAllowed) and baseCol or COLORS.muted, rowBg)
-        self:drawText(59, ry, string.format("%.0f%%", (st and st.discountPct) or 0), baseCol, rowBg)
-
         local coilStr = "?"
         if st and st.coilHeat then
             if self:isCoilNameMode() then
@@ -4478,75 +4442,35 @@ function UI:renderUnifiedMfuPairingPanel(ctx)
                 coilStr = tostring(st.coilHeat) .. "K"
             end
         end
-        self:drawText(67, ry, padOrTrunc(coilStr, 8),
+        self:drawText(126, ry, padOrTrunc(coilStr, 8),
             (st and st.coverConflict) and COLORS.yellow or getCoilColor(st and st.coilHeat), rowBg)
-        self:addHitbox(67, ry, 74, ry, function()
+        self:addHitbox(126, ry, 134, ry, function()
             self:toggleCoilDisplay()
         end)
 
-        local convOn = (st and st.convergenceEnabled == true)
-        self:drawText(76, ry, convOn and "⚡ON " or "OFF ", convOn and COLORS.purple or COLORS.muted, rowBg)
-        self:drawText(82, ry, CATALYST_SHORT[(st and st.catalystTier) or 4] or "DTEC", COLORS.fg, rowBg)
+        self:drawText(136, ry, string.format("%.0f%%", (st and st.discountPct) or 0), baseCol, rowBg)
 
-        local hLbl, hCol, hDist = formatEndpointBadge(ch and ch.hatchAddr, hatchCoords, d, "No Hatch - Click", 32)
-        self:drawButton(88, ry, hLbl, hCol, COLORS.btnBg, function(step)
-            if #hatches == 0 then return end
-            local targetCh = ensureChannelForDtpf(i, d)
-            local cur = 0
-            for k = 1, #hatches do
-                if hatches[k] == targetCh.hatchAddr then cur = k break end
-            end
-            local nxt = ((cur - 1 + (step or 1) + #hatches) % #hatches) + 1
-            targetCh.hatchAddr = hatches[nxt]
-            targetCh.activeKey = nil
-            self:save((d.name or ("DTPF #" .. i)) .. " Passive Hatch -> " .. targetCh.hatchAddr:sub(1, 8))
-        end)
-
-        local bLbl, bCol, bDist = formatEndpointBadge(ch and ch.busAddr, busCoords, d, "No Bus - Click", 31)
-        self:drawButton(124, ry, bLbl, bCol, COLORS.btnBg, function(step)
-            if #buses == 0 then return end
-            local targetCh = ensureChannelForDtpf(i, d)
-            local cur = 0
-            for k = 1, #buses do
-                if buses[k] == targetCh.busAddr then cur = k break end
-            end
-            local nxt = ((cur - 1 + (step or 1) + #buses) % #buses) + 1
-            targetCh.busAddr = buses[nxt]
-            targetCh.activeKey = nil
-            self:save((d.name or ("DTPF #" .. i)) .. " Passive Bus -> " .. targetCh.busAddr:sub(1, 8))
-        end)
-
-        if stride >= 2 then
-            local chSt = self.state and self.state.channelStatus and self.state.channelStatus[chId]
-            local filterTxt
-            if st and st.coverConflict then
-                filterTxt = "! Cover Override (crowbar South Machine Controller Cover)"
-            elseif chSt and chSt.label and chSt.label ~= "" then
-                filterTxt = tostring(chSt.label)
-            else
-                filterTxt = (self.cfg.armed and "Idle" or "Paused (Safe Preview)")
-            end
-            local pairTxt = (hDist and bDist)
-                and string.format("Paired by nearest 3D Δ (Hatch %dm, Bus %dm)", hDist, bDist)
-                or ((ch and ch.hatchAddr and ch.busAddr) and "Paired (no coord telemetry)" or "Unpaired MFU")
-            self:drawText(6, ry + 1, "└─", COLORS.border, rowBg)
-            local subInfo = string.format("%s · Mode: %s · %s · Live Filter: %s",
-                chId, formatDtpfPassLabel(self, d, false), pairTxt, filterTxt)
-            self:drawText(9, ry + 1, padOrTrunc(subInfo, 148),
-                (st and st.coverConflict) and COLORS.yellow or COLORS.muted, rowBg)
+        local stTxt, stCol
+        if st and st.coverConflict then
+            stTxt, stCol = "! Cover", COLORS.yellow
+        elseif st and st.odActive then
+            stTxt, stCol = "⚡OD", COLORS.purple
+        elseif st and st.workAllowed and st.convergenceEnabled then
+            stTxt, stCol = "⚡4x · Active", COLORS.cyan
+        elseif st and st.workAllowed then
+            stTxt, stCol = "Active", COLORS.green
+        elseif self.cfg.armed then
+            stTxt, stCol = "Idle", COLORS.muted
+        else
+            stTxt, stCol = "Paused", COLORS.muted
         end
+        self:drawText(143, ry, padOrTrunc(stTxt, 14), stCol, rowBg)
 
         ry = ry + stride
     end
 end
 
 function UI:renderWiringTab()
-    self:drawText(2, 4, "◈ RESERVE FLOORS, TOPOLOGY & SETUP", COLORS.accent, COLORS.bg)
-    self:drawButton(self.w - 22, 4, " [ RESCAN HARDWARE ] ", COLORS.cyan, COLORS.btnBg, function()
-        self:refreshDiscovery()
-        self:save("Rescanned all connected OpenComputers components.")
-    end)
-
     local function findNetInfo(addr)
         for i = 1, #self.discoveredNets do
             if self.discoveredNets[i].address == addr then return self.discoveredNets[i] end
@@ -4603,12 +4527,13 @@ function UI:renderWiringTab()
             and (#(ep.fluidStorageBuses or {}) == 0 and #(ep.itemStorageBuses or {}) == 0),
     }
 
+    self:renderSetupActionBar(ctx)
     self:renderWiringReservesCard()
     self:renderWiringTopologyCard(ctx)
     if isMfuMode then
         self:renderUnifiedMfuPairingPanel(ctx)
     else
-        local nextY = self:renderWiringChannelsCard(ep)
+        local nextY = self:renderWiringChannelsCard(ep, 19)
         self:renderWiringControllersTable(nextY, nonStockNets)
     end
 end
@@ -5420,10 +5345,10 @@ function UI:handleScroll(dir, x, y)
         self.recipeScroll = math.max(0, self.recipeScroll - (dir * 3))
     elseif self.tab == TAB_SETUP then
         if self._setupMfuMode then
-            if y and y >= 26 then
+            if y and y >= 19 then
                 self.wiringDtpfScroll = math.max(0, (self.wiringDtpfScroll or 0) - dir)
             end
-        elseif y and y >= 28 then
+        elseif y and y >= 27 then
             self.wiringDtpfScroll = math.max(0, (self.wiringDtpfScroll or 0) - dir)
         else
             self.wiringChScroll = math.max(0, (self.wiringChScroll or 0) - dir)

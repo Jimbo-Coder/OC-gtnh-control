@@ -1226,8 +1226,8 @@ do
 
     ui.tab = 4
     ui:render()
-    assert(gpu._allText():find("RESERVE FLOORS, TOPOLOGY & SETUP", 1, true), "T8 View 4 displays Reserve Floors & Topology header")
-    assert(gpu._allText():find("Extract-Only FluidSB+ItemSB on 2 cables", 1, true), "T8 View 4 displays 2-cable StorageBus rule")
+    assert(gpu._allText():find("RESERVE FLOORS & POLICY", 1, true), "T8 View 4 displays RESERVE FLOORS & POLICY card")
+    assert(gpu._allText():find("SUBNETS & BRIDGE", 1, true), "T8 View 4 displays SUBNETS & BRIDGE card")
 
     -- Stress-check Control Center card geometry for 9 DTPFs (3x3) and 16 DTPFs (4x4, boxH=10, boxW=18)
     for _, count in ipairs({ 9, 16 }) do
@@ -1401,7 +1401,7 @@ do
     local tab3Txt = gpu._allText()
     assert(tab3Txt:find("PASSIVE CHANNELS (12)", 1, true), "T9 Tab 4 displays 12 channels")
     assert(tab3Txt:find("DISCOVERED DTPF CONTROLLERS (12)", 1, true), "T9 Tab 4 displays 12 DTPFs")
-    assert(clickT9("[ 1:1 PAIR DTPFS ]"), "T9 Tab 4 clicked [ 1:1 PAIR DTPFS ]")
+    assert(clickT9("1:1 PAIR DTPFS"), "T9 Tab 4 clicked 1:1 PAIR DTPFS big button")
 
     for _, s in ipairs(gpu._calls) do
         _G.__RENDERED_GPU_CALLS[#_G.__RENDERED_GPU_CALLS + 1] = s
@@ -1502,7 +1502,7 @@ do
     ui.tab = 4
     ui:render()
     local tab3Warn = gpu._allText()
-    assert(tab3Warn:find("[ LOCK AUTOPULL OFF ]", 1, true), "T10 Tab 4 renders [ LOCK AUTOPULL OFF ] button")
+    assert(tab3Warn:find("LOCK AUTOPULL OFF", 1, true), "T10 Tab 4 renders LOCK AUTOPULL OFF big action button")
     assert(tab3Warn:find("autoPull=ON", 1, true), "T10 Tab 4 displays autoPull=ON warning banner")
     for _, s in ipairs(gpu._calls) do
         _G.__RENDERED_GPU_CALLS[#_G.__RENDERED_GPU_CALLS + 1] = s
@@ -1512,14 +1512,14 @@ do
     for i = #ui.hitboxes, 1, -1 do
         local hb = ui.hitboxes[i]
         local row = gpu._rowText(hb.y1)
-        if unicode.sub(row, hb.x1, hb.x2):find("[ LOCK AUTOPULL OFF ]", 1, true) then
+        if unicode.sub(row, hb.x1, hb.x2):find("LOCK AUTOPULL OFF", 1, true) then
             ui:handleTouch(hb.x1, hb.y1, 0)
             ui:render()
             clickedLock = true
             break
         end
     end
-    assert(clickedLock, "T10 clicked [ LOCK AUTOPULL OFF ] button on Tab 4")
+    assert(clickedLock, "T10 clicked LOCK AUTOPULL OFF big button on Tab 4")
     for k = 1, 5 do
         assertEq(hatchStates[k].autoPull, false, "T10 hatch #" .. k .. " autoPull locked OFF")
         assertEq(busStates[k].autoPull, false, "T10 bus #" .. k .. " autoPull locked OFF")
@@ -1543,15 +1543,15 @@ do
     assertEq(hatchStates[1].slots[1], nil, "T10 clearing hatch_pair clears slots directly to nil without sentinels")
     assertEq(dtpfStates[1].workAllowed, false, "T10 od_only sleeps until OD work arrives")
 
-    -- Verify Unified 3x MFU Auto-Pairing panel text, 3D delta badges & glyph check after clean step
+    -- Verify Unified 3x MFU Auto-Pairing panel text, 3D distance badges & big action buttons
     ui.state = st
     ui.tab = 4
     ui:render()
     local tab3 = gpu._allText()
-    assert(tab3:find("3D Nearest Pair", 1, true), "T10 Tab 4 displays 3D Nearest Pair checklist")
+    assert(tab3:find("RESCAN HARDWARE", 1, true), "T10 Tab 4 displays big RESCAN HARDWARE action button")
     assert(tab3:find("5H + 5B MFU", 1, true), "T10 Tab 4 displays 5H + 5B MFU badge")
-    assert(tab3:find("DTPF 3x MFU AUTO-PAIRING", 1, true), "T10 Tab 4 displays unified DTPF 3x MFU AUTO-PAIRING panel")
-    assert(tab3:find("Δ", 1, true), "T10 Tab 4 displays 3D distance Δ badge on paired MFU endpoints")
+    assert(tab3:find("DISCOVERED DTPF CONTROLLERS", 1, true), "T10 Tab 4 displays unified DTPF MFU pairing table")
+    assert(tab3:find("2m", 1, true), "T10 Tab 4 displays 3D distance badge on paired MFU endpoints")
     for _, s in ipairs(gpu._calls) do
         _G.__RENDERED_GPU_CALLS[#_G.__RENDERED_GPU_CALLS + 1] = s
     end
@@ -1940,7 +1940,7 @@ do
     -- Test [Floors…] jump Header Row 3 -> Tab 4 + Walk-Up Touch Number Picker (ZERO keyboard events!)
     assert(clickT12("[Floors…]", 145, 160, 3, 3), "T12 clicked [Floors…] shortcut on Header Row 3")
     assertEq(ui.tab, 4, "T12 [Floors…] navigated to Tab 4 Setup")
-    assert(clickT12("[Min:", 4, 50, 7, 7), "T12 clicked DTEC [Min:...] floor button on Tab 4")
+    assert(clickT12("[Min:", 4, 30, 13, 13), "T12 clicked DTEC [Min:...] floor button on Tab 4")
     assertEq(ui.promptActive, true, "T12 Number Picker modal opened")
     assertEq(ui.promptIsNumeric, true, "T12 Number Picker enabled touch preset chips")
     assert(clickT12("[10M]"), "T12 touch-clicked [10M] preset chip")
@@ -2059,7 +2059,7 @@ do
     env.catalystFloors["DTEC"] = 250000
     assert(clickT13("[Floors…]", 145, 160, 3, 3), "T13 clicked Header [Floors…] to jump to Tab 4 Setup")
     assertEq(ui.tab, 4, "T13 [Floors…] opened Tab 4")
-    assert(clickT13("[Min:", 4, 50, 7, 7, 1), "T13 R-clicked DTEC [Min:...] to copy across all 5 catalysts")
+    assert(clickT13("[Min:", 4, 30, 13, 13, 1), "T13 R-clicked DTEC [Min:...] to copy across all 5 catalysts")
     for _, tier in ipairs(RecipesDB.CATALYST_TIERS) do
         assertEq(env.catalystFloors[tier.code], 250000, "T13 copied 250K reserve floor -> " .. tier.code)
     end
@@ -2146,11 +2146,11 @@ do
     end
     for _, s in ipairs(gpu._calls) do _G.__RENDERED_GPU_CALLS[#_G.__RENDERED_GPU_CALLS + 1] = s end
 
-    -- Tab 4 Setup signal-flow topology schematic
+    -- Tab 4 Setup subnets & bridge card
     ui.tab = 4
     ui:render()
     local tab3Txt = gpu._allText()
-    assert(tab3Txt:find("◈ TOPOLOGY:", 1, true), "T14 Tab 4 renders signal-flow topology schematic")
+    assert(tab3Txt:find("SUBNETS & BRIDGE", 1, true), "T14 Tab 4 renders SUBNETS & BRIDGE card")
     for _, s in ipairs(gpu._calls) do _G.__RENDERED_GPU_CALLS[#_G.__RENDERED_GPU_CALLS + 1] = s end
 
     -- Also render double-framed Passive & Log Modals to include every glyph in font.hex check
@@ -2327,7 +2327,7 @@ do
     assertEq(cfg.dtpfs[1].odNetAddr, "global", "T15 cycled DTPF #1 OD net to global")
     assert(clickT15("[Global  ]", 28, 49, "DTPF #1"), "T15 clicked DTPF #1 [OD NET] -> t15-od2")
     assertEq(cfg.dtpfs[1].odNetAddr, "t15-od2", "T15 cycled DTPF #1 OD net to t15-od2")
-    assert(clickT15("[ 1:1 PAIR OD ]", 10, 10), "T15 clicked [ 1:1 PAIR OD ]")
+    assert(clickT15("[ 1:1 PAIR OD ]", 13, 13), "T15 clicked [ 1:1 PAIR OD ]")
     assertEq(cfg.dtpfs[1].odNetAddr, "t15-od1", "T15 [ 1:1 PAIR OD ] restored DTPF #1 -> t15-od1")
     for _, s in ipairs(gpu._calls) do _G.__RENDERED_GPU_CALLS[#_G.__RENDERED_GPU_CALLS + 1] = s end
 
@@ -2711,7 +2711,7 @@ do
     ui16.tab = 4
     ui16:render()
     local tab3BridgeTxt = gpu16._allText()
-    assert(tab3BridgeTxt:find("Catalyst Bridge (OC)", 1, true), "T16 Tab 4 renders Catalyst Bridge row")
+    assert(tab3BridgeTxt:find("Bridge (TP):", 1, true), "T16 Tab 4 renders Catalyst Bridge row")
     assert(tab3BridgeTxt:find("t16-tp", 1, true), "T16 Tab 4 displays discovered Transposer address")
     local tab3Calls = #gpu16._calls
     ui16:render()
@@ -3231,11 +3231,11 @@ do
     ui18:render()
     for _, s in ipairs(gpu18._calls) do _G.__RENDERED_GPU_CALLS[#_G.__RENDERED_GPU_CALLS + 1] = s end
     assert(gpu18._allText():find("Eternal", 1, true), "T18h Tab 4 COIL column shows Eternal")
-    assert(clickSlice18("Eternal", 27, 49, 67, 74), "T18h clicked Tab 4 COIL row cell")
+    assert(clickSlice18("Eternal", 22, 48, 125, 135), "T18h clicked Tab 4 COIL row cell")
     assertEq(ui18.tab, 4, "T18h clicking Tab 4 COIL cell stays on Tab 4 instead of focusing Tab 2")
     assertEq(cfg.coilDisplayMode, "temp", "T18h Tab 4 COIL click switched to 'temp' mode")
     assert(gpu18._allText():find("13500K", 1, true), "T18h Tab 4 COIL column shows 13500K in temp mode")
-    assert(clickSlice18("COIL", 26, 48, 67, 74), "T18h clicked Tab 4 COIL column header")
+    assert(clickSlice18("COIL", 20, 22, 125, 135), "T18h clicked Tab 4 COIL column header")
     assertEq(cfg.coilDisplayMode, "name", "T18h Tab 4 COIL header restored 'name' mode")
 
     -- 18i: Tab 4 Transposer side click-to-cycle + auto-detection + 64-entry rolling log modal
@@ -3258,10 +3258,10 @@ do
     cfg.odTransposerSide = 0
     ui18.tab = 4
     ui18:render()
-    assert(clickSlice18("[P:Up]", 15, 15, 25, 80), "T18i clicked Tab 4 [P:Up] transposer side button")
+    assert(clickSlice18("[P:Up]", 15, 15, 95, 155), "T18i clicked Tab 4 [P:Up] transposer side button")
     assertEq(cfg.stockTransposerSide, 2, "T18i [P:Up] stepped stockTransposerSide 1 -> 2 (North)")
     assert(gpu18._rowText(15):find("[P:North]", 1, true), "T18i Row 15 renders [P:North]")
-    assert(clickSlice18("[OD:Down]", 15, 15, 25, 80), "T18i clicked Tab 4 [OD:Down] transposer side button")
+    assert(clickSlice18("[OD:Down]", 15, 15, 95, 155), "T18i clicked Tab 4 [OD:Down] transposer side button")
     assertEq(cfg.odTransposerSide, 1, "T18i [OD:Down] stepped odTransposerSide 0 -> 1 (Up)")
 
     st.events = {}
@@ -4075,11 +4075,12 @@ do
 
     ui20.tab = 4; ui20:render()
     local row15Txt = gpu20._rowText(15)
+    local row6Txt = gpu20._rowText(6)
     assert(row15Txt:find("[AutoFlush:OFF]", 1, true), "T20 Tab 4 renders [AutoFlush:OFF]")
-    assert(row15Txt:find("[FLUSH OD]", 1, true), "T20 Tab 4 renders [FLUSH OD]")
+    assert(row6Txt:find("FLUSH OD", 1, true), "T20 Tab 4 renders FLUSH OD big action button")
     for _, s in ipairs(gpu20._calls) do _G.__RENDERED_GPU_CALLS[#_G.__RENDERED_GPU_CALLS + 1] = s end
 
-    assert(clickBtn20("[FLUSH OD]", 15, 0), "T20 clicked [FLUSH OD] hitbox on Tab 4")
+    assert(clickBtn20("FLUSH OD", 6, 0), "T20 clicked FLUSH OD big button hitbox on Tab 4")
     assertEq(st20.odFlushActive, true, "T20 clicking [FLUSH OD] activates odFlushActive (even when paused)")
     assertEq(st20._forcePollNow, true, "T20 clicking [FLUSH OD] requests immediate poll")
     ui20.tab = 1; ui20:render()
