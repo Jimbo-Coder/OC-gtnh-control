@@ -19,6 +19,7 @@ local CONFIG_PATH = "/home/dtpf/config.cfg"
 local BACKUP_CONFIG_PATH = "/home/config.dtpf.bak"
 local REPO_META_PATH = "/home/dtpf/.repo"
 local BIN_PATH = "/usr/bin/dtpf.lua"
+local SHRC_PATH = "/home/.shrc"
 
 local FILES = {
     "install.lua",
@@ -181,18 +182,88 @@ local function getInternetProxy()
     return nil
 end
 
+local function hasDtpfInShrc(content)
+    if type(content) ~= "string" or content == "" then
+        return false
+    end
+    for line in content:gmatch("[^\r\n]+") do
+        if not line:match("^%s*#") then
+            if line:find("main.lua", 1, true)
+                or line:find("/usr/bin/dtpf", 1, true)
+                or line:match("^%s*dtpf%s*$")
+                or line:match("^%s*dtpf%s+") then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local function hasDisplayHardware()
+    local hasScreen = component.list("screen", true)() ~= nil
+    local hasGpu = component.list("gpu", true)() ~= nil
+    return hasScreen and hasGpu
+end
+
+local function askYesNo(promptText, nonInteractiveDefault, optYes, optNoPrompt)
+    if optYes then
+        return true
+    end
+    if optNoPrompt then
+        return nonInteractiveDefault
+    end
+    if type(io) ~= "table" or type(io.read) ~= "function" then
+        return nonInteractiveDefault
+    end
+    if type(io.write) == "function" then
+        io.write(promptText)
+        if type(io.flush) == "function" then
+            pcall(io.flush)
+        end
+    else
+        print(promptText)
+    end
+    local okR, line = pcall(io.read)
+    if not okR or line == nil or line == false then
+        return false
+    end
+    return (tostring(line) .. "y"):match("^%s*[Yy]") ~= nil
+end
+
 local function runInstaller(args)
     args = args or {}
+    local pos = {}
     local localDir = nil
-    local repoArgs = args
-    if args[1] == "--local" then
-        localDir = tostring(args[2] or ""):gsub("/+$", "")
-        if localDir == "" then
-            io.stderr:write("ERROR: Usage: install --local <sourceDir> [owner/repo] [branch]\n")
-            return false, "missing local source directory"
+    local isUpdate = false
+    local optYes = false
+    local optNoPrompt = false
+    local optAutostart = nil
+    local idx = 1
+    while idx <= #args do
+        local a = tostring(args[idx])
+        if a == "--local" then
+            idx = idx + 1
+            localDir = tostring(args[idx] or ""):gsub("/+$", "")
+            if localDir == "" then
+                io.stderr:write("ERROR: Usage: install --local <sourceDir> [owner/repo] [branch]\n")
+                return false, "missing local source directory"
+            end
+        elseif a == "--update" then
+            isUpdate = true
+        elseif a == "--yes" or a == "-y" then
+            optYes = true
+        elseif a == "--no-prompt" then
+            optNoPrompt = true
+        elseif a == "--autostart" then
+            optAutostart = true
+        elseif a == "--no-autostart" then
+            optAutostart = false
+        else
+            pos[#pos + 1] = a
         end
-        repoArgs = { args[3], args[4] }
+        idx = idx + 1
     end
+    local repoArgs = { pos[1], pos[2] }
 
     local internet = (not localDir) and getInternetProxy() or nil
     if (not localDir) and (not internet) then
@@ -276,24 +347,73 @@ local function runInstaller(args)
     end
 
     writeWholeFile(REPO_META_PATH, repo .. "\n" .. branch .. "\n")
-    writeWholeFile(
-        BIN_PATH,
-        "local args = { ... }\n"
-            .. "local chunk, err = loadfile(\"/home/dtpf/main.lua\")\n"
-            .. "if not chunk then io.stderr:write(tostring(err) .. \"\\n\") return end\n"
-            .. "return chunk(table.unpack(args))\n"
-    )
+
+    local binExisted = filesystem.exists(BIN_PATH)
+    local wantAlias
+    if binExisted then
+        wantAlias = true
+        if not isUpdate then
+            print("[KEEP]    Command 'dtpf' (/usr/bin/dtpf.lua)")
+        end
+    elseif isUpdate then
+        wantAlias = false
+    else
+        wantAlias = askYesNo("Add 'dtpf' shell command (/usr/bin/dtpf.lua)? [Y/n]: ", true, optYes, optNoPrompt)
+    end
+
+    if wantAlias then
+        writeWholeFile(
+            BIN_PATH,
+            "local args = { ... }\n"
+                .. "local chunk, err = loadfile(\"/home/dtpf/main.lua\")\n"
+                .. "if not chunk then io.stderr:write(tostring(err) .. \"\\n\") return end\n"
+                .. "return chunk(table.unpack(args))\n"
+        )
+        if not binExisted then
+            print("[CMD]     Added 'dtpf' command (/usr/bin/dtpf.lua)")
+        end
+    elseif not isUpdate then
+        print("[SKIP]    Skipped /usr/bin/dtpf.lua (run via /home/dtpf/main.lua)")
+    end
+
+    local existingShrc = readWholeFile(SHRC_PATH)
+    if hasDtpfInShrc(existingShrc) then
+        if not isUpdate then
+            print("[KEEP]    Auto-start already configured in /home/.shrc")
+        end
+    elseif not isUpdate then
+        local baseCmd = wantAlias and "dtpf" or "/home/dtpf/main.lua"
+        local autoCmd = hasDisplayHardware() and baseCmd or (baseCmd .. " --worker")
+        local wantAuto
+        if optAutostart ~= nil then
+            wantAuto = optAutostart
+        else
+            wantAuto = askYesNo(string.format("Auto-start on boot in /home/.shrc (%s)? [Y/n]: ", autoCmd), false, optYes, optNoPrompt)
+        end
+        if wantAuto then
+            local prefix = (type(existingShrc) == "string" and existingShrc ~= "") and existingShrc or ""
+            if prefix ~= "" and prefix:sub(-1) ~= "\n" then
+                prefix = prefix .. "\n"
+            end
+            writeWholeFile(SHRC_PATH, prefix .. autoCmd .. "\n")
+            print(string.format("[AUTO]    Added '%s' to /home/.shrc (press Q anytime for shell)", autoCmd))
+        else
+            print("[SKIP]    Skipped /home/.shrc auto-start")
+        end
+    end
+
     if filesystem.exists("/home/install.lua") then
         pcall(filesystem.remove, "/home/install.lua")
     end
 
+    local runCmd = wantAlias and "dtpf" or "/home/dtpf/main.lua"
     print("")
     print(string.format("Done! Installed %d files to %s (config: %s).", #staged, INSTALL_DIR, cfgState))
     print("Next steps:")
-    print("  dtpf --lock    (disable autoPull on passive ME Stocking Hatches/Buses)")
-    print("  dtpf --check   (read-only hardware & schedule dry-run check)")
-    print("  dtpf           (launch 160x50 Touch Control Center GUI)")
-    print("  dtpf --update  (update scripts safely while preserving config.cfg)")
+    print(string.format("  %-15s (disable autoPull on passive ME Stocking Hatches/Buses)", runCmd .. " --lock"))
+    print(string.format("  %-15s (read-only hardware & schedule dry-run check)", runCmd .. " --check"))
+    print(string.format("  %-15s (launch 160x50 Touch Control Center GUI)", runCmd))
+    print(string.format("  %-15s (update scripts safely while preserving config.cfg)", runCmd .. " --update"))
     return true
 end
 

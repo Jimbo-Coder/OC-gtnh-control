@@ -659,7 +659,7 @@ local function main(args)
                 io.stderr:write("ERROR: Failed to load install.lua: " .. tostring(err) .. "\n")
                 return
             end
-            local extra = {}
+            local extra = { "--update" }
             for j = i + 1, #args do extra[#extra + 1] = args[j] end
             chunk(table.unpack(extra))
             return

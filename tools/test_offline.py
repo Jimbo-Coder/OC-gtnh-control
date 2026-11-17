@@ -3462,11 +3462,73 @@ do
     assertEq(okReinstall, true, "T18j reinstall succeeded after deleting config.cfg")
     assertEq(__py_read_file("/home/dtpf/config.cfg"), customCfgStr, "T18j restored /home/dtpf/config.cfg from /home/config.dtpf.bak")
 
+    -- Interactive prompt tests: dtpf alias + /home/.shrc autostart (coordinator vs headless --worker vs update)
+    local origIoWrite, origIoRead = io.write, io.read
+    local mockAnswers, promptLog = {}, {}
+    local readCalls = 0
+    io.write = function(s) promptLog[#promptLog + 1] = tostring(s) end
+    io.read = function()
+        readCalls = readCalls + 1
+        return table.remove(mockAnswers, 1)
+    end
+
+    -- 1. Coordinator (has gpu + screen), Enter on both prompts -> /usr/bin/dtpf.lua + "dtpf\n"
+    os.remove("/usr/bin/dtpf.lua")
+    os.remove("/home/.shrc")
+    component._register("mock-gpu-inst", "gpu", {})
+    component._register("mock-scr-inst", "screen", {})
+    mockAnswers = { "", "" }
+    promptLog = {}
+    readCalls = 0
+    assertEq(instChunk("example/gtnh-dtpf-control", "main"), true, "T18j interactive coordinator install succeeded")
+    assertEq(readCalls, 2, "T18j coordinator install prompted twice (alias + autostart)")
+    assert(__py_read_file("/usr/bin/dtpf.lua") ~= nil, "T18j Enter confirmed /usr/bin/dtpf.lua alias")
+    assertEq(__py_read_file("/home/.shrc"), "dtpf\n", "T18j Enter added dtpf autostart to /home/.shrc")
+
+    -- 2. Re-run when /usr/bin/dtpf.lua and /home/.shrc already configured -> 0 prompts, no duplicate line
+    __py_write_file("/home/.shrc", "/home/dtpf/main.lua\n")
+    mockAnswers = {}
+    readCalls = 0
+    assertEq(instChunk("example/gtnh-dtpf-control", "main"), true, "T18j idempotent reinstall succeeded")
+    assertEq(readCalls, 0, "T18j skips already-configured alias and .shrc prompts")
+    assertEq(__py_read_file("/home/.shrc"), "/home/dtpf/main.lua\n", "T18j did not duplicate .shrc autostart")
+
+    -- 3. Headless server (no screen), preserve pre-existing non-dtpf .shrc line -> appends "dtpf --worker\n"
+    component._register("mock-scr-inst", "removed", {})
+    os.remove("/usr/bin/dtpf.lua")
+    __py_write_file("/home/.shrc", "echo hello")
+    mockAnswers = { "y", "" }
+    readCalls = 0
+    assertEq(instChunk("example/gtnh-dtpf-control", "main"), true, "T18j headless worker install succeeded")
+    assertEq(readCalls, 2, "T18j headless worker prompted twice")
+    assertEq(__py_read_file("/home/.shrc"), "echo hello\ndtpf --worker\n", "T18j appended headless dtpf --worker to .shrc cleanly")
+
+    -- 4. Decline both ("n", "n") -> neither created; subsequent --update triggers 0 prompts and keeps both absent
+    os.remove("/usr/bin/dtpf.lua")
+    os.remove("/home/.shrc")
+    component._register("mock-scr-inst", "screen", {})
+    mockAnswers = { "n", "n" }
+    readCalls = 0
+    assertEq(instChunk("example/gtnh-dtpf-control", "main"), true, "T18j declined install succeeded")
+    assertEq(readCalls, 2, "T18j asked both prompts when declined")
+    assertEq(__py_read_file("/usr/bin/dtpf.lua"), nil, "T18j respected 'n' for /usr/bin/dtpf.lua")
+    assertEq(__py_read_file("/home/.shrc"), nil, "T18j respected 'n' for /home/.shrc")
+
+    mockAnswers = {}
+    readCalls = 0
+    assertEq(instChunk("--update"), true, "T18j --update succeeded cleanly")
+    assertEq(readCalls, 0, "T18j --update performs 0 interactive prompts")
+    assertEq(__py_read_file("/usr/bin/dtpf.lua"), nil, "T18j --update kept absent /usr/bin/dtpf.lua absent")
+    assertEq(__py_read_file("/home/.shrc"), nil, "T18j --update left /home/.shrc untouched")
+
+    io.write, io.read = origIoWrite, origIoRead
+
     -- Cleanup VFS artifacts so subsequent tests stay isolated
     for _, rp in ipairs({
         "/home/dtpf/install.lua", "/home/dtpf/main.lua", "/home/dtpf/lib/recipes_db.lua",
         "/home/dtpf/lib/hardware.lua", "/home/dtpf/lib/scheduler.lua", "/home/dtpf/lib/ui.lua",
         "/home/dtpf/config.cfg", "/home/dtpf/.repo", "/home/config.dtpf.bak", "/usr/bin/dtpf.lua",
+        "/home/.shrc",
     }) do
         os.remove(rp)
     end

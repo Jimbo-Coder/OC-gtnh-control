@@ -84,16 +84,14 @@ Everything works on stock GTNH 2.9+, though two optional tweaks make the experie
 **Server parts:** Tier 3 Server (`3x Component Bus T3`), **APU Tier 3** (or CPU T3 + GPU T3), `2x Memory (Tier 3.5)`, `HDD Tier 2`, `EEPROM (Lua BIOS)`, and an **Internet Card** (`install --local <dir>` supported offline). **`Sneak + Right-Click` the CPU/APU in hand first so it says `Lua 5.3`**, then boot OpenOS:
 
 ```sh
-# Fresh install:
+# Fresh install (prompts [Y/n] to add the `dtpf` command and `/home/.shrc` auto-boot):
 wget -f https://raw.githubusercontent.com/Jimbo-Coder/gtnh-dtpf-control/main/install.lua && install
 
-# Optional — auto-launch on world/server reboot (`dtpf --worker` on headless workers):
-echo dtpf >> /home/.shrc
-
-# Update anytime (keeps your config safe):
+# Update anytime (non-interactive; keeps your config safe):
 dtpf --update
 ```
 
+- **Zero-hassle setup:** On a fresh `install`, just press Enter twice to add the `dtpf` command (`/usr/bin/dtpf.lua`) and auto-start on boot in `/home/.shrc` (`dtpf` with a screen attached, or `dtpf --worker` automatically on headless worker servers).
 - **Safe updates & config preservation:** `dtpf --update` (and re-running `install`) downloads into `.tmp` files and syntax-checks every Lua module before replacing live code. It **never overwrites `/home/dtpf/config.cfg`** and automatically mirrors a backup to `/home/config.dtpf.bak`—even if `/home/dtpf` is wiped and reinstalled, your pairings, targets, and reserve floors are restored automatically.
 
 ---
