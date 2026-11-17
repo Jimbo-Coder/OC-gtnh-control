@@ -223,6 +223,7 @@ function WebBridge.new(cfg, runtimeState, ui, scheduleSave, Scheduler, Hardware,
     self.ready = false
     self.rxBuf = ""
     self.lastTry = -100
+    self.connectStart = 0
     return self
 end
 
@@ -233,6 +234,7 @@ function WebBridge:close()
     end
     self.ready = false
     self.rxBuf = ""
+    self.connectStart = 0
 end
 
 function WebBridge:sendLine(obj)
@@ -619,7 +621,7 @@ function WebBridge:ensureConnected(now)
     if self.sock then
         if self.ready then return true end
         local okF, conn = pcall(self.sock.finishConnect)
-        if not okF then
+        if (not okF) or (conn == nil) or ((now - (self.connectStart or now)) > 8.0) then
             self:close()
             return false
         end
@@ -649,8 +651,13 @@ function WebBridge:ensureConnected(now)
     self.sock = sock
     self.ready = false
     self.rxBuf = ""
+    self.connectStart = now
     local okF, conn = pcall(sock.finishConnect)
-    if okF and conn == true then
+    if (not okF) or (conn == nil) then
+        self:close()
+        return false
+    end
+    if conn == true then
         self.ready = true
         self:sendLine({ op = "hello", role = "dtpf", version = 1 })
         return true
