@@ -72,7 +72,7 @@ if not package.path:find(searchPat, 1, true) then
     package.path = searchPat .. ";" .. package.path
 end
 
-for _, modName in ipairs({ "lib.hardware", "lib.scheduler", "lib.recipes_db", "lib.ui" }) do
+for _, modName in ipairs({ "lib.hardware", "lib.scheduler", "lib.recipes_db", "lib.ui", "lib.web_bridge" }) do
     package.loaded[modName] = nil
 end
 
@@ -80,6 +80,7 @@ local Hardware = require("lib.hardware")
 local Scheduler = require("lib.scheduler")
 local RecipesDB = require("lib.recipes_db")
 local UI = require("lib.ui")
+local WebBridge = require("lib.web_bridge")
 
 local CONFIG_PATH = filesystem.concat(scriptDir, "config.cfg")
 local BACKUP_CONFIG_PATH = "/home/config.dtpf.bak"
@@ -507,6 +508,8 @@ local function runGUI()
     end
 
     local ui = UI.new(cfg, runtimeState, scheduleSave)
+    local webBridge = WebBridge.new(cfg, runtimeState, ui, scheduleSave, Scheduler, Hardware)
+    webBridge:step(computer.uptime())
     if not okInit then
         ui.statusMsg = "Scheduler init error: " .. tostring(errInit)
     elseif lockedCnt and lockedCnt > 0 then
@@ -525,6 +528,8 @@ local function runGUI()
                 savePending = true
                 ui.running = false
                 return true, false
+            elseif evName == "internet_ready" then
+                return webBridge:drain(), false
             elseif evName == "touch" then
                 ui:handleTouch(math.floor(tonumber(a1) or 0), math.floor(tonumber(a2) or 0), a3)
                 return true, false
@@ -584,6 +589,10 @@ local function runGUI()
                 else
                     ui.animNow = nil
                 end
+                webBridge:step(computer.uptime())
+                if webBridge:drain() then
+                    dirty = true
+                end
                 interval = math.max(0.5, tonumber(cfg.pollInterval) or 3.0)
                 local nowDone = computer.uptime()
                 nextPoll = nowDone + interval
@@ -615,6 +624,7 @@ local function runGUI()
     end
 
     local okLoop, errLoop = xpcall(runLoop, debug.traceback)
+    webBridge:close()
     flushPendingSave()
     if component.isAvailable("gpu") then
         component.gpu.setBackground(0x000000)

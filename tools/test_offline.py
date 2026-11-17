@@ -4217,6 +4217,160 @@ do
     component._reset()
 end
 
+-- ============================================================================
+-- TEST 21: Convergence `below_tgt` Hysteresis, UI Controls & WebBridge RPC
+-- ============================================================================
+do
+    Hardware.resetClusterState()
+    local env, fluids, items, odFluids, odItems, fsbSlots, fsbCalls, isbSlots, isbCalls, dtpfStates = setupStandardEnv()
+    for id, rc in pairs(env.recipes) do
+        rc.enabled = false
+    end
+    env.fallbackEnabled = false
+
+    -- Scenario 1: raw_tesseract 24/7 with convMode="below_tgt" (target=40M) + molten_infinity 24/7 with convMode="off"
+    env.recipes["raw_tesseract"].enabled = true
+    env.recipes["raw_tesseract"].forever = true
+    env.recipes["raw_tesseract"].priority = 1
+    env.recipes["raw_tesseract"].target = 40000000
+    env.recipes["raw_tesseract"].convMode = "below_tgt"
+    items["gregtech:gt.metaitem.01:32415"] = 100000
+    items["miscutils:MU-metaitem.01:32105"] = 10000
+    items["minecraft:cobblestone:0"] = 100000
+
+    local RecipesDB = require("lib.recipes_db")
+    local rtFam = RecipesDB.BY_ID["raw_tesseract"]
+    local _, _, _, rtData = Scheduler.resolveRecipe(rtFam, env.recipes["raw_tesseract"], env, { fluids = fluids, items = items }, {})
+    for _, ii in ipairs((rtData and rtData.itemsIn) or {}) do
+        items[ii.name .. ":" .. tostring(ii.damage or 0)] = 100000
+    end
+    for _, fi in ipairs((rtData and rtData.fluidsIn) or {}) do
+        fluids[fi.name] = 10000000
+    end
+
+    env.recipes["molten_infinity"].enabled = true
+    env.recipes["molten_infinity"].forever = true
+    env.recipes["molten_infinity"].priority = 2
+    env.recipes["molten_infinity"].convMode = "off"
+    env.recipes["molten_infinity"].modifierIndex = 1
+    local infFam = RecipesDB.BY_ID["molten_infinity"]
+    local _, _, _, infData = Scheduler.resolveRecipe(infFam, env.recipes["molten_infinity"], env, { fluids = fluids, items = items }, {})
+    for _, ii in ipairs((infData and infData.itemsIn) or {}) do
+        items[ii.name .. ":" .. tostring(ii.damage or 0)] = 100000
+    end
+    for _, fi in ipairs((infData and infData.fluidsIn) or {}) do
+        fluids[fi.name] = 10000000
+    end
+
+    env.armed = true
+    local st21 = {}
+
+    -- A. Tesseract stock = 5.8M (< 99% of 40M) -> 24/7 active AND Convergence ON (4x)
+    local rtKey = rtFam.primaryOutput.name .. ":" .. tostring(rtFam.primaryOutput.damage or 0)
+    items[rtKey] = 5800000
+    dtpfStates[1].discountPct = 50
+    Scheduler.step(env, st21)
+    assertEq(st21.dtpfStatus[1].familyId, "raw_tesseract", "T21 DTPF runs priority-1 24/7 raw_tesseract")
+    assertEq(st21.recipeStatus["raw_tesseract"].convBelowTarget, true, "T21A 5.8M < 40M sets convBelowTarget=true")
+    assertEq(dtpfStates[1].workAllowed, true, "T21A workAllowed stays ON")
+    assertEq(dtpfStates[1].conv, true, "T21A Convergence ON below 40M target")
+
+    -- B. Stock = 39.8M (between 99% and 100% while active) -> hysteresis keeps Convergence ON
+    items[rtKey] = 39800000
+    Scheduler.step(env, st21)
+    assertEq(st21.recipeStatus["raw_tesseract"].convBelowTarget, true, "T21B hysteresis keeps convBelowTarget=true at 39.8M")
+    assertEq(dtpfStates[1].conv, true, "T21B hysteresis keeps Convergence ON")
+
+    -- C. Stock hits 40.0M -> Convergence drops OFF (1x keepalive) while DTPF stays ON (24/7)!
+    items[rtKey] = 40000000
+    Scheduler.step(env, st21)
+    assertEq(st21.recipeStatus["raw_tesseract"].convBelowTarget, false, "T21C >= 40M clears convBelowTarget")
+    assertEq(dtpfStates[1].workAllowed, true, "T21C 24/7 keepalive keeps workAllowed ON")
+    assertEq(dtpfStates[1].conv, false, "T21C Convergence OFF once >= 40M target")
+
+    -- D. Stock dips to 39.8M (still >= 99% = 39.6M) -> hysteresis keeps Convergence OFF
+    items[rtKey] = 39800000
+    Scheduler.step(env, st21)
+    assertEq(st21.recipeStatus["raw_tesseract"].convBelowTarget, false, "T21D hysteresis avoids rapid toggle at 39.8M")
+    assertEq(dtpfStates[1].conv, false, "T21D Convergence stays OFF until < 99%")
+
+    -- E. Stock falls below 99% (39.5M) -> Convergence turns back ON
+    items[rtKey] = 39500000
+    Scheduler.step(env, st21)
+    assertEq(st21.recipeStatus["raw_tesseract"].convBelowTarget, true, "T21E < 99% re-enables convBelowTarget")
+    assertEq(dtpfStates[1].conv, true, "T21E Convergence back ON")
+
+    -- F. Cheap 24/7 molten_infinity with convMode="off" stays workAllowed=true, conv=false even at 50% discount
+    env.recipes["raw_tesseract"].enabled = false
+    Scheduler.step(env, st21)
+    assertEq(st21.dtpfStatus[1].familyId, "molten_infinity", "T21F switched to 24/7 molten_infinity")
+    assertEq(dtpfStates[1].workAllowed, true, "T21F molten_infinity workAllowed ON for discount keepalive")
+    assertEq(dtpfStates[1].conv, false, "T21F convMode=off keeps cheap 24/7 keepalive at 1x")
+
+    -- G. UI render check for [⚡<Tg] + clickable 40M button on Fleet & [⚡<Tgt] + [Conv < ...] on Recipes
+    env.recipes["raw_tesseract"].enabled = true
+    items[rtKey] = 5800000
+    Scheduler.step(env, st21)
+    local gpu21 = component._newMockGPU(160, 50)
+    local ui21 = UI.new(env, st21, function() end)
+    ui21.tab = 2; ui21:render()
+    local tab2Txt = gpu21._allText()
+    assert(tab2Txt:find("[⚡<Tg]", 1, true), "T21G Tab 2 Fleet renders [⚡<Tg] badge")
+    assert(tab2Txt:find("[ 40M ]", 1, true) or tab2Txt:find("[40M]", 1, true), "T21G Tab 2 Fleet shows editable 40M threshold for 24/7 below_tgt")
+    ui21.tab = 3; ui21.selectedFamilyId = "raw_tesseract"; ui21:render()
+    local tab3Txt = gpu21._allText()
+    assert(tab3Txt:find("[⚡<Tgt]", 1, true), "T21G Tab 3 Inspector renders [⚡<Tgt] policy chip")
+    assert(tab3Txt:find("[Conv < ", 1, true), "T21G Tab 3 Inspector renders editable [Conv < ...] button on 24/7 below_tgt")
+    for _, s in ipairs(gpu21._calls) do _G.__RENDERED_GPU_CALLS[#_G.__RENDERED_GPU_CALLS + 1] = s end
+
+    -- H. WebBridge mock TCP handshake + dtpf_state + dtpf_patch + dtpf_action under strict _G
+    local WebBridge = require("lib.web_bridge")
+    local wbOut, wbIn = {}, {}
+    local mockSock = {
+        finishConnect = function() return true end,
+        read = function(_)
+            if #wbIn > 0 then
+                return table.remove(wbIn, 1)
+            end
+            return ""
+        end,
+        write = function(data)
+            wbOut[#wbOut + 1] = data
+            return #data
+        end,
+        close = function() end,
+    }
+    component._register("t21-inet", "internet", {
+        connect = function(h, p)
+            assertEq(h, "127.0.0.1", "T21H connects to loopback 127.0.0.1")
+            assertEq(p, 8766, "T21H connects to bridge port 8766")
+            return mockSock
+        end,
+    })
+    local savedFlag = 0
+    local wb = WebBridge.new(env, st21, ui21, function() savedFlag = savedFlag + 1 end, Scheduler, Hardware)
+    wb:step(200)
+    assertEq(wb.ready, true, "T21H WebBridge finished connect")
+    assert(#wbOut >= 1 and wbOut[1]:find('"role":"dtpf"', 1, true), "T21H sent dtpf hello packet")
+
+    wbIn[#wbIn + 1] = '{"id":1,"op":"dtpf_state"}\n'
+    wbIn[#wbIn + 1] = '{"id":2,"op":"dtpf_patch","patch":{"armed":false,"familyId":"molten_infinity","convMode":"below_tgt","target":1000000000}}\n'
+    wbIn[#wbIn + 1] = '{"id":3,"op":"dtpf_action","action":"poll_now"}\n'
+    local drained = wb:drain()
+    assertEq(drained, true, "T21H WebBridge drained incoming RPCs")
+    assertEq(env.armed, false, "T21H WebBridge patch updated armed=false")
+    assertEq(env.recipes["molten_infinity"].convMode, "below_tgt", "T21H WebBridge patch updated convMode")
+    assertEq(env.recipes["molten_infinity"].target, 1000000000, "T21H WebBridge patch updated target")
+    assertEq(savedFlag >= 1, true, "T21H WebBridge triggered scheduleSave")
+    assertEq(st21._forcePollNow, true, "T21H WebBridge poll_now set _forcePollNow")
+    local allSent = table.concat(wbOut)
+    assert(allSent:find('"id":1', 1, true) and allSent:find('"id":2', 1, true) and allSent:find('"id":3', 1, true),
+        "T21H WebBridge replied to all 3 RPC IDs")
+    wb:close()
+    Hardware.resetClusterState()
+    component._reset()
+end
+
 return "OK"
 """
             res = host.exec_lua(test_suite, "test_suite")
@@ -4268,15 +4422,17 @@ return "OK"
                     component.gpu = component._newMockGPU(160, 50)
                     local Scheduler = require("lib.scheduler")
                     local UI = require("lib.ui")
+                    local WebBridge = require("lib.web_bridge")
                     local cfg = Scheduler.ensureConfig({ armed = true, logLevel = "raw" })
                     local st = {}
                     Scheduler.step(cfg, st)
                     local ui = UI.new(cfg, st, function() end)
+                    local wb = WebBridge.new(cfg, st, ui, function() end, Scheduler, require("lib.hardware"))
                     for t = 1, 4 do ui.tab = t; ui:render() end
                     ui.logModalActive = true
                     ui.logModalTab = 1; ui:render()
                     ui.logModalTab = 2; ui:render()
-                    rawset(_G, "__mem_hold", { cfg, st, ui })
+                    rawset(_G, "__mem_hold", { cfg, st, ui, wb })
                     """,
                     "mem_check",
                 )
@@ -4286,7 +4442,7 @@ return "OK"
             finally:
                 mem_host.close()
 
-            print(f"ALL 20 OFFLINE TEST SUITES PASSED (0 bad-width glyphs, {live_kb} KB live JNLua heap, Lua 5.3 + OpenOS verified).")
+            print(f"ALL 21 OFFLINE TEST SUITES PASSED (0 bad-width glyphs, {live_kb} KB live JNLua heap, Lua 5.3 + OpenOS verified).")
             print("--- Sample main.lua --check output ---")
             for line in check_out.splitlines():
                 print("  " + line)

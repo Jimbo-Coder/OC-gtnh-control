@@ -28,6 +28,7 @@ local FILES = {
     "lib/hardware.lua",
     "lib/scheduler.lua",
     "lib/ui.lua",
+    "lib/web_bridge.lua",
 }
 
 local MAX_CHUNKS = 4096

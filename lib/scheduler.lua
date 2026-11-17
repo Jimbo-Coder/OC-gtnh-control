@@ -712,7 +712,7 @@ function Scheduler.ensureConfig(cfg)
         end
         rc.guardKey = gKey
         rc.guardMin = rc.guardMin or preset.guardMin or 0
-        rc.convMode = rc.convMode or "global" -- "global" | "on" | "force" | "off"
+        rc.convMode = rc.convMode or "global" -- "global" | "on" | "below_tgt" | "force" | "off"
         rc.maxDtpfs = math.max(0, math.floor(tonumber(rc.maxDtpfs) or 0))
         rc.priority = rc.priority or i
 
@@ -1194,8 +1194,21 @@ local function effectiveDTPFConvMode(cfg, d)
     return (cfg and cfg.globalConvMode) or "auto"
 end
 
+-- 99%/100% hysteresis check for per-recipe "below_tgt" Convergence mode
+function Scheduler.isRecipeBelowConvTarget(cfg, stock, fam, rc, prevActive)
+    if not fam or not rc or not stock then return false end
+    local _, _, _, tData0 = Scheduler.resolveRecipe(fam, rc, cfg, stock, { wantConvergence = false })
+    local outs = Scheduler.getOutputCandidates(tData0, fam)
+    local outIdx = math.max(1, math.min(#outs, rc.outputIndex or 1))
+    local trackedOut = outs[outIdx] or fam.primaryOutput
+    local curStock = Scheduler.getOutputStock(stock, trackedOut)
+    local tgtStock = math.max(1, tonumber(rc.target) or 1)
+    local thresh = prevActive and tgtStock or math.floor(tgtStock * 0.99)
+    return curStock < thresh
+end
+
 -- Layered convergence evaluator combining Per-DTPF Override -> Forever Loop / Per-Recipe Policy -> Global Scope
-function Scheduler.doesJobWantConvergence(cfg, jobMode, rc, dtpfConvOverride, discountPct)
+function Scheduler.doesJobWantConvergence(cfg, jobMode, rc, dtpfConvOverride, discountPct, belowTarget)
     local discountOK = ((tonumber(discountPct) or 50) >= 49.9)
     local ov = dtpfConvOverride or "global"
 
@@ -1211,6 +1224,8 @@ function Scheduler.doesJobWantConvergence(cfg, jobMode, rc, dtpfConvOverride, di
             return false
         elseif rMode == "force" then
             return true
+        elseif rMode == "below_tgt" then
+            return (belowTarget == true) and discountOK
         elseif rMode == "on" then
             return discountOK
         end
@@ -2451,7 +2466,7 @@ local function stepEvaluateRecipes(cfg, runtimeState, ctx, nowSec, pushEvent)
     local onlineEnabled = ctx.onlineEnabled
     local fleetCoilLimit = ctx.fleetMaxKnownHeat or math.huge
 
-    local function doesChannelWantConv(chId, jobMode, rc)
+    local function doesChannelWantConv(chId, jobMode, rc, belowTarget)
         local saw = false
         for idx = 1, #onlineEnabled do
             local entry = onlineEnabled[idx]
@@ -2461,7 +2476,7 @@ local function stepEvaluateRecipes(cfg, runtimeState, ctx, nowSec, pushEvent)
                     if entry.convergenceEnabled then
                         return true
                     end
-                elseif Scheduler.doesJobWantConvergence(cfg, jobMode, rc, entry.convOverride, entry.discountPct) then
+                elseif Scheduler.doesJobWantConvergence(cfg, jobMode, rc, entry.convOverride, entry.discountPct, belowTarget) then
                     return true
                 end
             end
@@ -2470,10 +2485,12 @@ local function stepEvaluateRecipes(cfg, runtimeState, ctx, nowSec, pushEvent)
             if runtimeState.convControlSupported == false then
                 return false
             end
-            return Scheduler.doesJobWantConvergence(cfg, jobMode, rc, "global", 50)
+            return Scheduler.doesJobWantConvergence(cfg, jobMode, rc, "global", 50, belowTarget)
         end
         return false
     end
+
+    runtimeState._convBelowActive = runtimeState._convBelowActive or {}
 
     -- Track currently running recipes per channel (for 99%/100% stock hysteresis)
     local currentlyRunningMap = {}
@@ -2492,7 +2509,13 @@ local function stepEvaluateRecipes(cfg, runtimeState, ctx, nowSec, pushEvent)
         local isForever = (rc.forever == true)
         local isFbFamily = isForever or (cfg.fallbackEnabled and fam.id == cfg.fallbackFamilyId)
         local previewJobMode = (isForever or (isFbFamily and not rc.enabled)) and "FALLBACK" or "PASSIVE"
-        local recWantsConv = doesChannelWantConv(nil, previewJobMode, rc)
+        local convBelowTarget = (rc.convMode == "below_tgt")
+            and Scheduler.isRecipeBelowConvTarget(cfg, stock, fam, rc, runtimeState._convBelowActive[fam.id] == true)
+            or false
+        if not ctx.useCache then
+            runtimeState._convBelowActive[fam.id] = (rc.convMode == "below_tgt") and convBelowTarget or nil
+        end
+        local recWantsConv = doesChannelWantConv(nil, previewJobMode, rc, convBelowTarget)
         local mod, tCode, tIdx, tData, catFluid, tInfo, meta = Scheduler.resolveRecipe(fam, rc, cfg, stock, {
             wantConvergence = recWantsConv,
             isFallback = isFbFamily,
@@ -2574,6 +2597,7 @@ local function stepEvaluateRecipes(cfg, runtimeState, ctx, nowSec, pushEvent)
             targetStock = targetStock,
             ratio = ratio,
             isForever = isForever,
+            convBelowTarget = convBelowTarget,
             needsStock = needsStock,
             runnable = runnable,
             reason = reason,
@@ -2698,7 +2722,8 @@ local function stepAssignPassiveChannels(cfg, runtimeState, ctx, needyQueue, cur
             local pinFam = FAMILY_BY_ID[pinId]
             local pinRc = pinFam and cfg.recipes[pinId]
             local jobKind = isLoopPin and "FALLBACK" or "PASSIVE"
-            local chPinWantsConv = doesChannelWantConv(ch.id, jobKind, pinRc)
+            local pinSt = runtimeState.recipeStatus[pinId]
+            local chPinWantsConv = doesChannelWantConv(ch.id, jobKind, pinRc, pinSt and pinSt.convBelowTarget)
             local pinMod, pinCode, pinIdx, pinData, pinCatFluid, _, pinMeta = Scheduler.resolveRecipe(pinFam, pinRc, cfg, stock, {
                 wantConvergence = chPinWantsConv,
                 isFallback = isLoopPin,
@@ -2711,7 +2736,6 @@ local function stepAssignPassiveChannels(cfg, runtimeState, ctx, needyQueue, cur
             local tgtStock = math.max(1, tonumber(pinRc and pinRc.target) or 1)
             local pinRunning = (currentlyRunningMap[pinId] == true)
             local pinNeeds = isLoopPin or (curStock < (pinRunning and tgtStock or (tgtStock * 0.99)))
-            local pinSt = runtimeState.recipeStatus[pinId]
 
             if not pinNeeds then
                 if cfg.armed then
@@ -2850,7 +2874,8 @@ local function stepAssignPassiveChannels(cfg, runtimeState, ctx, needyQueue, cur
                 local fbId = cfg.fallbackFamilyId or "molten_infinity"
                 local fbFam = FAMILY_BY_ID[fbId]
                 local fbRc = fbFam and cfg.recipes[fbId]
-                local chFbWantsConv = doesChannelWantConv(ch.id, "FALLBACK", fbRc)
+                local fbSt = runtimeState.recipeStatus[fbId]
+                local chFbWantsConv = doesChannelWantConv(ch.id, "FALLBACK", fbRc, fbSt and fbSt.convBelowTarget)
                 local fbMod, fbCode, fbIdx, fbData, fbCatFluid, _, fbMeta = Scheduler.resolveRecipe(fbFam, fbRc, cfg, stock, {
                     wantConvergence = chFbWantsConv,
                     isFallback = true,
@@ -2861,7 +2886,6 @@ local function stepAssignPassiveChannels(cfg, runtimeState, ctx, needyQueue, cur
                     maxCoilHeat = chHeatLimit,
                     catOverride = chCatOv,
                 })
-                local fbSt = runtimeState.recipeStatus[fbId]
                 if fbOk and fbData then
                     applyAndRecordChannelJob(cfg, stock, runtimeState, ch, {
                         mode = "FALLBACK",
@@ -3017,7 +3041,8 @@ local function stepUpdateDtpfControls(cfg, runtimeState, ctx, opts, seenBnFam, p
             local labelPrefix = (chSt.mode == "FALLBACK" and "* ") or (chSt.pinned and "◆ ") or ""
             jobLabel = labelPrefix .. (fam and fam.name or chSt.familyId or chSt.mode)
 
-            wantConv = Scheduler.doesJobWantConvergence(cfg, chSt.mode, famRc, d.convOverride, st.discountPct)
+            local recSt = runtimeState.recipeStatus[chSt.familyId]
+            wantConv = Scheduler.doesJobWantConvergence(cfg, chSt.mode, famRc, d.convOverride, st.discountPct, recSt and recSt.convBelowTarget)
 
             -- Never deadlock a catalyst-free ("NONE") passive recipe when Convergence catalyst is unavailable or disabled
             if chSt.isNoneCat then

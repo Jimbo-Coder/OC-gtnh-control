@@ -62,10 +62,11 @@ local DTPF_CONV_MODES = {
 }
 
 local RECIPE_CONV_MODES = {
-    { id = "global", label = "Default" },
-    { id = "on",     label = "⚡Auto @50%" },
-    { id = "force",  label = "⚡Always ON" },
-    { id = "off",    label = "◇OFF" },
+    { id = "global",    label = "Default" },
+    { id = "on",        label = "⚡Auto @50%" },
+    { id = "below_tgt", label = "⚡<Tgt" },
+    { id = "force",     label = "⚡Always ON" },
+    { id = "off",       label = "◇OFF" },
 }
 
 local OD_CONV_MODES = {
@@ -2231,10 +2232,11 @@ function UI:renderPriorityQueueCard()
         local defConvShort = effectiveGlobalConvShort(self.cfg)
         local defConv4 = (defConvShort == "ON" and " ON ") or (defConvShort == "OFF" and "OFF ") or "Auto"
         local recipeConvShort = {
-            global = { "[" .. defConv4 .. "]", COLORS.muted, COLORS.btnBg },
-            on     = { "[⚡50%]", COLORS.fg, COLORS.btnActiveBg },
-            force  = { "[⚡ON ]", COLORS.fg, COLORS.btnActiveBg },
-            off    = { "[◇OFF]", COLORS.yellow, COLORS.amberBg },
+            global    = { "[" .. defConv4 .. "]", COLORS.muted, COLORS.btnBg },
+            on        = { "[⚡50%]", COLORS.fg, COLORS.btnActiveBg },
+            below_tgt = { "[⚡<Tg]", COLORS.cyan, COLORS.btnActiveBg },
+            force     = { "[⚡ON ]", COLORS.fg, COLORS.btnActiveBg },
+            off       = { "[◇OFF]", COLORS.yellow, COLORS.amberBg },
         }
         for r = 1, maxActiveRows do
             local y = 11 + r
@@ -2317,11 +2319,14 @@ function UI:renderPriorityQueueCard()
                 local stkCol = isLoop and COLORS.cyan or getStockRatioColor(st.ratio or 0, isOn)
                 self:drawText(131, y, padOrTrunc(curStockStr, 7), stkCol, rowBg)
 
-                if isLoop then
+                if isLoop and rc.convMode ~= "below_tgt" then
                     self:drawText(139, y, " Loop  ", COLORS.muted, rowBg)
                 else
                     local tgtTxt = centerText(fmtCompactNum(rc.target or 1, isFluid), 5)
-                    self:drawButton(139, y, "[" .. tgtTxt .. "]", stkCol, COLORS.btnBg, function()
+                    local tgtCol = (isLoop and rc.convMode == "below_tgt")
+                        and ((st.convBelowTarget == true) and COLORS.cyan or COLORS.green)
+                        or stkCol
+                    self:drawButton(139, y, "[" .. tgtTxt .. "]", tgtCol, COLORS.btnBg, function()
                         self:openTargetPrompt(fam, rc, st.trackedOutput)
                     end)
                 end
@@ -3045,7 +3050,9 @@ function UI:renderRecipeInspectorPane(fam, pinnedByFam, rankById)
     local convCtrlOk = self:isConvControlSupported()
     local effRecConv
     if convCtrlOk then
-        effRecConv = Scheduler.doesJobWantConvergence(self.cfg, isLoopMode and "FALLBACK" or "PASSIVE", rc, "global", 50)
+        local belowTgt = (st.convBelowTarget ~= nil) and st.convBelowTarget
+            or ((st.currentStock or 0) < (rc.target or 1))
+        effRecConv = Scheduler.doesJobWantConvergence(self.cfg, isLoopMode and "FALLBACK" or "PASSIVE", rc, "global", 50, belowTgt)
     else
         effRecConv = false
         for i = 1, #(self.state and self.state.dtpfStatus or {}) do
@@ -3214,8 +3221,19 @@ function UI:renderRecipeInspectorPane(fam, pinnedByFam, rankById)
                 (st.ratePerMin >= 0) and "+" or "",
                 fmtCompactNum(st.ratePerMin, isFluid))
         end
-        self:drawText(87, curY, padOrTrunc(string.format("Stock: %s  (24/7 Loop%s)",
-            UI.formatNumber(st.currentStock or 0, isFluid), rateSuffix), 71), COLORS.cyan, COLORS.panelBg)
+        if rc.convMode == "below_tgt" then
+            local stkPrefix = string.format("Stock: %s  (24/7%s) ", UI.formatNumber(st.currentStock or 0, isFluid), rateSuffix)
+            self:drawText(87, curY, padOrTrunc(stkPrefix, 44), COLORS.cyan, COLORS.panelBg)
+            local btnX = math.min(134, 87 + unicode.wlen(stkPrefix))
+            local btnLbl = "[Conv < " .. UI.formatNumber(rc.target or 1, isFluid) .. "…]"
+            local btnCol = (st.convBelowTarget == true) and COLORS.cyan or COLORS.green
+            self:drawButton(btnX, curY, padOrTrunc(btnLbl, 158 - btnX), btnCol, COLORS.btnBg, function()
+                self:openTargetPrompt(fam, rc, trackedOut)
+            end)
+        else
+            self:drawText(87, curY, padOrTrunc(string.format("Stock: %s  (24/7 Loop%s)",
+                UI.formatNumber(st.currentStock or 0, isFluid), rateSuffix), 71), COLORS.cyan, COLORS.panelBg)
+        end
         curY = curY + 1
     else
         local stkRatio = math.max(0, (st.currentStock or 0) / math.max(1, rc.target or 1))
