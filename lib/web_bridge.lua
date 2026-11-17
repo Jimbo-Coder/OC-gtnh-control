@@ -606,6 +606,11 @@ function WebBridge:handleCommand(cmd)
         snap.id = id
         self:sendLine(snap)
         return
+    elseif op == "reboot" then
+        self:sendLine({ id = id, ok = true, rebooting = true })
+        self:close()
+        if computer.shutdown then pcall(computer.shutdown, true) end
+        return
     end
     self:sendLine({ id = id, ok = false, error = "unknown op: " .. tostring(op) })
 end
