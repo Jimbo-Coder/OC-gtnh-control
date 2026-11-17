@@ -1543,13 +1543,15 @@ do
     assertEq(hatchStates[1].slots[1], nil, "T10 clearing hatch_pair clears slots directly to nil without sentinels")
     assertEq(dtpfStates[1].workAllowed, false, "T10 od_only sleeps until OD work arrives")
 
-    -- Verify Direct MFU Wiring checklist text + glyph check after clean step
+    -- Verify Unified 3x MFU Auto-Pairing panel text, 3D delta badges & glyph check after clean step
     ui.state = st
     ui.tab = 4
     ui:render()
     local tab3 = gpu._allText()
-    assert(tab3:find("Direct on Main AE2", 1, true), "T10 Tab 4 displays Direct on Main AE2 checklist")
+    assert(tab3:find("3D Nearest Pair", 1, true), "T10 Tab 4 displays 3D Nearest Pair checklist")
     assert(tab3:find("5H + 5B MFU", 1, true), "T10 Tab 4 displays 5H + 5B MFU badge")
+    assert(tab3:find("DTPF 3x MFU AUTO-PAIRING", 1, true), "T10 Tab 4 displays unified DTPF 3x MFU AUTO-PAIRING panel")
+    assert(tab3:find("Δ", 1, true), "T10 Tab 4 displays 3D distance Δ badge on paired MFU endpoints")
     for _, s in ipairs(gpu._calls) do
         _G.__RENDERED_GPU_CALLS[#_G.__RENDERED_GPU_CALLS + 1] = s
     end

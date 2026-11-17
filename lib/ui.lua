@@ -2640,6 +2640,20 @@ local function gatherProductionOverviewItems(self)
     return rows
 end
 
+local function gatherSatisfiedTargetItems(self)
+    local full = {}
+    for i = 1, #RecipesDB.FAMILIES do
+        local fam = RecipesDB.FAMILIES[i]
+        local rc = self.cfg.recipes[fam.id]
+        local rSt = self.state and self.state.recipeStatus and self.state.recipeStatus[fam.id]
+        if rc and rc.enabled and (not rc.forever) and rSt and (not rSt.needsStock) and (not rSt.isForever) then
+            full[#full + 1] = { prio = rc.priority or i, fam = fam, rc = rc, st = rSt }
+        end
+    end
+    table.sort(full, function(a, b) return a.prio < b.prio end)
+    return full
+end
+
 function UI:renderOverviewProductionPanel(ov)
     -- Left Panel: Spacious Recipe-Aggregated Production & Alerts (x = 2..79, y = 11..48)
     self:drawFrame(2, 11, 78, 38, COLORS.border, COLORS.panelBg, "round")
@@ -2649,13 +2663,17 @@ function UI:renderOverviewProductionPanel(ov)
     end)
 
     local rows = gatherProductionOverviewItems(self)
+    local fullItems = gatherSatisfiedTargetItems(self)
     local total = #rows
+    local showFullList = (#fullItems > 0) and (total <= 6)
+    local prodBottomY = showFullList and 30 or 44
+
     if total == 0 then
         self:drawText(5, 14, (ov.nEnabled > 0) and "✓ All enabled targets are satisfied!" or "No passive recipes enabled.",
             (ov.nEnabled > 0) and COLORS.green or COLORS.yellow, COLORS.panelBg)
     else
-        local stride = (total <= 8) and 3 or 2
-        local maxVis = math.max(1, math.floor(32 / stride))
+        local stride = ((not showFullList and total <= 8) or (showFullList and total <= 5)) and 3 or 2
+        local maxVis = math.max(1, math.floor((prodBottomY - 12) / stride))
         local maxScroll = math.max(0, total - maxVis)
         self.overviewRecScroll = math.max(0, math.min(maxScroll, self.overviewRecScroll or 0))
         local showN = math.min(maxVis, total - self.overviewRecScroll)
@@ -2749,20 +2767,58 @@ function UI:renderOverviewProductionPanel(ov)
         end
     end
 
-    self:drawText(4, 45, string.rep("─", 74), COLORS.border, COLORS.panelBg)
-    if #ov.fullNames > 0 then
-        local shown = {}
-        for k = 1, math.min(3, #ov.fullNames) do
-            shown[k] = compactRecipeName(ov.fullNames[k], 15)
+    if showFullList then
+        self:drawText(4, 31, string.rep("─", 74), COLORS.border, COLORS.panelBg)
+        self:drawText(5, 31, string.format(" ◈ STOCK TARGETS FULL (%d / %d) ", #fullItems, ov.nTargetRec), COLORS.accent, COLORS.panelBg)
+
+        local startY = 33
+        local availH = 14 -- rows 33..46
+        local fStride = (#fullItems * 2 <= availH) and 2 or 1
+        local maxFit = math.max(1, math.floor(availH / fStride))
+        local reserveMore = (#fullItems > maxFit) and 1 or 0
+        local showFull = math.min(#fullItems, math.max(1, maxFit - reserveMore))
+
+        for k = 1, showFull do
+            local entry = fullItems[k]
+            local fam, rc, st = entry.fam, entry.rc, entry.st
+            local fy = startY + (k - 1) * fStride
+            local isFl = st.trackedOutput and (st.trackedOutput.isFluid or st.trackedOutput.type == "fluid")
+            self:addHitbox(4, fy, 77, fy, function()
+                self.selectedFamilyId = fam.id
+                self.tab = TAB_RECIPES
+            end)
+            self:drawText(5, fy, "✓", COLORS.green, COLORS.panelBg)
+            self:drawText(7, fy, padOrTrunc(fam.name, 42), COLORS.fg, COLORS.panelBg)
+            local stkTxt = fmtCompactNum(st.currentStock or 0, isFl)
+            local tgtTxt = " / " .. fmtCompactNum(rc.target or 1, isFl)
+            local totalW = unicode.wlen(stkTxt) + unicode.wlen(tgtTxt)
+            local sx = math.max(50, 77 - totalW)
+            self:drawText(sx, fy, stkTxt, COLORS.green, COLORS.panelBg)
+            self:drawText(sx + unicode.wlen(stkTxt), fy, tgtTxt, COLORS.muted, COLORS.panelBg)
         end
-        local suffix = (#ov.fullNames > 3) and string.format(" (+%d)", #ov.fullNames - 3) or ""
-        local fullMsg = string.format("✓ %d Stock Target(s) Full: %s%s", #ov.fullNames, table.concat(shown, ", "), suffix)
-        self:drawText(5, 46, padOrTrunc(fullMsg, 72), COLORS.green, COLORS.panelBg)
+
+        if #fullItems > showFull then
+            local rem = #fullItems - showFull
+            local moreY = math.min(47, startY + showFull * fStride)
+            self:drawText(7, moreY, string.format("+%d more satisfied target(s) in [3: Recipes]", rem), COLORS.muted, COLORS.panelBg)
+            self:addHitbox(4, moreY, 77, moreY, function() self.tab = TAB_RECIPES end)
+        end
     else
-        local emptyMsg = (ov.nTargetRec == 0)
-            and "All active DTPFs dedicated to 24/7 loops"
-            or "No stock targets filled yet — active items running above"
-        self:drawText(5, 46, padOrTrunc(emptyMsg, 72), COLORS.muted, COLORS.panelBg)
+        self:drawText(4, 45, string.rep("─", 74), COLORS.border, COLORS.panelBg)
+        if #ov.fullNames > 0 then
+            local shown = {}
+            for k = 1, math.min(3, #ov.fullNames) do
+                shown[k] = compactRecipeName(ov.fullNames[k], 15)
+            end
+            local suffix = (#ov.fullNames > 3) and string.format(" (+%d)", #ov.fullNames - 3) or ""
+            local fullMsg = string.format("✓ %d Stock Target(s) Full: %s%s", #ov.fullNames, table.concat(shown, ", "), suffix)
+            self:drawText(5, 46, padOrTrunc(fullMsg, 72), COLORS.green, COLORS.panelBg)
+        else
+            local emptyMsg = (ov.nTargetRec == 0)
+                and "All active DTPFs dedicated to 24/7 loops"
+                or "No stock targets filled yet — active items running above"
+            self:drawText(5, 46, padOrTrunc(emptyMsg, 72), COLORS.muted, COLORS.panelBg)
+        end
     end
 end
 
@@ -3725,6 +3781,8 @@ function UI:renderWiringTopologyCard(ctx)
         self:drawText(4, 11, padOrTrunc("! WIRING WARNING: " .. warnings[1], self.w - 6), COLORS.yellow, COLORS.panelBg)
     elseif ctx.coverConflicts > 0 then
         self:drawText(4, 11, "! COVER OVERRIDE: Crowbar South Machine Controller Cover on flagged DTPFs so OC can toggle Work.", COLORS.yellow, COLORS.panelBg)
+    elseif ctx.isMfuMode then
+        self:drawText(4, 11, padOrTrunc("◈ TOPOLOGY: [Main AE2]◂═▸[Passive DI + OD DI]◂═(Transposer) ·· [OC Server]◂··(3x MFU/DTPF: Ctrl+Hatch+Bus)", self.w - 6), COLORS.cyan, COLORS.panelBg)
     else
         local topoLine = ctx.hasHatchMode
             and "◈ TOPOLOGY: [Main AE2]══▸[Color 2 Hatch+Bus]◂··(Wireless MFU)··▸[OC Rack]··▸[DTPF]"
@@ -3747,7 +3805,12 @@ function UI:renderWiringTopologyCard(ctx)
         sNet and sNet.address:sub(1, 8) or "Missing", sNet and sNet.itemTypes or 0, sNet and sNet.fluidTypes or 0), 70),
         COLORS.fg, COLORS.panelBg)
 
-    if ctx.hasHatchMode then
+    if ctx.isMfuMode then
+        local hOk = (#warnings == 0) and (#(ep.hatches or {}) > 0) and (#(ep.buses or {}) > 0)
+        self:drawText(4, 13, hOk and "[OK]" or "[! ]", hOk and COLORS.green or COLORS.yellow, COLORS.panelBg)
+        self:drawText(9, 13, padOrTrunc(string.format("3. Passive MFUs: %dH + %dB MFU (3D Nearest Pair)",
+            #(ep.hatches or {}), #(ep.buses or {})), 70), COLORS.fg, COLORS.panelBg)
+    elseif ctx.hasHatchMode then
         local hOk = (#warnings == 0) and (#(ep.hatches or {}) > 0)
         self:drawText(4, 13, hOk and "[OK]" or "[! ]", hOk and COLORS.green or COLORS.yellow, COLORS.panelBg)
         self:drawText(9, 13, padOrTrunc(string.format("3. Passive (Color 2): %dH + %dB MFU (Direct on Main AE2)",
@@ -3874,7 +3937,7 @@ function UI:renderWiringTopologyCard(ctx)
         local stX = math.max(96, bxTp + 1)
         self:drawText(stX, 15, "Status:", COLORS.muted, COLORS.panelBg)
         local valX = stX + 8
-        local bSt = (self.state and self.state.odBridgeStatus) or "Idle (0 calls)"
+        local bSt = formatCleanBridgeStatus((self.state and self.state.odBridgeStatus) or "Idle")
         local bCol = (bSt:find("^Blocked") or bSt:find("^! ") or bSt:find("^Flush err")) and COLORS.red
             or ((bSt:find("^Flushing") or bSt:find("^Top%-Up") or bSt:find("^Draining") or bSt:find("^Preview")) and COLORS.yellow)
             or COLORS.green
@@ -3882,6 +3945,61 @@ function UI:renderWiringTopologyCard(ctx)
     else
         self:drawText(4, 15, "Color 1 (White) = On-Demand | Color 2 (Orange) = Passive | Color 0 = NC Aux Subnet", COLORS.muted, COLORS.panelBg)
     end
+end
+
+local function pairDtpfsOneToOne(self, ep)
+    local need = #self.cfg.dtpfs
+    if #self.cfg.channels == 1
+        and self.cfg.channels[1].mode == "storage_bus"
+        and not self.cfg.channels[1].itemStorageAddr
+        and not self.cfg.channels[1].fluidStorageAddr
+        and (#(ep.hatches or {}) > 0 or #(ep.buses or {}) > 0)
+        and #(ep.itemStorageBuses or {}) == 0
+        and #(ep.fluidStorageBuses or {}) == 0 then
+        self.cfg.channels = {}
+    end
+    local usedI, usedF, usedH, usedB = {}, {}, {}, {}
+    for k = 1, #self.cfg.channels do
+        local c = self.cfg.channels[k]
+        if c.itemStorageAddr then usedI[c.itemStorageAddr] = true end
+        if c.fluidStorageAddr then usedF[c.fluidStorageAddr] = true end
+        if c.hatchAddr then usedH[c.hatchAddr] = true end
+        if c.busAddr then usedB[c.busAddr] = true end
+    end
+    local function takeUnusedSB(list, used)
+        for k = 1, #(list or {}) do
+            local a = list[k].address
+            if a and not used[a] then used[a] = true return list[k] end
+        end
+        return nil
+    end
+    for _ = 1, 64 do
+        if #self.cfg.channels >= need then break end
+        local nIdx = #self.cfg.channels + 1
+        local isb = takeUnusedSB(ep.itemStorageBuses, usedI)
+        local fsb = takeUnusedSB(ep.fluidStorageBuses, usedF)
+        local refDtpf = self.cfg.dtpfs[nIdx]
+        local h = (not isb and not fsb) and Hardware.pickNearestAddress(refDtpf, ep.hatches, ep.hatchCoords, usedH) or nil
+        local b = (not isb and not fsb) and Hardware.pickNearestAddress(refDtpf, ep.buses, ep.busCoords, usedB) or nil
+        local useHatch = (not isb and not fsb and (h or b))
+        self.cfg.channels[nIdx] = {
+            id = "ch" .. tostring(nIdx),
+            name = "Passive Ch " .. tostring(nIdx) .. (useHatch and " (Hatch/Bus)" or " (StorageBus)"),
+            mode = useHatch and "hatch_pair" or "storage_bus",
+            itemStorageAddr = isb and isb.address or nil,
+            itemStorageSide = (isb and isb.sides[1] and isb.sides[1].side) or 0,
+            fluidStorageAddr = fsb and fsb.address or nil,
+            fluidStorageSide = (fsb and fsb.sides[1] and fsb.sides[1].side) or 0,
+            hatchAddr = h,
+            busAddr = b,
+            shareOnDemand = true,
+            enabled = true,
+        }
+    end
+    for i = 1, #self.cfg.dtpfs do
+        self.cfg.dtpfs[i].channelId = self.cfg.channels[i].id
+    end
+    self:save(string.format("1:1 paired %d DTPFs -> ch1..ch%d.", need, need))
 end
 
 function UI:renderWiringChannelsCard(ep)
@@ -3907,58 +4025,7 @@ function UI:renderWiringChannelsCard(ep)
     end
     if #self.cfg.dtpfs >= 2 then
         self:drawButton(cxBtn, y, "[ 1:1 PAIR DTPFS ]", COLORS.cyan, COLORS.btnBg, function()
-            local need = #self.cfg.dtpfs
-            if #self.cfg.channels == 1
-                and self.cfg.channels[1].mode == "storage_bus"
-                and not self.cfg.channels[1].itemStorageAddr
-                and not self.cfg.channels[1].fluidStorageAddr
-                and (#(ep.hatches or {}) > 0 or #(ep.buses or {}) > 0)
-                and #(ep.itemStorageBuses or {}) == 0
-                and #(ep.fluidStorageBuses or {}) == 0 then
-                self.cfg.channels = {}
-            end
-            local usedI, usedF, usedH, usedB = {}, {}, {}, {}
-            for k = 1, #self.cfg.channels do
-                local c = self.cfg.channels[k]
-                if c.itemStorageAddr then usedI[c.itemStorageAddr] = true end
-                if c.fluidStorageAddr then usedF[c.fluidStorageAddr] = true end
-                if c.hatchAddr then usedH[c.hatchAddr] = true end
-                if c.busAddr then usedB[c.busAddr] = true end
-            end
-            local function takeUnusedSB(list, used)
-                for k = 1, #(list or {}) do
-                    local a = list[k].address
-                    if a and not used[a] then used[a] = true return list[k] end
-                end
-                return nil
-            end
-            for _ = 1, 64 do
-                if #self.cfg.channels >= need then break end
-                local nIdx = #self.cfg.channels + 1
-                local isb = takeUnusedSB(ep.itemStorageBuses, usedI)
-                local fsb = takeUnusedSB(ep.fluidStorageBuses, usedF)
-                local refDtpf = self.cfg.dtpfs[nIdx]
-                local h = (not isb and not fsb) and Hardware.pickNearestAddress(refDtpf, ep.hatches, ep.hatchCoords, usedH) or nil
-                local b = (not isb and not fsb) and Hardware.pickNearestAddress(refDtpf, ep.buses, ep.busCoords, usedB) or nil
-                local useHatch = (not isb and not fsb and (h or b))
-                self.cfg.channels[nIdx] = {
-                    id = "ch" .. tostring(nIdx),
-                    name = "Passive Ch " .. tostring(nIdx) .. (useHatch and " (Hatch/Bus)" or " (StorageBus)"),
-                    mode = useHatch and "hatch_pair" or "storage_bus",
-                    itemStorageAddr = isb and isb.address or nil,
-                    itemStorageSide = (isb and isb.sides[1] and isb.sides[1].side) or 0,
-                    fluidStorageAddr = fsb and fsb.address or nil,
-                    fluidStorageSide = (fsb and fsb.sides[1] and fsb.sides[1].side) or 0,
-                    hatchAddr = h,
-                    busAddr = b,
-                    shareOnDemand = true,
-                    enabled = true,
-                }
-            end
-            for i = 1, #self.cfg.dtpfs do
-                self.cfg.dtpfs[i].channelId = self.cfg.channels[i].id
-            end
-            self:save(string.format("1:1 paired %d DTPFs -> ch1..ch%d.", need, need))
+            pairDtpfsOneToOne(self, ep)
         end)
     end
 
@@ -4205,6 +4272,274 @@ function UI:renderWiringControllersTable(yStart, nonStockNets)
     end
 end
 
+function UI:renderUnifiedMfuPairingPanel(ctx)
+    local ep = ctx.ep or {}
+    local nonStockNets = ctx.nonStockNets or {}
+    local hatches = ep.hatches or {}
+    local buses = ep.buses or {}
+    local hatchCoords = ep.hatchCoords or {}
+    local busCoords = ep.busCoords or {}
+
+    local chById = {}
+    for k = 1, #self.cfg.channels do
+        local c = self.cfg.channels[k]
+        chById[c.id] = c
+    end
+
+    local function ensureChannelForDtpf(dtpfIdx, d)
+        local cid = d.channelId or ("ch" .. tostring(dtpfIdx))
+        d.channelId = cid
+        local ch = chById[cid]
+        if not ch then
+            ch = {
+                id = cid,
+                name = "Passive " .. cid,
+                mode = "hatch_pair",
+                shareOnDemand = true,
+                enabled = true,
+            }
+            self.cfg.channels[#self.cfg.channels + 1] = ch
+            chById[cid] = ch
+        end
+        return ch
+    end
+
+    local function formatEndpointBadge(addr, coordsMap, dtpf, missingLabel, maxInnerW)
+        if not addr or addr == "" then
+            return "[" .. missingLabel .. "]", COLORS.red, nil
+        end
+        local c = coordsMap and coordsMap[addr]
+        local dist = nil
+        local inner
+        if c and c.x and c.z and dtpf and dtpf.x and dtpf.z then
+            local dx = c.x - dtpf.x
+            local dy = (c.y or dtpf.y or 0) - (dtpf.y or c.y or 0)
+            local dz = c.z - dtpf.z
+            dist = math.floor(math.sqrt(dx * dx + dy * dy + dz * dz) + 0.5)
+            inner = string.format("%s @%d,%d,%d Δ%dm", addr:sub(1, 6), c.x, c.y or 0, c.z, dist)
+        elseif c and c.x and c.z then
+            inner = string.format("%s @%d,%d,%d", addr:sub(1, 6), c.x, c.y or 0, c.z)
+        else
+            inner = addr:sub(1, 10)
+        end
+        local col = (dist and dist > 16) and COLORS.yellow or COLORS.green
+        return "[" .. padOrTrunc(inner, maxInnerW):gsub("%s+$", "") .. "]", col, dist
+    end
+
+    local nD = #self.cfg.dtpfs
+    local pairedH, pairedB = 0, 0
+    for i = 1, nD do
+        local ch = chById[self.cfg.dtpfs[i].channelId or "ch1"]
+        if ch and ch.hatchAddr then pairedH = pairedH + 1 end
+        if ch and ch.busAddr then pairedB = pairedB + 1 end
+    end
+    local apOn = (ep.autoPullOnCount or 0) > 0
+    local allHealthy = (nD > 0) and (pairedH == nD) and (pairedB == nD) and (not apOn) and (#(ctx.warnings or {}) == 0)
+
+    -- Card 3 (MFU Mode): How 3x MFU Auto-Pairing Works & Pool Summary (rows 17..24)
+    self:drawFrame(2, 17, 158, 8, COLORS.border, COLORS.panelBg, "round")
+    self:drawText(4, 17, " ◈ DTPF 3x MFU AUTO-PAIRING ", COLORS.accent, COLORS.panelBg)
+    if nD > 0 or #hatches > 0 or #buses > 0 then
+        self:drawButton(34, 17, "[ 1:1 PAIR DTPFS ]", COLORS.cyan, COLORS.btnBg, function()
+            pairDtpfsOneToOne(self, ep)
+        end)
+    end
+
+    local poolTxt = string.format("Pool: %d Ctrl · %d/%d Hatch · %d/%d Bus", nD, pairedH, #hatches, pairedB, #buses)
+    local poolX = 158 - unicode.wlen(poolTxt)
+    self:drawText(poolX, 18, poolTxt, allHealthy and COLORS.green or COLORS.fg, COLORS.panelBg)
+
+    local ruleMsg
+    if nD == 0 then
+        ruleMsg = "! No DTPF Controllers found — bind 3 MFUs/DTPF (Ctrl+Hatch+Bus), place in Adapters, then click [ RESCAN HARDWARE ]."
+    elseif apOn then
+        ruleMsg = string.format("! %d Passive Hatch/Bus endpoints still have autoPull=ON — click [ LOCK AUTOPULL OFF ] before arming.", ep.autoPullOnCount or 0)
+    elseif pairedH < nD or pairedB < nD then
+        ruleMsg = "! Some DTPFs are missing a paired Passive Hatch or Bus MFU — click [ 1:1 PAIR DTPFS ] or click a red [None] slot below."
+    else
+        ruleMsg = "✓ Auto-paired each DTPF Controller MFU to nearest Passive Hatch + Bus MFU via 3D (x,y,z) coords"
+    end
+    self:drawText(4, 18, padOrTrunc(ruleMsg, math.max(20, poolX - 6)), allHealthy and COLORS.green or COLORS.yellow, COLORS.panelBg)
+
+    self:drawText(4, 19, "How 1:1 Auto-Pairing works (3 Wireless MFU Adapters per DTPF):", COLORS.muted, COLORS.panelBg)
+    self:drawText(4, 20, "  [1. DTPF Controller MFU @(x,y,z)]  ── nearest 3D Δ ──▸  [2. Passive Hatch MFU @(x,y,z)] + [3. Passive Bus MFU @(x,y,z)]", COLORS.cyan, COLORS.panelBg)
+    self:drawText(4, 21, "  Shared across all DTPFs (0 MFUs):  Outputs -> Main AE2   |   Color 1 OD Hatch+Bus (autoPull ON)   |   Color 0 NC Chest (autoPull ON)", COLORS.muted, COLORS.panelBg)
+    self:drawText(4, 22, string.rep("─", 154), COLORS.border, COLORS.panelBg)
+    self:drawText(4, 23, "Add a new DTPF: Sneak+R-click 3 MFUs (Ctrl + Passive Hatch + Bus) -> place in Adapters -> click [ RESCAN HARDWARE ] -> [ 1:1 PAIR DTPFS ].", COLORS.muted, COLORS.panelBg)
+
+    -- Card 4 (MFU Mode): Paired DTPF Triplets Matrix (rows 26..48, COIL anchored at x=67, y=27..48)
+    self:drawFrame(2, 26, 158, 23, COLORS.border, COLORS.panelBg, "round")
+    self:drawText(4, 26, string.format(" ◈ DISCOVERED DTPF CONTROLLERS — 3x MFU TRIPLETS (%d) ", nD), COLORS.accent, COLORS.panelBg)
+
+    local stride = (nD <= 6) and 3 or ((nD <= 10) and 2 or 1)
+    local maxShow = math.max(1, math.floor((20 + ((stride == 3) and 1 or 0)) / stride))
+    local maxDScroll = math.max(0, nD - maxShow)
+    self.wiringDtpfScroll = math.max(0, math.min(maxDScroll, self.wiringDtpfScroll or 0))
+
+    if nD > maxShow then
+        self:drawButton(138, 26, "[▲]", (self.wiringDtpfScroll > 0) and COLORS.fg or COLORS.muted, COLORS.btnBg, function()
+            self.wiringDtpfScroll = math.max(0, self.wiringDtpfScroll - 1)
+        end)
+        self:drawButton(142, 26, "[▼]", (self.wiringDtpfScroll < maxDScroll) and COLORS.fg or COLORS.muted, COLORS.btnBg, function()
+            self.wiringDtpfScroll = math.min(maxDScroll, self.wiringDtpfScroll + 1)
+        end)
+        self:drawText(147, 26, string.format("%d-%d/%d", self.wiringDtpfScroll + 1, math.min(nD, self.wiringDtpfScroll + maxShow), nD), COLORS.muted, COLORS.panelBg)
+    end
+
+    local hdrY = 27
+    self:fillRect(3, hdrY, 156, 1, " ", COLORS.headerBg)
+    self:drawText(4, hdrY, "UNIT", COLORS.muted, COLORS.headerBg)
+    self:drawText(17, hdrY, "CTRL MFU @(x,y,z)", COLORS.muted, COLORS.headerBg)
+    self:drawText(41, hdrY, "OD NET", COLORS.muted, COLORS.headerBg)
+    self:drawText(53, hdrY, "WORK", COLORS.muted, COLORS.headerBg)
+    self:drawText(59, hdrY, "DISC", COLORS.muted, COLORS.headerBg)
+    self:drawText(67, hdrY, "COIL", COLORS.muted, COLORS.headerBg)
+    self:addHitbox(67, hdrY, 74, hdrY, function()
+        self:toggleCoilDisplay()
+    end)
+    self:drawText(76, hdrY, "CONV", COLORS.muted, COLORS.headerBg)
+    self:drawText(82, hdrY, "CAT", COLORS.muted, COLORS.headerBg)
+    self:drawText(88, hdrY, "PASSIVE HATCH MFU (3D Δ)", COLORS.muted, COLORS.headerBg)
+    self:drawText(124, hdrY, "PASSIVE BUS MFU (3D Δ)", COLORS.muted, COLORS.headerBg)
+
+    if nD == 0 then
+        self:drawText(6, 30, "No DTPF Controllers paired yet — click [ RESCAN HARDWARE ] above once MFU Adapters are wired.", COLORS.muted, COLORS.panelBg)
+        return
+    end
+
+    local ry = 28
+    for visD = 1, math.min(maxShow, nD - self.wiringDtpfScroll) do
+        local i = visD + self.wiringDtpfScroll
+        local d = self.cfg.dtpfs[i]
+        local st = (self.state.dtpfStatus and self.state.dtpfStatus[i]) or {}
+        local chId = d.channelId or ("ch" .. tostring(i))
+        local ch = chById[chId]
+        local rowBg = (visD % 2 == 0) and COLORS.rowAltBg or COLORS.panelBg
+        self:fillRect(3, ry, 156, (stride >= 2) and 2 or 1, " ", rowBg)
+
+        local function focusDtpfInFleet()
+            self.selectedDtpf = i
+            self:ensureDtpfVisible(i)
+            self.tab = TAB_FLEET
+            self.statusMsg = "Focused " .. (d.name or ("DTPF #" .. i)) .. " in Fleet view."
+        end
+        self:addHitbox(3, ry, 158, ry, focusDtpfInFleet)
+
+        local unitLabel = padOrTrunc(d.name or ("DTPF #" .. i), 10):gsub("%s+$", "")
+        self:drawButton(4, ry, "[" .. unitLabel .. "]", COLORS.cyan, COLORS.btnBg, focusDtpfInFleet)
+
+        local onlineDot = st.online and "●" or "○"
+        local dotCol = (st.coverConflict) and COLORS.yellow or (st.online and COLORS.green or COLORS.red)
+        self:drawText(17, ry, onlineDot, dotCol, rowBg)
+        local addrTxt = d.isRemote and ("W:" .. tostring(d.address):sub(1, 6)) or tostring(d.address):sub(1, 6)
+        local cStr = (d.x and d.z) and string.format("@%d,%d,%d", d.x, d.y or 0, d.z) or "@?"
+        local baseCol = (st and st.coverConflict) and COLORS.yellow or COLORS.fg
+        self:drawText(19, ry, padOrTrunc(addrTxt .. " " .. cStr, 20), baseCol, rowBg)
+
+        local odOptions = { "global" }
+        for k = 1, #nonStockNets do
+            odOptions[#odOptions + 1] = nonStockNets[k].address
+        end
+        odOptions[#odOptions + 1] = "none"
+        local curOd = d.odNetAddr or "global"
+        local odBtnTxt, odBtnCol
+        if curOd == "none" then
+            odBtnTxt = "[None    ]"
+            odBtnCol = COLORS.muted
+        elseif curOd == "global" then
+            odBtnTxt = "[Global  ]"
+            odBtnCol = COLORS.purple
+        else
+            odBtnTxt = string.format("[%-8s]", curOd:sub(1, 8))
+            odBtnCol = (st and st.odActive) and COLORS.green or COLORS.cyan
+        end
+        self:drawButton(41, ry, odBtnTxt, odBtnCol, COLORS.btnBg, function(step)
+            local idx = 1
+            for k = 1, #odOptions do
+                if odOptions[k] == curOd then idx = k break end
+            end
+            local nxt = ((idx - 1 + (step or 1) + #odOptions) % #odOptions) + 1
+            d.odNetAddr = odOptions[nxt]
+            local lbl = (d.odNetAddr == "global" and "Global OD")
+                or (d.odNetAddr == "none" and "None")
+                or d.odNetAddr:sub(1, 10)
+            self:save((d.name or ("DTPF #" .. i)) .. " OD Net -> " .. lbl)
+        end)
+
+        self:drawText(53, ry, (st and st.workAllowed) and "YES" or "NO", (st and st.workAllowed) and baseCol or COLORS.muted, rowBg)
+        self:drawText(59, ry, string.format("%.0f%%", (st and st.discountPct) or 0), baseCol, rowBg)
+
+        local coilStr = "?"
+        if st and st.coilHeat then
+            if self:isCoilNameMode() then
+                local _, _, tierName, shortName = getCoilTierInfo(st.coilHeat)
+                coilStr = (unicode.wlen(tierName) <= 8) and tierName or shortName
+            else
+                coilStr = tostring(st.coilHeat) .. "K"
+            end
+        end
+        self:drawText(67, ry, padOrTrunc(coilStr, 8),
+            (st and st.coverConflict) and COLORS.yellow or getCoilColor(st and st.coilHeat), rowBg)
+        self:addHitbox(67, ry, 74, ry, function()
+            self:toggleCoilDisplay()
+        end)
+
+        local convOn = (st and st.convergenceEnabled == true)
+        self:drawText(76, ry, convOn and "⚡ON " or "OFF ", convOn and COLORS.purple or COLORS.muted, rowBg)
+        self:drawText(82, ry, CATALYST_SHORT[(st and st.catalystTier) or 4] or "DTEC", COLORS.fg, rowBg)
+
+        local hLbl, hCol, hDist = formatEndpointBadge(ch and ch.hatchAddr, hatchCoords, d, "No Hatch - Click", 32)
+        self:drawButton(88, ry, hLbl, hCol, COLORS.btnBg, function(step)
+            if #hatches == 0 then return end
+            local targetCh = ensureChannelForDtpf(i, d)
+            local cur = 0
+            for k = 1, #hatches do
+                if hatches[k] == targetCh.hatchAddr then cur = k break end
+            end
+            local nxt = ((cur - 1 + (step or 1) + #hatches) % #hatches) + 1
+            targetCh.hatchAddr = hatches[nxt]
+            targetCh.activeKey = nil
+            self:save((d.name or ("DTPF #" .. i)) .. " Passive Hatch -> " .. targetCh.hatchAddr:sub(1, 8))
+        end)
+
+        local bLbl, bCol, bDist = formatEndpointBadge(ch and ch.busAddr, busCoords, d, "No Bus - Click", 31)
+        self:drawButton(124, ry, bLbl, bCol, COLORS.btnBg, function(step)
+            if #buses == 0 then return end
+            local targetCh = ensureChannelForDtpf(i, d)
+            local cur = 0
+            for k = 1, #buses do
+                if buses[k] == targetCh.busAddr then cur = k break end
+            end
+            local nxt = ((cur - 1 + (step or 1) + #buses) % #buses) + 1
+            targetCh.busAddr = buses[nxt]
+            targetCh.activeKey = nil
+            self:save((d.name or ("DTPF #" .. i)) .. " Passive Bus -> " .. targetCh.busAddr:sub(1, 8))
+        end)
+
+        if stride >= 2 then
+            local chSt = self.state and self.state.channelStatus and self.state.channelStatus[chId]
+            local filterTxt
+            if st and st.coverConflict then
+                filterTxt = "! Cover Override (crowbar South Machine Controller Cover)"
+            elseif chSt and chSt.label and chSt.label ~= "" then
+                filterTxt = tostring(chSt.label)
+            else
+                filterTxt = (self.cfg.armed and "Idle" or "Paused (Safe Preview)")
+            end
+            local pairTxt = (hDist and bDist)
+                and string.format("Paired by nearest 3D Δ (Hatch %dm, Bus %dm)", hDist, bDist)
+                or ((ch and ch.hatchAddr and ch.busAddr) and "Paired (no coord telemetry)" or "Unpaired MFU")
+            self:drawText(6, ry + 1, "└─", COLORS.border, rowBg)
+            local subInfo = string.format("%s · Mode: %s · %s · Live Filter: %s",
+                chId, formatDtpfPassLabel(self, d, false), pairTxt, filterTxt)
+            self:drawText(9, ry + 1, padOrTrunc(subInfo, 148),
+                (st and st.coverConflict) and COLORS.yellow or COLORS.muted, rowBg)
+        end
+
+        ry = ry + stride
+    end
+end
+
 function UI:renderWiringTab()
     self:drawText(2, 4, "◈ RESERVE FLOORS, TOPOLOGY & SETUP", COLORS.accent, COLORS.bg)
     self:drawButton(self.w - 22, 4, " [ RESCAN HARDWARE ] ", COLORS.cyan, COLORS.btnBg, function()
@@ -4242,6 +4577,18 @@ function UI:renderWiringTab()
         if st and st.coverConflict then coverConflicts = coverConflicts + 1 end
     end
 
+    local hasSbHardware = (#(ep.fluidStorageBuses or {}) > 0) or (#(ep.itemStorageBuses or {}) > 0)
+    local hasSbCfg = false
+    for i = 1, #self.cfg.channels do
+        local c = self.cfg.channels[i]
+        if c.mode == "storage_bus" and (c.fluidStorageAddr or c.itemStorageAddr) then
+            hasSbCfg = true
+            break
+        end
+    end
+    local isMfuMode = (not hasSbHardware) and (not hasSbCfg)
+    self._setupMfuMode = isMfuMode
+
     local ctx = {
         ep = ep,
         warnings = warnings,
@@ -4251,14 +4598,19 @@ function UI:renderWiringTab()
         perDtpfOdCount = perDtpfOdCount,
         onlineDtpfs = onlineDtpfs,
         coverConflicts = coverConflicts,
+        isMfuMode = isMfuMode,
         hasHatchMode = (#(ep.hatches or {}) > 0 or #(ep.buses or {}) > 0)
             and (#(ep.fluidStorageBuses or {}) == 0 and #(ep.itemStorageBuses or {}) == 0),
     }
 
     self:renderWiringReservesCard()
     self:renderWiringTopologyCard(ctx)
-    local nextY = self:renderWiringChannelsCard(ep)
-    self:renderWiringControllersTable(nextY, nonStockNets)
+    if isMfuMode then
+        self:renderUnifiedMfuPairingPanel(ctx)
+    else
+        local nextY = self:renderWiringChannelsCard(ep)
+        self:renderWiringControllersTable(nextY, nonStockNets)
+    end
 end
 
 function UI:renderPassiveModal()
@@ -5067,7 +5419,11 @@ function UI:handleScroll(dir, x, y)
     elseif self.tab == TAB_RECIPES then
         self.recipeScroll = math.max(0, self.recipeScroll - (dir * 3))
     elseif self.tab == TAB_SETUP then
-        if y and y >= 28 then
+        if self._setupMfuMode then
+            if y and y >= 26 then
+                self.wiringDtpfScroll = math.max(0, (self.wiringDtpfScroll or 0) - dir)
+            end
+        elseif y and y >= 28 then
             self.wiringDtpfScroll = math.max(0, (self.wiringDtpfScroll or 0) - dir)
         else
             self.wiringChScroll = math.max(0, (self.wiringChScroll or 0) - dir)
