@@ -4341,9 +4341,10 @@ do
         close = function() end,
     }
     component._register("t21-inet", "internet", {
-        connect = function(h, p)
-            assertEq(h, "127.0.0.1", "T21H connects to loopback 127.0.0.1")
-            assertEq(p, 8766, "T21H connects to bridge port 8766")
+        connect = function(addr, port)
+            local expect = "127.0.0.1:8766"
+            local got = port and (tostring(addr) .. ":" .. tostring(port)) or tostring(addr)
+            assertEq(got, expect, "T21H connects to loopback 127.0.0.1:8766")
             return mockSock
         end,
     })

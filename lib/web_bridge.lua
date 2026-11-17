@@ -637,7 +637,7 @@ function WebBridge:ensureConnected(now)
     end)
     if not okGet or not inet or not inet.connect then return false end
 
-    local okConn, sock = pcall(inet.connect, self.host, self.port)
+    local okConn, sock = pcall(inet.connect, tostring(self.host) .. ":" .. tostring(self.port))
     if not okConn or not sock then
         return false
     end
