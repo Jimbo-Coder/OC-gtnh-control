@@ -812,6 +812,7 @@ function WebBridge:executeRpcTable(cmd)
     elseif op == "reboot" then
         if self.state then
             self.state._pendingReboot = true
+            self.state._forcePollNow = true
         end
         return { id = id, ok = true, rebooting = true }
     end
@@ -829,6 +830,15 @@ function WebBridge:handleCommand(cmd)
 end
 
 function WebBridge:ensureConnected(now)
+    if self.Hardware and self.Hardware.hasMeshPeer and self.Hardware.hasMeshPeer() then
+        if self.sock then self:close() end
+        return false
+    end
+    self.bootUptime = self.bootUptime or now
+    if (not self.sock) and (now - self.bootUptime) < 8.0 and self.Hardware and self.Hardware.openMeshPort then
+        local m, t = self.Hardware.openMeshPort()
+        if m or t then return false end
+    end
     if self.sock then
         if self.ready then return true end
         local okF, conn = pcall(self.sock.finishConnect)

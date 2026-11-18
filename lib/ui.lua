@@ -424,6 +424,8 @@ function UI.computeSpatialGrid(dtpfs, statuses)
     return { cols = cols, rows = rows, slots = slots, grid = grid, colCoords = {}, rowCoords = {}, usedSpatial = false }
 end
 
+local COL_MUL = 16777216
+
 function UI.new(cfg, runtimeState, onSaveCallback)
     local gpu = component.gpu
     local maxW, maxH = gpu.maxResolution()
@@ -479,21 +481,19 @@ function UI.new(cfg, runtimeState, onSaveCallback)
         discoveredTransposers = {},
         discoveredEndpoints = { hatches = {}, buses = {}, itemStorageBuses = {}, fluidStorageBuses = {}, warnings = {} },
         curCh = {},
-        curFg = {},
-        curBg = {},
+        curCol = {},
         nxtCh = {},
-        nxtFg = {},
-        nxtBg = {},
+        nxtCol = {},
     }
+    local defCol = COLORS.fg * COL_MUL + COLORS.bg
     for ry = 1, h do
-        self.curCh[ry], self.curFg[ry], self.curBg[ry] = {}, {}, {}
-        local rCh, rFg, rBg = {}, {}, {}
+        self.curCh[ry], self.curCol[ry] = {}, {}
+        local rCh, rCol = {}, {}
         for rx = 1, w do
             rCh[rx] = " "
-            rFg[rx] = COLORS.fg
-            rBg[rx] = COLORS.bg
+            rCol[rx] = defCol
         end
-        self.nxtCh[ry], self.nxtFg[ry], self.nxtBg[ry] = rCh, rFg, rBg
+        self.nxtCh[ry], self.nxtCol[ry] = rCh, rCol
     end
     setmetatable(self, { __index = UI })
     self:refreshDiscovery()
@@ -503,23 +503,19 @@ end
 function UI:invalidateScreen()
     for ry = 1, self.h do
         self.curCh[ry] = {}
-        self.curFg[ry] = {}
-        self.curBg[ry] = {}
+        self.curCol[ry] = {}
     end
 end
 
 function UI:clearNextBuffer(bgCol, fgCol)
-    local bg = bgCol or COLORS.bg
-    local fg = fgCol or COLORS.fg
+    local packed = (fgCol or COLORS.fg) * COL_MUL + (bgCol or COLORS.bg)
     local w = self.w
     for ry = 1, self.h do
         local rCh = self.nxtCh[ry]
-        local rFg = self.nxtFg[ry]
-        local rBg = self.nxtBg[ry]
+        local rCol = self.nxtCol[ry]
         for rx = 1, w do
             rCh[rx] = " "
-            rFg[rx] = fg
-            rBg[rx] = bg
+            rCol[rx] = packed
         end
     end
 end
@@ -659,14 +655,23 @@ function UI:fillRect(x, y, w, h, ch, bg)
     local x2 = cx + cw - 1
     local y2 = cy + chh - 1
     local fillCh = ch or " "
+    local packedBlank = (bg and fillCh == " ") and (COLORS.fg * COL_MUL + bg) or nil
     for ry = cy, y2 do
         local rCh = self.nxtCh[ry]
-        local rFg = self.nxtFg[ry]
-        local rBg = self.nxtBg[ry]
-        for rx = cx, x2 do
-            rCh[rx] = fillCh
-            if bg then rBg[rx] = bg end
-            if fillCh == " " then rFg[rx] = COLORS.fg end
+        local rCol = self.nxtCol[ry]
+        if packedBlank then
+            for rx = cx, x2 do
+                rCh[rx] = fillCh
+                rCol[rx] = packedBlank
+            end
+        else
+            for rx = cx, x2 do
+                rCh[rx] = fillCh
+                local old = rCol[rx]
+                local nfg = (fillCh == " ") and COLORS.fg or math.floor(old / COL_MUL)
+                local nbg = bg or (old % COL_MUL)
+                rCol[rx] = nfg * COL_MUL + nbg
+            end
         end
     end
 end
@@ -679,15 +684,19 @@ function UI:drawText(x, y, text, fg, bg)
         x = 1
     end
     local rCh = self.nxtCh[y]
-    local rFg = self.nxtFg[y]
-    local rBg = self.nxtBg[y]
+    local rCol = self.nxtCol[y]
     local col = x
     local w = self.w
+    local packed = (fg and bg) and (fg * COL_MUL + bg) or nil
     for ch in s:gmatch("[\1-\127\194-\244][\128-\191]*") do
         if col > w then break end
         rCh[col] = ch
-        if fg then rFg[col] = fg end
-        if bg then rBg[col] = bg end
+        if packed then
+            rCol[col] = packed
+        elseif fg or bg then
+            local old = rCol[col]
+            rCol[col] = (fg or math.floor(old / COL_MUL)) * COL_MUL + (bg or (old % COL_MUL))
+        end
         col = col + 1
     end
 end
@@ -5686,49 +5695,54 @@ function UI:flushFramebuffer()
     local lastBg, lastFg = nil, nil
     local w = self.w
 
-    local function cellChanged(cCh, cFg, cBg, nCh, nFg, nBg)
-        if cCh ~= nCh or cBg ~= nBg then return true end
+    local function cellChanged(cCh, cCol, nCh, nCol)
+        if cCol == nil or cCh ~= nCh or (cCol % COL_MUL) ~= (nCol % COL_MUL) then return true end
         if nCh == " " then return false end
-        return cFg ~= nFg
+        return cCol ~= nCol
     end
 
     for y = 1, self.h do
         local cCh = self.curCh[y]
-        local cFg = self.curFg[y]
-        local cBg = self.curBg[y]
+        local cCol = self.curCol[y]
         local nCh = self.nxtCh[y]
-        local nFg = self.nxtFg[y]
-        local nBg = self.nxtBg[y]
+        local nCol = self.nxtCol[y]
 
         local x = 1
         while x <= w do
-            if cellChanged(cCh[x], cFg[x], cBg[x], nCh[x], nFg[x], nBg[x]) then
-                local runBg = nBg[x]
-                local runFg = nFg[x]
+            if cellChanged(cCh[x], cCol[x], nCh[x], nCol[x]) then
+                local nc = nCol[x]
+                local runBg = nc % COL_MUL
+                local runFg = math.floor(nc / COL_MUL)
                 if nCh[x] == " " then
                     local probe = x + 1
-                    while probe <= w and nBg[probe] == runBg and nCh[probe] == " " do
+                    while probe <= w and (nCol[probe] % COL_MUL) == runBg and nCh[probe] == " " do
                         probe = probe + 1
                     end
-                    if probe <= w and nBg[probe] == runBg then
-                        runFg = nFg[probe]
+                    if probe <= w and (nCol[probe] % COL_MUL) == runBg then
+                        runFg = math.floor(nCol[probe] / COL_MUL)
                     end
                 end
+                local runCol = runFg * COL_MUL + runBg
 
                 local xEnd = x
                 while xEnd < w do
                     local nx = xEnd + 1
-                    local nextSameStyle = (nBg[nx] == runBg) and (nCh[nx] == " " or nFg[nx] == runFg)
+                    local nxtC = nCol[nx]
+                    local nextSameStyle = ((nxtC % COL_MUL) == runBg) and (nCh[nx] == " " or nxtC == runCol)
                     if not nextSameStyle then break end
 
-                    if cellChanged(cCh[nx], cFg[nx], cBg[nx], nCh[nx], nFg[nx], nBg[nx]) then
+                    if cellChanged(cCh[nx], cCol[nx], nCh[nx], nxtC) then
                         xEnd = nx
-                    elseif (nx + 1 <= w)
-                        and (nBg[nx + 1] == runBg)
-                        and (nCh[nx + 1] == " " or nFg[nx + 1] == runFg)
-                        and cellChanged(cCh[nx + 1], cFg[nx + 1], cBg[nx + 1], nCh[nx + 1], nFg[nx + 1], nBg[nx + 1]) then
-                        -- Coalesce 1-cell unchanged gaps of identical style into a single gpu.set call
-                        xEnd = nx + 1
+                    elseif (nx + 1 <= w) then
+                        local nx2C = nCol[nx + 1]
+                        if ((nx2C % COL_MUL) == runBg)
+                            and (nCh[nx + 1] == " " or nx2C == runCol)
+                            and cellChanged(cCh[nx + 1], cCol[nx + 1], nCh[nx + 1], nx2C) then
+                            -- Coalesce 1-cell unchanged gaps of identical style into a single gpu.set call
+                            xEnd = nx + 1
+                        else
+                            break
+                        end
                     else
                         break
                     end
@@ -5736,8 +5750,7 @@ function UI:flushFramebuffer()
 
                 for k = x, xEnd do
                     cCh[k] = nCh[k]
-                    cFg[k] = (nCh[k] == " ") and runFg or nFg[k]
-                    cBg[k] = nBg[k]
+                    cCol[k] = (nCh[k] == " ") and runCol or nCol[k]
                 end
 
                 if runBg ~= lastBg then

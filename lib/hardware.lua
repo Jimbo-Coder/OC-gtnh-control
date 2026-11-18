@@ -10,6 +10,8 @@
 local component = require("component")
 local event = require("event")
 local serialization = require("serialization")
+local okComp, computer = pcall(require, "computer")
+if not okComp then computer = nil end
 
 local Hardware = {}
 
@@ -1961,21 +1963,44 @@ end
 
 local function getMeshTransports(compLib)
     local cl = compLib or component
-    local modem, mAddr = nil, nil
-    local addr = cl.list and cl.list("modem", true)() or nil
-    if addr then
-        local m = cl.proxy(addr)
-        if m then
-            if m.open then pcall(m.open, Hardware.MESH_PORT) end
-            modem, mAddr = m, addr
+    local firstModem, firstAddr, wModem, wAddr = nil, nil, nil, nil
+    if cl.list then
+        for addr in cl.list("modem", true) do
+            local m = cl.proxy(addr)
+            if m then
+                if m.open then pcall(m.open, Hardware.MESH_PORT) end
+                local isW = false
+                if m.isWireless then
+                    local okW, rW = pcall(m.isWireless)
+                    isW = okW and (rW == true)
+                end
+                if isW and m.setStrength then pcall(m.setStrength, 400) end
+                if not firstModem then firstModem, firstAddr = m, addr end
+                if isW and not wModem then wModem, wAddr = m, addr end
+            end
         end
+    elseif cl.isAvailable and cl.isAvailable("modem") and cl.modem then
+        local m = cl.modem
+        if m.open then pcall(m.open, Hardware.MESH_PORT) end
+        local isW = false
+        if m.isWireless then
+            local okW, rW = pcall(m.isWireless)
+            isW = okW and (rW == true)
+        end
+        if isW and m.setStrength then pcall(m.setStrength, 400) end
+        firstModem, firstAddr = m, m.address or "modem"
     end
+    local modem, mAddr = wModem or firstModem, wAddr or firstAddr
     local tunnel, tAddr = nil, nil
     local ta = cl.list and cl.list("tunnel", true)() or nil
     if ta then
         tunnel, tAddr = cl.proxy(ta), ta
     end
     return modem, mAddr, tunnel, tAddr
+end
+
+function Hardware.hasMeshPeer()
+    return Hardware._mainnetMeshAddr ~= nil
 end
 
 function Hardware.openMeshPort(compLib)
@@ -2271,15 +2296,22 @@ function Hardware.requestMainnetCraft(cfg, rule, amount, compLib)
     return { ok = false, error = "Mainnet OC craft timeout" }
 end
 
-function Hardware.pushMeshMetrics(cfg, runtimeState, nowSec, compLib)
+function Hardware.pushMeshMetrics(cfg, runtimeState, nowSec, compLib, force)
     local cl = compLib or component
     local modem, _, tunnel = getMeshTransports(cl)
     if not modem and not tunnel then return false end
     nowSec = nowSec or 0
-    if not Hardware._mainnetMeshAddr and (nowSec - (Hardware._lastMeshBeacon or -100)) < 15 then
+    local curArmed = (cfg and cfg.armed == true)
+    local curOd = (runtimeState and runtimeState.onDemand and runtimeState.onDemand.hasWork == true)
+    if not force
+        and curArmed == Hardware._lastMeshArmed
+        and curOd == Hardware._lastMeshOd
+        and (nowSec - (Hardware._lastMeshBeacon or -100)) < 15 then
         return false
     end
     Hardware._lastMeshBeacon = nowSec
+    Hardware._lastMeshArmed = curArmed
+    Hardware._lastMeshOd = curOd
 
     local pwr = (runtimeState and runtimeState.powerSummary) or {}
     local od = (runtimeState and runtimeState.onDemand) or {}
@@ -2331,7 +2363,13 @@ function Hardware.handleMeshMessage(webBridge, localAddr, sender, port, msgType,
     local isMeshPort = (port == Hardware.MESH_PORT) or (port == 0 and tunnel and tAddr and localAddr == tAddr)
     if not isMeshPort or not sender then return false end
 
-    if msgType == "MESH_MAINNET_HELLO" or msgType == "DTPF_ACK" then
+    if msgType == "MESH_MAINNET_HELLO" then
+        Hardware._mainnetMeshAddr = sender
+        Hardware._mainnetMeshViaTunnel = (port == 0)
+        local up = (computer and computer.uptime and computer.uptime()) or (_G.computer and _G.computer.uptime and _G.computer.uptime()) or 0
+        Hardware.pushMeshMetrics(webBridge and webBridge.cfg, webBridge and webBridge.state, up, cl, true)
+        return true
+    elseif msgType == "DTPF_ACK" then
         Hardware._mainnetMeshAddr = sender
         Hardware._mainnetMeshViaTunnel = (port == 0)
         return true
