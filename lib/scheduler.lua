@@ -26,6 +26,7 @@ if not next(FAMILY_BY_ID) then
         FAMILY_BY_ID[f.id] = f
     end
 end
+Scheduler.FAMILY_BY_ID = FAMILY_BY_ID
 
 local WANTED_ITEM_NAMES = {}
 for i = 1, #RecipesDB.FAMILIES do
@@ -483,6 +484,32 @@ function Scheduler.syncSubnetsStruct(cfg)
     cfg.subnets.transposer.autoFlushPolls = math.max(0, math.floor(tonumber(cfg.odAutoFlushPolls) or 0))
 end
 
+-- Compact DTPF-room AE2 Level Maintainer presets (`id|type|name|damage|label|target|batch`)
+local DEFAULT_MAINT_SPEC = [[
+cat_dtcc|fluid|exciteddtcc|0|Excited Dimensionally Transcendent Crude Catalyst|10000000|1000000
+cat_dtpc|fluid|exciteddtpc|0|Excited Dimensionally Transcendent Prosaic Catalyst|1000000|1000000
+cat_dtrc|fluid|exciteddtrc|0|Excited Dimensionally Transcendent Resplendent Catalyst|20000000|5000000
+cat_dtec|fluid|exciteddtec|0|Excited Dimensionally Transcendent Exotic Catalyst|1000000000|200000000
+cat_dtsc|fluid|exciteddtsc|0|Excited Dimensionally Transcendent Stellar Catalyst|50000000|25000000
+inf_cat|item|Avaritia:Resource|5|Infinity Catalyst|100000|100000
+m_quantum|fluid|molten.quantum|0|Molten Quantum|4000000|4000000
+m_steel|fluid|molten.steel|0|Molten Steel|400000000|300000000
+ender_q|item|supersolarpanel:enderquantumcomponent|0|Ender-Quantum Component|4096|2048
+en_tess|item|gregtech:gt.metaitem.01|32417|Energised Tesseract|10000|5000
+m_pma|fluid|molten.precious metals alloy|0|Molten Precious Metals Alloy|10000000|10000000
+m_ogan|fluid|molten.metastable oganesson|0|Molten Metastable Oganesson|10000000|10000000
+cn_blk|item|Avaritia:Resource_Block|0|Cosmic Neutronium Block|1000|1000
+m_titansteel|fluid|molten.titansteel|0|Molten Titansteel|10000000|10000000
+m_callisto|fluid|molten.callistoice|0|Molten Callisto Ice|10000000|10000000
+m_ledox|fluid|molten.ledox|0|Molten Ledox|10000000|10000000
+m_tungsten|fluid|molten.tungsten|0|Molten Tungsten|10000000|10000000
+cn_rod|item|gregtech:gt.metaitem.01|23982|Cosmic Neutronium Rod|40000|20000
+tair_rod|item|bartworks:gt.bwMetaGeneratedstick|10106|Tairitsu Rod|40000|20000
+tm_rod|item|gregtech:gt.metaitem.01|23581|Transcendent Metal Rod|10000|10000
+bot_plate|item|miscutils:itemPlateBotmium|0|Botmium Plate|80000|70000
+arc_screw|item|miscutils:itemScrewArcanite|0|Arcanite Screw|40000|20000
+]]
+
 -- Ensure config has valid defaults for Subnets, Global settings, Per-DTPF overrides, Channels, and all 27 Families
 function Scheduler.ensureConfig(cfg)
     cfg = cfg or {}
@@ -531,6 +558,55 @@ function Scheduler.ensureConfig(cfg)
     cfg.fallbackFamilyId = cfg.fallbackFamilyId or "molten_infinity"
     if cfg.allowParallelSameRecipe == nil then
         cfg.allowParallelSameRecipe = false
+    end
+    if cfg.powerAwareAssign == nil then
+        cfg.powerAwareAssign = true
+    else
+        cfg.powerAwareAssign = (cfg.powerAwareAssign == true)
+    end
+    cfg.maintEnabled = (cfg.maintEnabled == true)
+    cfg.maintFreeCpus = math.max(0, math.floor(tonumber(cfg.maintFreeCpus) or 2))
+    cfg.maintPollSec = math.max(5, math.floor(tonumber(cfg.maintPollSec) or 15))
+    cfg.mainnetAddr = cfg.mainnetAddr or "auto"
+    if type(cfg.maintRules) ~= "table" then
+        cfg.maintRules = {}
+        for line in DEFAULT_MAINT_SPEC:gmatch("[^\r\n]+") do
+            local id, rType, name, dmg, lbl, tgt, bat = line:match("^([^|]+)|([^|]+)|([^|]+)|(%d+)|([^|]+)|(%d+)|(%d+)$")
+            if id then
+                cfg.maintRules[#cfg.maintRules + 1] = {
+                    id = id,
+                    type = rType,
+                    name = name,
+                    damage = tonumber(dmg) or 0,
+                    label = lbl,
+                    target = tonumber(tgt) or 1,
+                    batch = tonumber(bat) or 1,
+                    mode = "auto",
+                }
+            end
+        end
+    else
+        local cleanRules = {}
+        for i = 1, #cfg.maintRules do
+            local r = cfg.maintRules[i]
+            if type(r) == "table" and type(r.name) == "string" and r.name ~= "" then
+                local rMode = r.mode
+                if rMode ~= "auto" and rMode ~= "always" and rMode ~= "off" then
+                    rMode = "auto"
+                end
+                cleanRules[#cleanRules + 1] = {
+                    id = r.id or ("rule_" .. tostring(#cleanRules + 1)),
+                    type = (r.type == "fluid") and "fluid" or "item",
+                    name = r.name,
+                    damage = math.max(0, math.floor(tonumber(r.damage) or 0)),
+                    label = tostring(r.label or r.name),
+                    target = math.max(1, math.floor(tonumber(r.target) or 1)),
+                    batch = math.max(1, math.floor(tonumber(r.batch) or 1)),
+                    mode = rMode,
+                }
+            end
+        end
+        cfg.maintRules = cleanRules
     end
     if cfg.uiAnimations == nil then
         cfg.uiAnimations = true
@@ -2045,6 +2121,7 @@ local function applyAndRecordChannelJob(cfg, stock, runtimeState, ch, args, useC
         pinned = args.pinned,
         familyId = args.famId,
         tierCode = args.tCode,
+        tierData = args.tData,
         isNoneCat = args.meta and args.meta.isNoneCat or false,
         convSatisfied = args.meta and args.meta.convSatisfied or false,
         convCatIndex = (args.meta and args.meta.convCatIndex) or args.tIdx,
@@ -2157,7 +2234,7 @@ local function stepPollSnapshots(cfg, runtimeState, opts, nowSec)
     local dedicatedActive, activeOdDtpfs, channelOdInfo, onlineEnabled = {}, {}, {}, {}
     local fleetMaxKnownHeat = nil
     local anyOnline, anyConvControl = false, false
-    local channelMaxHeat, channelRoles, channelCatOverrides, channelDtpfs = {}, {}, {}, {}
+    local channelMaxHeat, channelMaxInputEu, channelRoles, channelCatOverrides, channelDtpfs = {}, {}, {}, {}, {}
 
     for i = 1, #cfg.dtpfs do
         local d = cfg.dtpfs[i]
@@ -2225,6 +2302,9 @@ local function stepPollSnapshots(cfg, runtimeState, opts, nowSec)
                     channelMaxHeat[chId] = st.coilHeat
                 end
             end
+            if (tonumber(st.maxInputEu) or 0) > (channelMaxInputEu[chId] or 0) then
+                channelMaxInputEu[chId] = tonumber(st.maxInputEu)
+            end
             channelRoles[chId] = channelRoles[chId] or {
                 allFallbackOnly = true,
                 allPassiveOnly = true,
@@ -2283,6 +2363,7 @@ local function stepPollSnapshots(cfg, runtimeState, opts, nowSec)
         onlineEnabled = onlineEnabled,
         fleetMaxKnownHeat = fleetMaxKnownHeat,
         channelMaxHeat = channelMaxHeat,
+        channelMaxInputEu = channelMaxInputEu,
         channelRoles = channelRoles,
         channelCatOverrides = channelCatOverrides,
         channelDtpfs = channelDtpfs,
@@ -2691,6 +2772,44 @@ local function stepEvaluateRecipes(cfg, runtimeState, ctx, nowSec, pushEvent)
     return needyQueue, currentlyRunningMap, doesChannelWantConv
 end
 
+-- Lightweight per-DTPF direct & embodied catalyst EU/t estimator
+function Scheduler.estimateDtpfPower(st, tData, tCode, catTierIdx, wantConv)
+    if not tData then return 0, 0, false end
+    local baseEut = tonumber(tData.eut) or 0
+    local durTicks = math.max(1, tonumber(tData.durationTicks) or 200)
+    local speedDiv = wantConv and 4 or 2
+    local liveDirect = (st and st.online and st.active and (tonumber(st.liveEut) or 0) > 0) and tonumber(st.liveEut) or 0
+    local maxEu = (st and (tonumber(st.maxInputEu) or 0) > 0) and tonumber(st.maxInputEu) or 0
+    local cap = (liveDirect > 0) and liveDirect or ((maxEu > 0) and maxEu or baseEut)
+
+    local e = baseEut
+    local d = durTicks
+    for _ = 1, 16 do
+        if e <= 0 or (e * 4) > cap or d < speedDiv then break end
+        e = e * 4
+        d = math.max(1, math.floor(d / speedDiv))
+    end
+
+    local directEut = (liveDirect > 0) and liveDirect or e
+    local eutIsEstimate = (liveDirect == 0)
+
+    local ct = TIER_BY_INDEX[catTierIdx or 4] or TIER_BY_INDEX[4]
+    local discFrac = math.max(0, math.min(0.5, (tonumber(st and st.discountPct) or 0) / 100.0))
+    local baseCat = (tCode and tCode ~= "NONE") and (tonumber(tData.catalystAmount) or 0) or 0
+    local catPerCraft = 0
+    if wantConv then
+        local extraCat = (st and (tonumber(st.extraCatalystNeeded) or 0) > 0) and tonumber(st.extraCatalystNeeded)
+            or Scheduler.estimateConvergenceCatalyst(tData, ct)
+        catPerCraft = (baseCat + extraCat) * (1.0 - discFrac)
+    elseif baseCat > 0 then
+        catPerCraft = baseCat * (1.0 - discFrac)
+    end
+    local catEut = (ct and catPerCraft > 0 and directEut > 0)
+        and math.floor((catPerCraft / math.max(1, d)) * ct.energy)
+        or 0
+    return math.floor(directEut + 0.5), catEut, eutIsEstimate
+end
+
 local function stepAssignPassiveChannels(cfg, runtimeState, ctx, needyQueue, currentlyRunningMap, doesChannelWantConv, pushEvent)
     local stock = ctx.stock
     local rawDtpfSt = ctx.rawDtpfSt
@@ -2698,6 +2817,7 @@ local function stepAssignPassiveChannels(cfg, runtimeState, ctx, needyQueue, cur
     local channelOdInfo = ctx.channelOdInfo
     local fleetCoilLimit = ctx.fleetMaxKnownHeat or math.huge
     local channelMaxHeat = ctx.channelMaxHeat
+    local channelMaxInputEu = ctx.channelMaxInputEu or {}
     local channelRoles = ctx.channelRoles
     local channelCatOverrides = ctx.channelCatOverrides
     local channelDtpfs = ctx.channelDtpfs
@@ -2730,8 +2850,7 @@ local function stepAssignPassiveChannels(cfg, runtimeState, ctx, needyQueue, cur
         end
     end
 
-    for i = 1, #cfg.channels do
-        local ch = cfg.channels[i]
+    local function getChannelOvMeta(ch)
         local chHeatLimit = channelMaxHeat[ch.id] or fleetCoilLimit
         local chRole = channelRoles[ch.id] or {
             allFallbackOnly = false,
@@ -2741,13 +2860,138 @@ local function stepAssignPassiveChannels(cfg, runtimeState, ctx, needyQueue, cur
             pinnedFamilyId = nil,
             pinMode = nil,
         }
-
         local chCatOv = nil
         local ovInfo = channelCatOverrides[ch.id]
         if ovInfo and ovInfo.same and ovInfo.val and ovInfo.val >= 1 then
             chCatOv = ovInfo.val
         end
+        return chHeatLimit, chRole, chCatOv
+    end
 
+    local function canChannelRunCand(chHeatLimit, chRole, cand)
+        if ((cand.tierData and cand.tierData.coilHeat) or 0) > chHeatLimit then
+            return false
+        end
+        if chRole.hasAny and chRole.allPassiveOnly and cand.isForever then
+            return false
+        end
+        if chRole.hasAny and chRole.allFallbackOnly and not cand.isForever then
+            return false
+        end
+        return true
+    end
+
+    local function assignChosenToChannel(ch, chCatOv, chosen)
+        usedRecipes[chosen.familyId] = true
+        assignedCount[chosen.familyId] = (assignedCount[chosen.familyId] or 0) + 1
+        assignedDtpfCount[chosen.familyId] = (assignedDtpfCount[chosen.familyId] or 0) + countChannelDtpfs(ch.id)
+        local fam = FAMILY_BY_ID[chosen.familyId]
+        local rc = cfg.recipes[chosen.familyId]
+        local chJobMode = chosen.isForever and "FALLBACK" or "PASSIVE"
+        local chWantsConv = doesChannelWantConv(ch.id, chJobMode, rc, chosen.convBelowTarget)
+        local mod, tCode, tIdx, tData, catFluid, _, meta = Scheduler.resolveRecipe(fam, rc, cfg, stock, {
+            wantConvergence = chWantsConv,
+            isFallback = chosen.isForever or (chosen.familyId == cfg.fallbackFamilyId),
+            catOverride = chCatOv,
+        })
+        applyAndRecordChannelJob(cfg, stock, runtimeState, ch, {
+            mode = chJobMode,
+            famId = chosen.familyId,
+            fam = fam,
+            mod = mod,
+            tCode = tCode,
+            tIdx = tIdx,
+            tData = tData,
+            catFluid = catFluid,
+            meta = meta,
+            isForever = chosen.isForever,
+        }, ctx.useCache, pushEvent)
+        if chosen.isForever then
+            chosen.stateStr = (cfg.armed and "Looping (" or "Would Loop (") .. ch.id .. ")"
+        else
+            chosen.stateStr = (cfg.armed and "Running (" or "Would Run (") .. ch.id .. ")"
+        end
+    end
+
+    local function assignFallbackOrIdleToChannel(ch, chHeatLimit, chRole, chCatOv)
+        if cfg.fallbackEnabled and not (chRole.hasAny and chRole.allPassiveOnly) then
+            local fbId = cfg.fallbackFamilyId or "molten_infinity"
+            local fbFam = FAMILY_BY_ID[fbId]
+            local fbRc = fbFam and cfg.recipes[fbId]
+            local fbSt = runtimeState.recipeStatus[fbId]
+            local maxD = (fbRc and tonumber(fbRc.maxDtpfs)) or 0
+            local curDtpfs = assignedDtpfCount[fbId] or 0
+            if fbFam and (maxD <= 0 or curDtpfs < maxD) then
+                local chFbWantsConv = doesChannelWantConv(ch.id, "FALLBACK", fbRc, fbSt and fbSt.convBelowTarget)
+                local fbMod, fbCode, fbIdx, fbData, fbCatFluid, _, fbMeta = Scheduler.resolveRecipe(fbFam, fbRc, cfg, stock, {
+                    wantConvergence = chFbWantsConv,
+                    isFallback = true,
+                    catOverride = chCatOv,
+                })
+                local fbRunning = (currentlyRunningMap[fbId] == true)
+                local fbOk, fbWhy = Scheduler.checkRecipeRunnable(cfg, stock, fbFam, fbRc, fbRunning, true, {
+                    wantConvergence = chFbWantsConv,
+                    maxCoilHeat = chHeatLimit,
+                    catOverride = chCatOv,
+                })
+                if fbOk and fbData then
+                    usedRecipes[fbId] = true
+                    assignedCount[fbId] = (assignedCount[fbId] or 0) + 1
+                    assignedDtpfCount[fbId] = (assignedDtpfCount[fbId] or 0) + countChannelDtpfs(ch.id)
+                    applyAndRecordChannelJob(cfg, stock, runtimeState, ch, {
+                        mode = "FALLBACK",
+                        famId = fbId,
+                        fam = fbFam,
+                        mod = fbMod,
+                        tCode = fbCode,
+                        tIdx = fbIdx,
+                        tData = fbData,
+                        catFluid = fbCatFluid,
+                        meta = fbMeta,
+                        labelPrefix = "Fallback: ",
+                    }, ctx.useCache, pushEvent)
+                    if fbSt then
+                        fbSt.stateStr = (cfg.armed and "Fallback (" or "Would FB (") .. ch.id .. ")"
+                    end
+                    return
+                end
+                if cfg.armed then
+                    clearPassiveChannelWithLog(ch, stock, runtimeState, ctx.useCache, pushEvent, "fallback blocked")
+                end
+                local fbReason = tostring(fbWhy or (fbSt and fbSt.reason) or "No inputs")
+                runtimeState.channelStatus[ch.id] = {
+                    mode = "IDLE",
+                    label = "Idle (Fallback blocked: " .. fbReason .. ")",
+                    shortLabel = "Fallback Wait: " .. fbReason,
+                }
+                return
+            end
+            if cfg.armed then
+                clearPassiveChannelWithLog(ch, stock, runtimeState, ctx.useCache, pushEvent, "fallback capped")
+            end
+            local capReason = (maxD > 0) and string.format("Max %d DTPFs", maxD) or "No inputs"
+            runtimeState.channelStatus[ch.id] = {
+                mode = "IDLE",
+                label = "Idle (Fallback blocked: " .. capReason .. ")",
+                shortLabel = "Fallback Wait: " .. capReason,
+            }
+            return
+        end
+        if cfg.armed then
+            clearPassiveChannelWithLog(ch, stock, runtimeState, ctx.useCache, pushEvent, "targets full")
+        end
+        runtimeState.channelStatus[ch.id] = {
+            mode = "IDLE",
+            label = cfg.fallbackEnabled and "Idle (Passive-Only)" or "Idle (Fallback OFF)",
+            shortLabel = cfg.fallbackEnabled and "Targets Full (Passive-Only)" or "All Targets Full (FB OFF)",
+        }
+    end
+
+    -- Phase A: handle disabled, OD-preempted, OD-only, and Pinned channels first; collect Auto slots
+    local autoSlots = {}
+    for i = 1, #cfg.channels do
+        local ch = cfg.channels[i]
+        local chHeatLimit, chRole, chCatOv = getChannelOvMeta(ch)
         local chOd = channelOdInfo[ch.id]
         local chHasOd = (chOd and chOd.hasWork == true)
 
@@ -2855,32 +3099,138 @@ local function stepAssignPassiveChannels(cfg, runtimeState, ctx, needyQueue, cur
                 end
             end
         else
-            local chosen = nil
-            local chUnits = countChannelDtpfs(ch.id)
-            local function canChannelRunCand(cand)
-                if ((cand.tierData and cand.tierData.coilHeat) or 0) > chHeatLimit then
-                    return false
-                end
-                if chRole.hasAny and chRole.allPassiveOnly and cand.isForever then
-                    return false
-                end
-                if chRole.hasAny and chRole.allFallbackOnly and not cand.isForever then
-                    return false
-                end
-                return true
-            end
+            autoSlots[#autoSlots + 1] = {
+                idx = i,
+                ch = ch,
+                heatLimit = chHeatLimit,
+                role = chRole,
+                catOv = chCatOv,
+                maxEu = channelMaxInputEu[ch.id] or 0,
+                assigned = false,
+            }
+        end
+    end
 
-            -- Pass 1: spread across distinct eligible recipes in strict priority order
+    -- Phase B: assign remaining unpinned channels (Power-Aware when hatches differ & powerAwareAssign ~= false)
+    local hasHatchDiff = false
+    if cfg.powerAwareAssign ~= false and #autoSlots > 1 then
+        local firstEu = autoSlots[1].maxEu
+        for s = 2, #autoSlots do
+            if autoSlots[s].maxEu ~= firstEu then
+                hasHatchDiff = true
+                break
+            end
+        end
+    end
+
+    if hasHatchDiff then
+        local function pickSlotForCandidate(cand)
+            local candRc = cfg.recipes[cand.familyId]
+            local candMode = cand.isForever and "FALLBACK" or "PASSIVE"
+            local bestConvSlot, bestConvEu = nil, -1
+            local bestPlainSlot, bestPlainEu = nil, math.huge
+            for s = 1, #autoSlots do
+                local sl = autoSlots[s]
+                if (not sl.assigned) and canChannelRunCand(sl.heatLimit, sl.role, cand) then
+                    if doesChannelWantConv(sl.ch.id, candMode, candRc, cand.convBelowTarget) then
+                        if sl.maxEu > bestConvEu then
+                            bestConvEu = sl.maxEu
+                            bestConvSlot = sl
+                        end
+                    else
+                        if sl.maxEu < bestPlainEu then
+                            bestPlainEu = sl.maxEu
+                            bestPlainSlot = sl
+                        end
+                    end
+                end
+            end
+            return bestConvSlot or bestPlainSlot
+        end
+
+        -- Pass 1: distinct priority order -> largest hatch for Converged, smallest hatch for Non-Converged
+        for q = 1, #needyQueue do
+            local cand = needyQueue[q]
+            if not usedRecipes[cand.familyId] then
+                local sl = pickSlotForCandidate(cand)
+                if sl then
+                    sl.assigned = true
+                    assignChosenToChannel(sl.ch, sl.catOv, cand)
+                end
+            end
+        end
+
+        -- Pass 2: parallel sharing across remaining free slots
+        if cfg.allowParallelSameRecipe then
+            for _ = 1, #autoSlots do
+                local chosen, chosenSlot, bestScore = nil, nil, nil
+                for q = 1, #needyQueue do
+                    local cand = needyQueue[q]
+                    local candRc = cfg.recipes[cand.familyId]
+                    local maxD = (candRc and tonumber(candRc.maxDtpfs)) or 0
+                    local curDtpfs = assignedDtpfCount[cand.familyId] or 0
+                    local availB = cand.availBatches or math.huge
+                    local loopRank = cand.isForever and 1 or 0
+                    local cnt = assignedCount[cand.familyId] or 0
+                    if (not chosen)
+                        or (loopRank < bestScore.loopRank)
+                        or (loopRank == bestScore.loopRank and cnt < bestScore.cnt) then
+                        local sl = nil
+                        if maxD <= 0 or curDtpfs < maxD then
+                            for s = 1, #autoSlots do
+                                local probe = autoSlots[s]
+                                if (not probe.assigned)
+                                    and canChannelRunCand(probe.heatLimit, probe.role, cand)
+                                    and availB >= (curDtpfs + countChannelDtpfs(probe.ch.id)) then
+                                    sl = pickSlotForCandidate(cand)
+                                    break
+                                end
+                            end
+                        end
+                        if sl then
+                            chosen = cand
+                            chosenSlot = sl
+                            bestScore = { loopRank = loopRank, cnt = cnt }
+                        end
+                    end
+                end
+                if not chosen or not chosenSlot then break end
+                chosenSlot.assigned = true
+                assignChosenToChannel(chosenSlot.ch, chosenSlot.catOv, chosen)
+            end
+        end
+
+        -- Pass 3: Fallback / Idle sorted ascending (unless Fallback explicitly runs Converged)
+        local fbRc = cfg.fallbackEnabled and cfg.fallbackFamilyId and cfg.recipes[cfg.fallbackFamilyId] or nil
+        local fbSt = cfg.fallbackEnabled and cfg.fallbackFamilyId and runtimeState.recipeStatus[cfg.fallbackFamilyId] or nil
+        local fbWantsConv = fbRc and doesChannelWantConv(nil, "FALLBACK", fbRc, fbSt and fbSt.convBelowTarget) or false
+        local rem = {}
+        for s = 1, #autoSlots do
+            if not autoSlots[s].assigned then rem[#rem + 1] = autoSlots[s] end
+        end
+        table.sort(rem, function(a, b)
+            if a.maxEu ~= b.maxEu then
+                return fbWantsConv and (a.maxEu > b.maxEu) or (a.maxEu < b.maxEu)
+            end
+            return a.idx < b.idx
+        end)
+        for k = 1, #rem do
+            local sl = rem[k]
+            sl.assigned = true
+            assignFallbackOrIdleToChannel(sl.ch, sl.heatLimit, sl.role, sl.catOv)
+        end
+    else
+        for s = 1, #autoSlots do
+            local sl = autoSlots[s]
+            local chosen = nil
+            local chUnits = countChannelDtpfs(sl.ch.id)
             for q = 1, #needyQueue do
                 local cand = needyQueue[q]
-                if canChannelRunCand(cand) and not usedRecipes[cand.familyId] then
+                if canChannelRunCand(sl.heatLimit, sl.role, cand) and not usedRecipes[cand.familyId] then
                     chosen = cand
                     break
                 end
             end
-
-            -- Pass 2: if parallel sharing is enabled, parallelize <Tgt recipes (balanced) before doubling 24/7 loops,
-            -- skipping recipes whose remaining stock cannot sustain another concurrent DTPF batch without starving.
             if not chosen and cfg.allowParallelSameRecipe then
                 local bestScore = nil
                 for q = 1, #needyQueue do
@@ -2889,7 +3239,7 @@ local function stepAssignPassiveChannels(cfg, runtimeState, ctx, needyQueue, cur
                     local maxD = (candRc and tonumber(candRc.maxDtpfs)) or 0
                     local curDtpfs = assignedDtpfCount[cand.familyId] or 0
                     local availB = cand.availBatches or math.huge
-                    if canChannelRunCand(cand) and (maxD <= 0 or curDtpfs < maxD) and availB >= (curDtpfs + chUnits) then
+                    if canChannelRunCand(sl.heatLimit, sl.role, cand) and (maxD <= 0 or curDtpfs < maxD) and availB >= (curDtpfs + chUnits) then
                         local loopRank = cand.isForever and 1 or 0
                         local cnt = assignedCount[cand.familyId] or 0
                         if (not chosen)
@@ -2901,110 +3251,16 @@ local function stepAssignPassiveChannels(cfg, runtimeState, ctx, needyQueue, cur
                     end
                 end
             end
-
             if chosen then
-                usedRecipes[chosen.familyId] = true
-                assignedCount[chosen.familyId] = (assignedCount[chosen.familyId] or 0) + 1
-                assignedDtpfCount[chosen.familyId] = (assignedDtpfCount[chosen.familyId] or 0) + chUnits
-                local fam = FAMILY_BY_ID[chosen.familyId]
-                local rc = cfg.recipes[chosen.familyId]
-                local chJobMode = chosen.isForever and "FALLBACK" or "PASSIVE"
-                local chWantsConv = doesChannelWantConv(ch.id, chJobMode, rc, chosen.convBelowTarget)
-                local mod, tCode, tIdx, tData, catFluid, _, meta = Scheduler.resolveRecipe(fam, rc, cfg, stock, {
-                    wantConvergence = chWantsConv,
-                    isFallback = chosen.isForever or (chosen.familyId == cfg.fallbackFamilyId),
-                    catOverride = chCatOv,
-                })
-                applyAndRecordChannelJob(cfg, stock, runtimeState, ch, {
-                    mode = chJobMode,
-                    famId = chosen.familyId,
-                    fam = fam,
-                    mod = mod,
-                    tCode = tCode,
-                    tIdx = tIdx,
-                    tData = tData,
-                    catFluid = catFluid,
-                    meta = meta,
-                    isForever = chosen.isForever,
-                }, ctx.useCache, pushEvent)
-                if chosen.isForever then
-                    chosen.stateStr = (cfg.armed and "Looping (" or "Would Loop (") .. ch.id .. ")"
-                else
-                    chosen.stateStr = (cfg.armed and "Running (" or "Would Run (") .. ch.id .. ")"
-                end
-            elseif cfg.fallbackEnabled and not (chRole.hasAny and chRole.allPassiveOnly) then
-                local fbId = cfg.fallbackFamilyId or "molten_infinity"
-                local fbFam = FAMILY_BY_ID[fbId]
-                local fbRc = fbFam and cfg.recipes[fbId]
-                local fbSt = runtimeState.recipeStatus[fbId]
-                local maxD = (fbRc and tonumber(fbRc.maxDtpfs)) or 0
-                local curDtpfs = assignedDtpfCount[fbId] or 0
-                if fbFam and (maxD <= 0 or curDtpfs < maxD) then
-                    local chFbWantsConv = doesChannelWantConv(ch.id, "FALLBACK", fbRc, fbSt and fbSt.convBelowTarget)
-                    local fbMod, fbCode, fbIdx, fbData, fbCatFluid, _, fbMeta = Scheduler.resolveRecipe(fbFam, fbRc, cfg, stock, {
-                        wantConvergence = chFbWantsConv,
-                        isFallback = true,
-                        catOverride = chCatOv,
-                    })
-                    local fbRunning = (currentlyRunningMap[fbId] == true)
-                    local fbOk, fbWhy = Scheduler.checkRecipeRunnable(cfg, stock, fbFam, fbRc, fbRunning, true, {
-                        wantConvergence = chFbWantsConv,
-                        maxCoilHeat = chHeatLimit,
-                        catOverride = chCatOv,
-                    })
-                    if fbOk and fbData then
-                        usedRecipes[fbId] = true
-                        assignedCount[fbId] = (assignedCount[fbId] or 0) + 1
-                        assignedDtpfCount[fbId] = (assignedDtpfCount[fbId] or 0) + chUnits
-                        applyAndRecordChannelJob(cfg, stock, runtimeState, ch, {
-                            mode = "FALLBACK",
-                            famId = fbId,
-                            fam = fbFam,
-                            mod = fbMod,
-                            tCode = fbCode,
-                            tIdx = fbIdx,
-                            tData = fbData,
-                            catFluid = fbCatFluid,
-                            meta = fbMeta,
-                            labelPrefix = "Fallback: ",
-                        }, ctx.useCache, pushEvent)
-                        if fbSt then
-                            fbSt.stateStr = (cfg.armed and "Fallback (" or "Would FB (") .. ch.id .. ")"
-                        end
-                    else
-                        if cfg.armed then
-                            clearPassiveChannelWithLog(ch, stock, runtimeState, ctx.useCache, pushEvent, "fallback blocked")
-                        end
-                        local fbReason = tostring(fbWhy or (fbSt and fbSt.reason) or "No inputs")
-                        runtimeState.channelStatus[ch.id] = {
-                            mode = "IDLE",
-                            label = "Idle (Fallback blocked: " .. fbReason .. ")",
-                            shortLabel = "Fallback Wait: " .. fbReason,
-                        }
-                    end
-                else
-                    if cfg.armed then
-                        clearPassiveChannelWithLog(ch, stock, runtimeState, ctx.useCache, pushEvent, "fallback capped")
-                    end
-                    local capReason = (maxD > 0) and string.format("Max %d DTPFs", maxD) or "No inputs"
-                    runtimeState.channelStatus[ch.id] = {
-                        mode = "IDLE",
-                        label = "Idle (Fallback blocked: " .. capReason .. ")",
-                        shortLabel = "Fallback Wait: " .. capReason,
-                    }
-                end
+                assignChosenToChannel(sl.ch, sl.catOv, chosen)
             else
-                if cfg.armed then
-                    clearPassiveChannelWithLog(ch, stock, runtimeState, ctx.useCache, pushEvent, "targets full")
-                end
-                runtimeState.channelStatus[ch.id] = {
-                    mode = "IDLE",
-                    label = cfg.fallbackEnabled and "Idle (Passive-Only)" or "Idle (Fallback OFF)",
-                    shortLabel = cfg.fallbackEnabled and "Targets Full (Passive-Only)" or "All Targets Full (FB OFF)",
-                }
+                assignFallbackOrIdleToChannel(sl.ch, sl.heatLimit, sl.role, sl.catOv)
             end
         end
+    end
 
+    for i = 1, #cfg.channels do
+        local ch = cfg.channels[i]
         local chStAfter = runtimeState.channelStatus[ch.id]
         if chStAfter then
             local chList = channelDtpfs[ch.id] or {}
@@ -3079,6 +3335,7 @@ local function stepUpdateDtpfControls(cfg, runtimeState, ctx, opts, seenBnFam, p
     local odState = ctx.odState
     local getOdMatch = ctx.getOdMatch
 
+    local sumDirectEut, sumCatEut, maxUnitEut, maxUnitIdx = 0, 0, 0, nil
     for i = 1, #cfg.dtpfs do
         local d = cfg.dtpfs[i]
         local st = rawDtpfSt[i] or Hardware.getDTPFStatus(d, { allowSensorCache = (opts.allowSensorCache == true) })
@@ -3093,6 +3350,7 @@ local function stepUpdateDtpfControls(cfg, runtimeState, ctx, opts, seenBnFam, p
         local jobMode = "IDLE"
         local jobLabel = "All Targets Full"
         local jobFamilyId = nil
+        local jobTierData, jobTierCode = nil, nil
 
         local shouldAllowWork = (d.enabled ~= false)
         if shouldAllowWork and (not odPreemptsDtpf) then
@@ -3109,10 +3367,13 @@ local function stepUpdateDtpfControls(cfg, runtimeState, ctx, opts, seenBnFam, p
             jobLabel = "Disabled by OC"
         elseif odPreemptsDtpf then
             local odAddrKey = (d.odNetAddr and d.odNetAddr ~= "global") and d.odNetAddr or (globalOdAddr or "__global")
-            wantConv = computeOnDemandWantConv(cfg, d, st, dOd, getOdMatch(odAddrKey, dOd))
+            local odM = getOdMatch(odAddrKey, dOd)
+            wantConv = computeOnDemandWantConv(cfg, d, st, dOd, odM)
             wantCatTier = pickAvailableCatalystTier(cfg, stock, prefCat)
             jobMode = "ON-DEMAND"
             jobLabel = "OD: " .. (dOd.summary or "Active")
+            jobTierData = odM and odM.tierData or nil
+            jobTierCode = odM and odM.tierCode or nil
         elseif chSt and (chSt.mode == "PASSIVE" or chSt.mode == "FALLBACK") then
             jobMode = chSt.mode
             jobFamilyId = chSt.familyId
@@ -3123,6 +3384,8 @@ local function stepUpdateDtpfControls(cfg, runtimeState, ctx, opts, seenBnFam, p
 
             local recSt = runtimeState.recipeStatus[chSt.familyId]
             wantConv = Scheduler.doesJobWantConvergence(cfg, chSt.mode, famRc, d.convOverride, st.discountPct, recSt and recSt.convBelowTarget)
+            jobTierData = chSt.tierData or (recSt and recSt.tierData)
+            jobTierCode = chSt.tierCode or (recSt and recSt.tierCode)
 
             -- Never deadlock a catalyst-free ("NONE") passive recipe when Convergence catalyst is unavailable or disabled
             if chSt.isNoneCat then
@@ -3271,6 +3534,27 @@ local function stepUpdateDtpfControls(cfg, runtimeState, ctx, opts, seenBnFam, p
             or (d.roleOverride ~= "auto")
             or (not d.enabled)
 
+        local directEut, catEut, eutIsEst = 0, 0, false
+        if d.enabled ~= false and shouldAllowWork and (jobMode == "PASSIVE" or jobMode == "FALLBACK" or jobMode == "ON-DEMAND") then
+            if st.active or (not cfg.armed) then
+                if jobTierData then
+                    directEut, catEut, eutIsEst = Scheduler.estimateDtpfPower(st, jobTierData, jobTierCode, wantCatTier, wantConv)
+                elseif st.active and (tonumber(st.liveEut) or 0) > 0 then
+                    directEut = math.floor(tonumber(st.liveEut) + 0.5)
+                end
+            end
+        end
+        st.directEut = directEut
+        st.catEut = catEut
+        st.totalEut = directEut + catEut
+        st.eutIsEstimate = eutIsEst
+        sumDirectEut = sumDirectEut + directEut
+        sumCatEut = sumCatEut + catEut
+        if directEut > maxUnitEut then
+            maxUnitEut = directEut
+            maxUnitIdx = i
+        end
+
         if st.coverConflict then
             runtimeState.bottlenecks[#runtimeState.bottlenecks + 1] = {
                 kind = "cover",
@@ -3322,6 +3606,12 @@ local function stepUpdateDtpfControls(cfg, runtimeState, ctx, opts, seenBnFam, p
             reason = b.reason,
         }
     end
+    runtimeState.powerSummary = {
+        directEut = sumDirectEut,
+        catEut = sumCatEut,
+        totalEut = sumDirectEut + sumCatEut,
+        maxDtpfIdx = maxUnitIdx,
+    }
 end
 
 local LOG_LEVEL_RANK = { quiet = 1, normal = 2, raw = 3 }
@@ -3394,6 +3684,228 @@ local function emitRawStepTrace(cfg, runtimeState, ctx, pushEvent)
     pushEvent("out", outMsg, { stage = "OUT", minLevel = 3, allowRepeat = true })
     pushEvent("run", decMsg, { stage = "DEC", minLevel = 3, allowRepeat = true })
     pushEvent("info", inMsg, { stage = "IN", minLevel = 3, allowRepeat = true })
+end
+
+-- Build demand key set ("fluid:<name>:0" | "item:<name>:<dmg>") for active recipes, fallback, and pins
+function Scheduler.computeMaintDemandSet(cfg, stock)
+    local demanded = {}
+    if not cfg then return demanded end
+    local defCt = TIER_BY_INDEX[tonumber(cfg.defaultCatalystTier) or 4]
+    if defCt and defCt.fluid then
+        demanded["fluid:" .. defCt.fluid .. ":0"] = true
+    end
+
+    local wantedFams = {}
+    if cfg.fallbackEnabled and cfg.fallbackFamilyId then
+        wantedFams[cfg.fallbackFamilyId] = true
+    end
+    for _, d in ipairs(cfg.dtpfs or {}) do
+        if d.enabled ~= false and (d.roleOverride == "pinned" or d.roleOverride == "pinned_loop") and d.pinnedFamilyId then
+            wantedFams[d.pinnedFamilyId] = true
+        end
+    end
+    for i = 1, #RecipesDB.FAMILIES do
+        local fam = RecipesDB.FAMILIES[i]
+        local rc = cfg.recipes and cfg.recipes[fam.id]
+        if (rc and rc.enabled == true) or wantedFams[fam.id] then
+            local _, _, _, tData, catFluid = Scheduler.resolveRecipe(fam, rc, cfg, stock, { wantConvergence = true })
+            if catFluid then
+                demanded["fluid:" .. catFluid .. ":0"] = true
+            end
+            if tData then
+                for _, fl in ipairs(tData.fluidsIn or {}) do
+                    if fl.name then demanded["fluid:" .. fl.name .. ":0"] = true end
+                end
+                for _, it in ipairs(tData.itemsIn or {}) do
+                    if it.name and (not it.nonConsumed) and (it.amount or 0) > 0 then
+                        demanded["item:" .. it.name .. ":" .. tostring(it.damage or 0)] = true
+                    end
+                end
+            end
+        end
+    end
+    return demanded
+end
+
+-- In-game AE2 Level Maintainer step (strictly via local Mainnet Adapter or OC Modem/Tunnel)
+function Scheduler.stepLevelMaintainer(cfg, runtimeState, ctx, nowSec, opts, pushEvent)
+    local rules = (cfg and cfg.maintRules) or {}
+    local demanded = Scheduler.computeMaintDemandSet(cfg, ctx and ctx.stock)
+    local pollSec = math.max(5, tonumber(cfg and cfg.maintPollSec) or 15)
+    runtimeState._maintTrack = runtimeState._maintTrack or {}
+
+    local activeReq = {}
+    local ruleDemanded = {}
+    for i = 1, #rules do
+        local r = rules[i]
+        local k = string.format("%s:%s:%d", r.type or "item", r.name or "", tonumber(r.damage) or 0)
+        local isDem = (r.mode == "always") or (r.mode == "auto" and demanded[k] == true)
+        ruleDemanded[r.id] = isDem
+        if r.mode ~= "off" then
+            activeReq[#activeReq + 1] = {
+                id = r.id,
+                type = r.type,
+                name = r.name,
+                damage = r.damage or 0,
+                label = r.label,
+            }
+        end
+    end
+
+    local sync = runtimeState._lastMaintSync
+    local syncAge = nowSec - (runtimeState._lastMaintPollSec or -1000)
+    local forceSync = (runtimeState._forceMaintSync == true) or (opts and opts.forceMaintSync == true)
+    if forceSync then runtimeState._forceMaintSync = false end
+
+    local shouldQuery = (not ctx or not ctx.useCache)
+        and (forceSync or sync == nil or (cfg.maintEnabled and syncAge >= pollSec) or ((not cfg.maintEnabled) and syncAge >= 60))
+    if shouldQuery and not (opts and opts.skipMaintQuery) then
+        sync = Hardware.queryMainnetMaintenance(cfg, activeReq)
+        runtimeState._lastMaintSync = sync
+        runtimeState._lastMaintPollSec = nowSec
+        if sync and sync.failed then
+            for fid, why in pairs(sync.failed) do
+                local tr = runtimeState._maintTrack[fid] or {}
+                tr.inFlightUntil = 0
+                tr.backoffUntil = nowSec + 60
+                tr.lastError = why
+                runtimeState._maintTrack[fid] = tr
+            end
+        end
+    end
+    sync = sync or { ok = false, link = "none" }
+
+    local linkOk = (sync.ok == true)
+    local freeCpus = tonumber(sync.freeCpus) or 0
+    local totalCpus = tonumber(sync.totalCpus) or 0
+    local freeReserve = math.max(0, tonumber(cfg and cfg.maintFreeCpus) or 2)
+    local cpuHeadroomOk = linkOk and (freeCpus > freeReserve)
+    local busyByKey = sync.busyByKey or {}
+    local busyByLabel = sync.busyByLabel or {}
+    local syncStocks = sync.stocks or {}
+    local fallbackFluids = (ctx and ctx.stock and ctx.stock.fluids) or {}
+    local fallbackItems = (ctx and ctx.stock and ctx.stock.items) or {}
+
+    local ruleOut = {}
+    local lowList = {}
+    local activeCount, craftingCount, lowCount = 0, 0, 0
+
+    for i = 1, #rules do
+        local r = rules[i]
+        local k = string.format("%s:%s:%d", r.type or "item", r.name or "", tonumber(r.damage) or 0)
+        local isDem = ruleDemanded[r.id] == true
+        local tr = runtimeState._maintTrack[r.id] or {}
+        if tr.inFlightUntil and nowSec >= tr.inFlightUntil then
+            tr.inFlightUntil = 0
+        end
+        if tr.backoffUntil and nowSec >= tr.backoffUntil then
+            tr.backoffUntil = 0
+        end
+
+        local curStock = linkOk and tonumber(syncStocks[r.id])
+            or ((r.type == "fluid") and (fallbackFluids[r.name] or 0) or (fallbackItems[r.name .. ":" .. tostring(r.damage or 0)] or 0))
+        curStock = curStock or 0
+
+        local busyCpu = busyByKey[k] or busyByLabel[r.label]
+        local inFlight = (not busyCpu) and ((tr.inFlightUntil or 0) > nowSec)
+        local inBackoff = ((tr.backoffUntil or 0) > nowSec)
+        local stateStr = "OK"
+
+        if r.mode == "off" then
+            stateStr = "Off"
+        elseif not isDem then
+            stateStr = "No Demand"
+        else
+            activeCount = activeCount + 1
+            if busyCpu then
+                craftingCount = craftingCount + 1
+                tr.inFlightUntil = 0
+                stateStr = "Crafting (" .. tostring(busyCpu) .. ")"
+            elseif inFlight then
+                craftingCount = craftingCount + 1
+                stateStr = "Starting..."
+            elseif not linkOk then
+                stateStr = "No Mainnet Link"
+            elseif curStock < (tonumber(r.target) or 1) then
+                lowCount = lowCount + 1
+                if inBackoff then
+                    stateStr = "Wait (" .. tostring(tr.lastError or "Backoff") .. ")"
+                elseif not cpuHeadroomOk then
+                    stateStr = string.format("CPU Reserve (%d/%d free)", freeCpus, freeReserve)
+                else
+                    stateStr = cfg.maintEnabled and "Queued" or "Need Batch"
+                    local deficit = ((tonumber(r.target) or 1) - curStock) / math.max(1, tonumber(r.target) or 1)
+                    lowList[#lowList + 1] = { rule = r, deficit = deficit, track = tr }
+                end
+            else
+                tr.lastError = nil
+                stateStr = "OK"
+            end
+        end
+
+        ruleOut[i] = {
+            id = r.id,
+            demanded = isDem,
+            stock = curStock,
+            stockKnown = linkOk or (curStock > 0),
+            craftingCpu = busyCpu,
+            stateStr = stateStr,
+        }
+    end
+
+    if (cfg and cfg.armed == true) and (cfg and cfg.maintEnabled == true) and cpuHeadroomOk and shouldQuery and #lowList > 0 then
+        table.sort(lowList, function(a, b)
+            if math.abs(a.deficit - b.deficit) > 0.001 then
+                return a.deficit > b.deficit
+            end
+            return tostring(a.rule.id) < tostring(b.rule.id)
+        end)
+        local top = lowList[1]
+        local r = top.rule
+        local ack = Hardware.requestMainnetCraft(cfg, r, r.batch)
+        local tr = top.track
+        if ack and ack.ok then
+            tr.inFlightUntil = nowSec + 90
+            tr.lastError = nil
+            runtimeState._maintTrack[r.id] = tr
+            craftingCount = craftingCount + 1
+            for idx = 1, #ruleOut do
+                if ruleOut[idx].id == r.id then
+                    ruleOut[idx].stateStr = (ack.status == "computing") and "Computing..." or "Dispatched"
+                    break
+                end
+            end
+            if pushEvent then
+                pushEvent("out", string.format("Maint: +%s %s", fmtCompactLiters(r.batch):gsub("L$", r.type == "fluid" and "L" or ""), r.label),
+                    { stage = "OUT", minLevel = 1 })
+            end
+        else
+            tr.backoffUntil = nowSec + 60
+            tr.lastError = (ack and ack.error) or "Request failed"
+            runtimeState._maintTrack[r.id] = tr
+            for idx = 1, #ruleOut do
+                if ruleOut[idx].id == r.id then
+                    ruleOut[idx].stateStr = "Wait (" .. tostring(tr.lastError) .. ")"
+                    break
+                end
+            end
+        end
+    end
+
+    runtimeState.maintStatus = {
+        enabled = (cfg and cfg.maintEnabled == true),
+        link = linkOk and (sync.link or "adapter") or "none",
+        linkError = sync.error,
+        freeCpus = freeCpus,
+        totalCpus = totalCpus,
+        freeCpusReserve = freeReserve,
+        pollSec = pollSec,
+        activeCount = activeCount,
+        craftingCount = craftingCount,
+        lowCount = lowCount,
+        rules = ruleOut,
+    }
+    return runtimeState.maintStatus
 end
 
 -- Check whether every enabled DTPF has 24/7 or Fallback work once <Tgt stocks fill and OD is idle
@@ -3682,6 +4194,7 @@ function Scheduler.step(cfg, runtimeState, opts)
     local needyQueue, currentlyRunningMap, doesChannelWantConv = stepEvaluateRecipes(cfg, runtimeState, ctx, nowSec, pushEvent)
     local seenBnFam = stepAssignPassiveChannels(cfg, runtimeState, ctx, needyQueue, currentlyRunningMap, doesChannelWantConv, pushEvent)
     stepUpdateDtpfControls(cfg, runtimeState, ctx, opts, seenBnFam, pushEvent)
+    Scheduler.stepLevelMaintainer(cfg, runtimeState, ctx, nowSec, opts, pushEvent)
 
     if (cfg.logLevel == "raw") and (not ctx.useCache) and (not opts.interactive) then
         emitRawStepTrace(cfg, runtimeState, ctx, pushEvent)

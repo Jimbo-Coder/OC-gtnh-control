@@ -14,12 +14,20 @@ local serialization = require("serialization")
 local Hardware = {}
 
 Hardware.CLUSTER_PORT = 4104
+Hardware.MESH_PORT = 4205
 local MAX_DTPF_CHUNK = 6
 local RPC_SEQ = 0
 
 Hardware._workers = {}
 Hardware._remoteDtpfStatus = {}
 Hardware._remoteOwner = {}
+Hardware._mainnetMeshAddr = nil
+Hardware._lastMeshBeacon = -100
+Hardware._localMaintPending = {}
+
+local GT_TIER_NAMES = { "ULV", "LV", "MV", "HV", "EV", "IV", "LuV", "ZPM", "UV", "UHV", "UEV", "UIV", "UMV", "UXV", "MAX" }
+local GT_TIER_V = { 8, 32, 128, 512, 2048, 8192, 32768, 131072, 524288, 2097152, 8388608, 33554432, 134217728, 536870912, 2147483640 }
+local SI_MULT = { k = 1e3, K = 1e3, M = 1e6, G = 1e9, B = 1e9, T = 1e12, P = 1e15, E = 1e18 }
 
 function Hardware.resetClusterState()
     Hardware._workers = {}
@@ -117,6 +125,55 @@ local function readCoords(proxy)
     return tonumber(a), tonumber(b), tonumber(c)
 end
 
+local function parseSensorNumber(raw)
+    if type(raw) ~= "string" then return nil end
+    local clean = raw:gsub(",", ""):match("^%s*(.-)%s*$")
+    if clean == "" then return nil end
+    local baseS, expS = clean:match("([%d%.]+)%s*[xX*]%s*10%^([%+%-]?%d+)")
+    if baseS and expS then
+        return tonumber(baseS .. "e" .. expS)
+    end
+    local eNum = clean:match("([%+%-]?%d+%.?%d*[eE][%+%-]?%d+)")
+    if eNum then
+        return tonumber(eNum)
+    end
+    local numS, suf = clean:match("^([%+%-]?%d+%.?%d*)%s*([kKMGBTPPE]?)")
+    if numS and numS ~= "" then
+        local f = tonumber(numS)
+        local mult = (suf and suf ~= "" and SI_MULT[suf]) or 1
+        return f and (f * mult) or nil
+    end
+    return nil
+end
+
+local function fmtCommaInt(n)
+    local s = tostring(math.floor(tonumber(n) or 0))
+    return (s:reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", ""))
+end
+
+local function deriveHatchFromMaxEu(maxEu)
+    maxEu = tonumber(maxEu) or 0
+    if maxEu <= 0 then return nil, nil end
+    for i = #GT_TIER_NAMES, 1, -1 do
+        local v = GT_TIER_V[i]
+        if maxEu >= v and (maxEu % v) == 0 then
+            return math.floor(maxEu / v), GT_TIER_NAMES[i]
+        end
+    end
+    for i = #GT_TIER_NAMES, 1, -1 do
+        local v = GT_TIER_V[i]
+        if maxEu >= v then
+            return math.floor(maxEu / v + 0.5), GT_TIER_NAMES[i]
+        end
+    end
+    return nil, nil
+end
+
+local function formatHatchLabel(amps, tier)
+    if not amps or not tier or amps <= 0 then return nil end
+    return fmtCommaInt(amps) .. "A " .. tostring(tier)
+end
+
 -- Parse MTEPlasmaForge sensor lines (both GTNH 2.9.0 encoded `\` lines and decoded English lines)
 function Hardware.parseDTPFSensor(lines)
     local info = {
@@ -126,6 +183,11 @@ function Hardware.parseDTPFSensor(lines)
         extraCatalystNeeded = nil,
         convergenceActive = nil,
         convergenceAchieved = nil,
+        maxInputEu = nil,
+        hatchAmps = nil,
+        hatchTier = nil,
+        hatchLabel = nil,
+        liveEut = nil,
         rawLines = {},
     }
     if type(lines) ~= "table" then return info end
@@ -133,7 +195,9 @@ function Hardware.parseDTPFSensor(lines)
     local lineList = collectSensorLines(lines)
     for i = 1, #lineList do
         local clean = stripFormatting(lineList[i])
-        info.rawLines[#info.rawLines + 1] = clean
+        if #info.rawLines < 6 then
+            info.rawLines[#info.rawLines + 1] = clean
+        end
 
         -- Coil heat (GTNH 2.9.0 IGregTechDeviceInformation.encode separates args with two backslashes `\\`)
         if not info.coilHeat then
@@ -144,6 +208,43 @@ function Hardware.parseDTPFSensor(lines)
             local hVal = (heatDigits and heatDigits ~= "") and tonumber(heatDigits) or nil
             if hVal and hVal > 0 then
                 info.coilHeat = hVal
+            end
+        end
+
+        -- Max Energy Input + Hatch Amps/Tier (`mei_amp` or `mei`)
+        if not info.maxInputEu then
+            local mEu, mAmp, mTier = clean:match("^GT5U%.multiblock%.scanner%.mei_amp\\+([^\\]+)\\+([^\\]+)\\+([^\\]+)")
+            if mEu then
+                info.maxInputEu = parseSensorNumber(mEu)
+                info.hatchAmps = parseSensorNumber(mAmp)
+                info.hatchTier = (mTier and mTier:match("([%a]+)")) or nil
+            else
+                local mEuOnly = clean:match("^GT5U%.multiblock%.scanner%.mei\\+([^\\]+)")
+                if mEuOnly then
+                    info.maxInputEu = parseSensorNumber(mEuOnly)
+                else
+                    local dEu, dAmp, dTier = clean:match("Max Energy Input:%s*([^%(]+)%s*EU/t%s*%(([%d,%.]+)A%s*([%a]+)%s*%)")
+                    if dEu then
+                        info.maxInputEu = parseSensorNumber(dEu)
+                        info.hatchAmps = parseSensorNumber(dAmp)
+                        info.hatchTier = dTier
+                    else
+                        local dEuOnly = clean:match("Max Energy Input:%s*(.-)%s*EU/t")
+                        if dEuOnly then
+                            info.maxInputEu = parseSensorNumber(dEuOnly)
+                        end
+                    end
+                end
+            end
+        end
+
+        -- Live actual energy usage (`Currently uses: ... EU/t`)
+        if not info.liveEut then
+            local uRaw = clean:match("^GT5U%.multiblock%.scanner%.usage\\+([^\\]+)")
+                or clean:match("[Cc]urrently uses:%s*(.-)%s*EU/t")
+                or clean:match("[Pp]robably uses:%s*(.-)%s*EU/t")
+            if uRaw then
+                info.liveEut = parseSensorNumber(uRaw)
             end
         end
 
@@ -185,6 +286,15 @@ function Hardware.parseDTPFSensor(lines)
             info.convergenceActive = (convTail:find("Active", 1, true) ~= nil and convTail:find("Inactive", 1, true) == nil)
             info.convergenceAchieved = (convTail:find("achieved", 1, true) ~= nil)
         end
+    end
+
+    if info.maxInputEu and (not info.hatchAmps or not info.hatchTier) then
+        local da, dt = deriveHatchFromMaxEu(info.maxInputEu)
+        info.hatchAmps = info.hatchAmps or da
+        info.hatchTier = info.hatchTier or dt
+    end
+    if info.hatchAmps and info.hatchTier then
+        info.hatchLabel = formatHatchLabel(info.hatchAmps, info.hatchTier)
     end
 
     return info
@@ -313,6 +423,11 @@ function Hardware.getLocalDTPFStatus(entry, opts)
         convergenceEnabled = false,
         convergenceAchieved = false,
         catalystTier = 4,
+        maxInputEu = nil,
+        hatchAmps = nil,
+        hatchTier = nil,
+        hatchLabel = nil,
+        liveEut = 0,
     }
     if not status.online then return status end
 
@@ -381,6 +496,32 @@ function Hardware.getLocalDTPFStatus(entry, opts)
                 status.convergenceEnabled = parsed.convergenceActive
                 gotConvFromSensor = true
             end
+            if parsed.maxInputEu ~= nil and parsed.maxInputEu > 0 then
+                status.maxInputEu = parsed.maxInputEu
+                status.hatchAmps = parsed.hatchAmps
+                status.hatchTier = parsed.hatchTier
+                status.hatchLabel = parsed.hatchLabel
+                entry._cachedHatch = {
+                    maxInputEu = parsed.maxInputEu,
+                    hatchAmps = parsed.hatchAmps,
+                    hatchTier = parsed.hatchTier,
+                    hatchLabel = parsed.hatchLabel,
+                }
+            elseif entry._cachedHatch then
+                status.maxInputEu = entry._cachedHatch.maxInputEu
+                status.hatchAmps = entry._cachedHatch.hatchAmps
+                status.hatchTier = entry._cachedHatch.hatchTier
+                status.hatchLabel = entry._cachedHatch.hatchLabel
+            end
+            if not status.active then
+                entry._lastLiveEut = 0
+                status.liveEut = 0
+            elseif parsed.liveEut ~= nil and parsed.liveEut > 0 then
+                entry._lastLiveEut = parsed.liveEut
+                status.liveEut = parsed.liveEut
+            else
+                status.liveEut = entry._lastLiveEut or 0
+            end
             if #parsed.rawLines > 0 then
                 local sample = {}
                 local limit = (status.coilHeat == nil) and math.min(16, #parsed.rawLines) or math.min(4, #parsed.rawLines)
@@ -395,6 +536,13 @@ function Hardware.getLocalDTPFStatus(entry, opts)
             if entry._cachedCoilHeat ~= nil then
                 status.coilHeat = entry._cachedCoilHeat
             end
+            if entry._cachedHatch then
+                status.maxInputEu = entry._cachedHatch.maxInputEu
+                status.hatchAmps = entry._cachedHatch.hatchAmps
+                status.hatchTier = entry._cachedHatch.hatchTier
+                status.hatchLabel = entry._cachedHatch.hatchLabel
+            end
+            status.liveEut = status.active and (entry._lastLiveEut or 0) or 0
             status.rawSensorSample = "<nil:" .. tostring(sensorErr or "nil") .. ">"
         end
     end
@@ -1071,6 +1219,11 @@ local function cloneStatusForWire(st)
         convergenceEnabled = st.convergenceEnabled,
         convergenceAchieved = st.convergenceAchieved,
         catalystTier = st.catalystTier,
+        maxInputEu = st.maxInputEu,
+        hatchAmps = st.hatchAmps,
+        hatchTier = st.hatchTier,
+        hatchLabel = st.hatchLabel,
+        liveEut = st.liveEut,
     }
 end
 
@@ -1800,6 +1953,409 @@ function Hardware.transferItemViaTransposer(tpAddr, srcSide, dstSide, maxItems, 
         return true, math.max(0, math.floor(tonumber(r2) or 0))
     end
     return false, 0
+end
+
+-- ============================================================================
+-- Mainnet AE2 Maintainer & In-Game OC Mesh (`MESH_PORT = 4205`) Helpers
+-- ============================================================================
+
+local function getMeshTransports(compLib)
+    local cl = compLib or component
+    local modem, mAddr = nil, nil
+    local addr = cl.list and cl.list("modem", true)() or nil
+    if addr then
+        local m = cl.proxy(addr)
+        if m then
+            if m.open then pcall(m.open, Hardware.MESH_PORT) end
+            modem, mAddr = m, addr
+        end
+    end
+    local tunnel, tAddr = nil, nil
+    local ta = cl.list and cl.list("tunnel", true)() or nil
+    if ta then
+        tunnel, tAddr = cl.proxy(ta), ta
+    end
+    return modem, mAddr, tunnel, tAddr
+end
+
+function Hardware.openMeshPort(compLib)
+    local modem, _, tunnel = getMeshTransports(compLib)
+    return modem, tunnel
+end
+
+local function sendMeshPacket(compLib, targetAddr, viaTunnel, msgType, ...)
+    local modem, _, tunnel = getMeshTransports(compLib)
+    if viaTunnel and tunnel and tunnel.send then
+        return pcall(tunnel.send, msgType, ...)
+    elseif modem then
+        if targetAddr and modem.send then
+            return pcall(modem.send, targetAddr, Hardware.MESH_PORT, msgType, ...)
+        elseif modem.broadcast then
+            return pcall(modem.broadcast, Hardware.MESH_PORT, msgType, ...)
+        end
+    elseif tunnel and tunnel.send then
+        return pcall(tunnel.send, msgType, ...)
+    end
+    return false
+end
+
+function Hardware.findLocalMainnetProxy(cfg, compLib)
+    local cl = compLib or component
+    local explicit = cfg and cfg.mainnetAddr
+    if explicit == "none" then
+        return nil, nil, "disabled"
+    end
+    if type(explicit) == "string" and explicit ~= "" and explicit ~= "auto" then
+        local p = cl.proxy(explicit)
+        if p and p.getCpus and (p.getCraftables or p.getCraftable) then
+            return p, explicit, "adapter"
+        end
+        return nil, nil, "missing"
+    end
+
+    local best, bestAddr, bestScore = nil, nil, -1
+    local seen = {}
+    for _, spec in ipairs({ { "me_controller", 1000000 }, { "me_interface", 0 }, { "fluid_interface", 0 } }) do
+        local ctype, bonus = spec[1], spec[2]
+        if cl.list then
+            for addr in cl.list(ctype, true) do
+                if not seen[addr] then
+                    seen[addr] = true
+                    local p = cl.proxy(addr)
+                    if p and p.getCpus and (p.getCraftables or p.getCraftable) then
+                        local cpus = safeCall(p, "getCpus")
+                        local nCpus = (type(cpus) == "table") and #cpus or 0
+                        if nCpus > 0 then
+                            local fl = safeCall(p, "getFluidsInNetwork")
+                            local nFl = (type(fl) == "table") and #fl or 0
+                            local score = bonus + nCpus * 1000 + nFl
+                            if score > bestScore then
+                                bestScore, best, bestAddr = score, p, addr
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return best, bestAddr, best and "adapter" or nil
+end
+
+local function inspectMainnetCpusAndStocks(proxy, itemsReq)
+    local cpusRaw = safeCall(proxy, "getCpus")
+    if type(cpusRaw) ~= "table" then
+        return nil, "getCpus failed"
+    end
+    local totalCpus, freeCpus = 0, 0
+    local busyByKey, busyByLabel = {}, {}
+    for i = 1, #cpusRaw do
+        local cpu = cpusRaw[i]
+        if type(cpu) == "table" and cpu.name and cpu.name ~= "" then
+            totalCpus = totalCpus + 1
+            if cpu.busy == true then
+                if cpu.cpu and cpu.cpu.finalOutput then
+                    local fin = safeCall(cpu.cpu, "finalOutput")
+                    if type(fin) == "table" then
+                        if fin.label and fin.label ~= "" then
+                            busyByLabel[fin.label] = busyByLabel[fin.label] or cpu.name
+                        end
+                        if fin.name and fin.name ~= "" then
+                            local fType = (fin.maxSize == nil) and "fluid" or "item"
+                            local k = fType .. ":" .. fin.name .. ":" .. tostring(fType == "item" and (tonumber(fin.damage) or 0) or 0)
+                            busyByKey[k] = busyByKey[k] or cpu.name
+                        end
+                    end
+                end
+            else
+                freeCpus = freeCpus + 1
+            end
+        end
+    end
+
+    local stocks = {}
+    local needFluids = false
+    for i = 1, #(itemsReq or {}) do
+        if itemsReq[i].type == "fluid" then needFluids = true break end
+    end
+    local fluidAmt = {}
+    if needFluids and proxy.getFluidsInNetwork then
+        local fl = safeCall(proxy, "getFluidsInNetwork")
+        if type(fl) == "table" then
+            for i = 1, #fl do
+                local f = fl[i]
+                if type(f) == "table" and f.name then
+                    fluidAmt[f.name] = (fluidAmt[f.name] or 0) + math.floor(tonumber(f.amount or f.size) or 0)
+                end
+            end
+        end
+    end
+
+    for i = 1, #(itemsReq or {}) do
+        local req = itemsReq[i]
+        if type(req) == "table" and req.id then
+            local qty = 0
+            if req.type == "fluid" then
+                qty = fluidAmt[req.name or ""] or 0
+            elseif proxy.getItemsInNetwork and req.name and req.name ~= "" then
+                local il = safeCall(proxy, "getItemsInNetwork", {
+                    name = req.name,
+                    damage = tonumber(req.damage) or 0,
+                })
+                if type(il) == "table" then
+                    for j = 1, #il do
+                        local st = il[j]
+                        if type(st) == "table" and (not req.label or req.label == "" or st.label == req.label) then
+                            qty = qty + math.floor(tonumber(st.size or st.amount) or 0)
+                        end
+                    end
+                end
+            end
+            stocks[req.id] = qty
+        end
+    end
+
+    local failed = {}
+    for k, obj in pairs(Hardware._localMaintPending) do
+        if obj and obj.isComputing then
+            local comp = safeCall(obj, "isComputing")
+            if comp ~= true then
+                Hardware._localMaintPending[k] = nil
+                local hasF, failWhy = safeCall(obj, "hasFailed")
+                if hasF == true then
+                    failed[k] = tostring(failWhy or "Missing resources or CPU busy")
+                end
+            end
+        else
+            Hardware._localMaintPending[k] = nil
+        end
+    end
+
+    return {
+        ok = true,
+        totalCpus = totalCpus,
+        freeCpus = freeCpus,
+        busyByKey = busyByKey,
+        busyByLabel = busyByLabel,
+        stocks = stocks,
+        failed = failed,
+    }
+end
+
+local function resolveMainnetCraftable(proxy, rule)
+    local cType = (rule.type == "fluid") and "fluid" or "item"
+    if proxy.getCraftable and rule.name and rule.name ~= "" then
+        local detail = { name = rule.name }
+        if cType == "item" then
+            detail.damage = tonumber(rule.damage) or 0
+        end
+        local res = safeCall(proxy, "getCraftable", detail, cType)
+        if res ~= nil then return res end
+    end
+    if proxy.getCraftables then
+        local filter = {}
+        if rule.label and rule.label ~= "" then filter.label = rule.label end
+        if rule.name and rule.name ~= "" then filter.name = rule.name end
+        if cType == "item" and rule.damage ~= nil then filter.damage = tonumber(rule.damage) end
+        local list = safeCall(proxy, "getCraftables", filter)
+        if type(list) == "table" and #list > 0 then
+            return list[1]
+        end
+    end
+    return nil
+end
+
+function Hardware.queryMainnetMaintenance(cfg, itemsReq, compLib)
+    local cl = compLib or component
+    local proxy, pAddr = Hardware.findLocalMainnetProxy(cfg, cl)
+    if proxy then
+        local res, err = inspectMainnetCpusAndStocks(proxy, itemsReq)
+        if res then
+            res.link = "adapter"
+            res.addr = pAddr
+            return res
+        end
+        return { ok = false, link = "adapter", error = err }
+    end
+
+    if cfg and cfg.mainnetAddr == "none" then
+        return { ok = false, link = "none", error = "Mainnet link disabled" }
+    end
+
+    local modem, _, tunnel, tAddr = getMeshTransports(cl)
+    if not modem and not tunnel then
+        return { ok = false, link = "none", error = "No Mainnet Adapter or Wireless/Linked Card" }
+    end
+
+    local reqId = nextReqId()
+    local payload = serialization.serialize({ items = itemsReq or {} })
+    local viaTunnel = (Hardware._mainnetMeshViaTunnel == true) or (not modem and tunnel ~= nil)
+    sendMeshPacket(cl, Hardware._mainnetMeshAddr, viaTunnel, "MESH_MAINT_SYNC", reqId, payload)
+
+    for _ = 1, 8 do
+        local ev, _, sender, port, _, msgType, rId, raw = event.pull(0.25, "modem_message")
+        if not ev then break end
+        if (port == Hardware.MESH_PORT or (port == 0 and tunnel and tAddr))
+            and msgType == "MESH_MAINT_ACK" and tostring(rId) == reqId and type(raw) == "string" then
+            local okU, tbl = pcall(serialization.unserialize, raw)
+            if okU and type(tbl) == "table" then
+                Hardware._mainnetMeshAddr = sender
+                Hardware._mainnetMeshViaTunnel = (port == 0)
+                tbl.link = (port == 0) and "tunnel" or "modem"
+                tbl.addr = sender
+                return tbl
+            end
+        end
+    end
+    return { ok = false, link = "none", error = "Awaiting Mainnet OC response on port " .. tostring(Hardware.MESH_PORT) }
+end
+
+function Hardware.requestMainnetCraft(cfg, rule, amount, compLib)
+    local cl = compLib or component
+    amount = math.max(1, math.floor(tonumber(amount) or 1))
+    local proxy = Hardware.findLocalMainnetProxy(cfg, cl)
+    if proxy then
+        local craftable = resolveMainnetCraftable(proxy, rule)
+        if not craftable or not craftable.request then
+            return { ok = false, error = "Pattern not found in Mainnet AE2" }
+        end
+        local okReq, statusObj, reqErr = pcall(craftable.request, amount, true, nil)
+        if not okReq or not statusObj then
+            return { ok = false, error = tostring(reqErr or statusObj or "request() failed") }
+        end
+        for _ = 1, 2 do
+            local comp = statusObj.isComputing and safeCall(statusObj, "isComputing") or false
+            if comp ~= true then break end
+            if os and os.sleep then pcall(os.sleep, 0.05) end
+        end
+        if statusObj.isComputing and safeCall(statusObj, "isComputing") == true then
+            if rule.id then
+                Hardware._localMaintPending[rule.id] = statusObj
+            end
+            return { ok = true, status = "computing" }
+        end
+        local failed, failReason = safeCall(statusObj, "hasFailed")
+        if failed == true then
+            return { ok = false, error = tostring(failReason or "Missing resources or CPU busy") }
+        end
+        return { ok = true, status = "started" }
+    end
+
+    local modem, _, tunnel, tAddr = getMeshTransports(cl)
+    if not modem and not tunnel then
+        return { ok = false, error = "No Mainnet Adapter or OC Modem" }
+    end
+    local reqId = nextReqId()
+    local payload = serialization.serialize({
+        id = rule.id,
+        type = rule.type,
+        name = rule.name,
+        damage = rule.damage or 0,
+        label = rule.label,
+        amount = amount,
+    })
+    local viaTunnel = (Hardware._mainnetMeshViaTunnel == true) or (not modem and tunnel ~= nil)
+    sendMeshPacket(cl, Hardware._mainnetMeshAddr, viaTunnel, "MESH_CRAFT", reqId, payload)
+    for _ = 1, 8 do
+        local ev, _, sender, port, _, msgType, rId, raw = event.pull(0.45, "modem_message")
+        if not ev then break end
+        if (port == Hardware.MESH_PORT or (port == 0 and tunnel and tAddr))
+            and msgType == "MESH_CRAFT_ACK" and tostring(rId) == reqId and type(raw) == "string" then
+            local okU, tbl = pcall(serialization.unserialize, raw)
+            if okU and type(tbl) == "table" then
+                Hardware._mainnetMeshAddr = sender
+                Hardware._mainnetMeshViaTunnel = (port == 0)
+                return tbl
+            end
+        end
+    end
+    return { ok = false, error = "Mainnet OC craft timeout" }
+end
+
+function Hardware.pushMeshMetrics(cfg, runtimeState, nowSec, compLib)
+    local cl = compLib or component
+    local modem, _, tunnel = getMeshTransports(cl)
+    if not modem and not tunnel then return false end
+    nowSec = nowSec or 0
+    if not Hardware._mainnetMeshAddr and (nowSec - (Hardware._lastMeshBeacon or -100)) < 15 then
+        return false
+    end
+    Hardware._lastMeshBeacon = nowSec
+
+    local pwr = (runtimeState and runtimeState.powerSummary) or {}
+    local od = (runtimeState and runtimeState.onDemand) or {}
+    local stockFluids = (runtimeState and runtimeState.stock and runtimeState.stock.fluids) or {}
+    local units = {}
+    for i = 1, #((cfg and cfg.dtpfs) or {}) do
+        local d = cfg.dtpfs[i]
+        local st = (runtimeState and runtimeState.dtpfStatus and runtimeState.dtpfStatus[i]) or {}
+        units[i] = {
+            name = d.name or ("DTPF #" .. i),
+            online = st.online == true,
+            enabled = d.enabled ~= false,
+            active = st.active == true,
+            wantConv = (st.wantConv == true) or (st.convergenceEnabled == true),
+            discountPct = tonumber(st.discountPct) or 0,
+            coilHeat = tonumber(st.coilHeat) or 0,
+            familyId = st.familyId or "idle",
+            directEut = math.floor(tonumber(st.directEut) or 0),
+            catEut = math.floor(tonumber(st.catEut) or 0),
+            maxInputEu = math.floor(tonumber(st.maxInputEu) or 0),
+            hatchLabel = st.hatchLabel or "",
+        }
+    end
+    local pkt = {
+        armed = (cfg and cfg.armed == true),
+        odActive = (od.hasWork == true),
+        dtrStock = math.floor(tonumber(stockFluids["dimensionallytranscendentresidue"]) or 0),
+        directEut = math.floor(tonumber(pwr.directEut) or 0),
+        catEut = math.floor(tonumber(pwr.catEut) or 0),
+        totalEut = math.floor(tonumber(pwr.totalEut) or 0),
+        units = units,
+    }
+    local raw = serialization.serialize(pkt)
+    if #raw > 6000 then
+        for i = 1, #pkt.units do
+            pkt.units[i].hatchLabel = nil
+            pkt.units[i].familyId = tostring(pkt.units[i].familyId):sub(1, 18)
+        end
+        raw = serialization.serialize(pkt)
+    end
+    local viaTunnel = (Hardware._mainnetMeshViaTunnel == true) or (not modem and tunnel ~= nil)
+    sendMeshPacket(cl, Hardware._mainnetMeshAddr, viaTunnel, "DTPF_METRICS", raw)
+    return true
+end
+
+function Hardware.handleMeshMessage(webBridge, localAddr, sender, port, msgType, reqId, payload, compLib)
+    local cl = compLib or component
+    local modem, _, tunnel, tAddr = getMeshTransports(cl)
+    local isMeshPort = (port == Hardware.MESH_PORT) or (port == 0 and tunnel and tAddr and localAddr == tAddr)
+    if not isMeshPort or not sender then return false end
+
+    if msgType == "MESH_MAINNET_HELLO" or msgType == "DTPF_ACK" then
+        Hardware._mainnetMeshAddr = sender
+        Hardware._mainnetMeshViaTunnel = (port == 0)
+        return true
+    elseif msgType == "DTPF_CMD" then
+        Hardware._mainnetMeshAddr = sender
+        Hardware._mainnetMeshViaTunnel = (port == 0)
+        local cmd = (type(payload) == "string") and serialization.unserialize(payload) or nil
+        local resTbl
+        if type(cmd) == "table" and webBridge and webBridge.executeRpcTable then
+            resTbl = webBridge:executeRpcTable(cmd)
+        else
+            resTbl = { ok = false, error = "Invalid DTPF_CMD payload" }
+        end
+        local raw = serialization.serialize(resTbl)
+        local CHUNK = 5500
+        local total = math.max(1, math.ceil(#raw / CHUNK))
+        local viaTunnel = (port == 0)
+        for idx = 1, total do
+            local slice = raw:sub((idx - 1) * CHUNK + 1, idx * CHUNK)
+            sendMeshPacket(cl, sender, viaTunnel, "DTPF_REPLY", tostring(reqId or ""), idx, total, slice)
+        end
+        return true
+    end
+    return false
 end
 
 return Hardware

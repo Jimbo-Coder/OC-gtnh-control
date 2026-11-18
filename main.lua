@@ -288,6 +288,11 @@ local function saveConfig(cfg)
     addKV("  ", "fallbackEnabled", (cfg.fallbackEnabled ~= false))
     addKV("  ", "fallbackFamilyId", cfg.fallbackFamilyId or "molten_infinity")
     addKV("  ", "allowParallelSameRecipe", (cfg.allowParallelSameRecipe == true))
+    addKV("  ", "powerAwareAssign", (cfg.powerAwareAssign ~= false))
+    addKV("  ", "maintEnabled", (cfg.maintEnabled == true))
+    addKV("  ", "maintFreeCpus", tonumber(cfg.maintFreeCpus) or 2)
+    addKV("  ", "maintPollSec", tonumber(cfg.maintPollSec) or 15)
+    addKV("  ", "mainnetAddr", cfg.mainnetAddr or "auto")
     addKV("  ", "uiAnimations", (cfg.uiAnimations ~= false))
     addKV("  ", "coilDisplayMode", (cfg.coilDisplayMode == "temp") and "temp" or "name")
     addKV("  ", "logLevel", cfg.logLevel or "normal")
@@ -331,6 +336,25 @@ local function saveConfig(cfg)
         ))
     end
     add("  },")
+    if type(cfg.maintRules) == "table" then
+        add("  maintRules = {")
+        for _, r in ipairs(cfg.maintRules) do
+            if type(r) == "table" and type(r.name) == "string" then
+                add(string.format(
+                    "    { id = %q, type = %q, name = %q, damage = %d, label = %q, target = %d, batch = %d, mode = %q },",
+                    tostring(r.id or r.name),
+                    (r.type == "fluid") and "fluid" or "item",
+                    tostring(r.name),
+                    math.floor(tonumber(r.damage) or 0),
+                    tostring(r.label or r.name),
+                    math.floor(tonumber(r.target) or 0),
+                    math.floor(tonumber(r.batch) or 1000),
+                    tostring(r.mode or "auto")
+                ))
+            end
+        end
+        add("  },")
+    end
     add("}")
 
     local body = table.concat(lines, "\n") .. "\n"
@@ -467,13 +491,34 @@ local function runCheck()
         print(string.format("  %s (%s): Preview=[%s] %s",
             ch.id, tostring(ch.mode), tostring(chSt.mode), tostring(chSt.label)))
     end
+    local function fmtCheckEu(v)
+        v = tonumber(v) or 0
+        if v >= 1e12 then return string.format("%.2fT", v / 1e12) end
+        if v >= 1e9 then return string.format("%.2fB", v / 1e9) end
+        if v >= 1e6 then return string.format("%.1fM", v / 1e6) end
+        if v >= 1e3 then return string.format("%.1fk", v / 1e3) end
+        return tostring(math.floor(v))
+    end
     for i = 1, #cfg.dtpfs do
         local d = cfg.dtpfs[i]
         local st = runtimeState.dtpfStatus[i] or {}
-        print(string.format("  [%d] %s: allowWork=%s wantConv=%s wantCat=T%d -> %s",
-            i, tostring(d.name), tostring(st.shouldAllowWork == true), tostring(st.wantConv == true),
-            tonumber(st.wantCatTier) or 4, tostring(st.jobLabel)))
+        local hatchStr = st.hatchLabel and (" [" .. tostring(st.hatchLabel) .. "]") or ""
+        local eutStr = (tonumber(st.totalEut) or 0) > 0
+            and (" " .. (st.eutIsEstimate ~= false and "~" or "") .. fmtCheckEu(st.totalEut) .. " EU/t")
+            or ""
+        print(string.format("  [%d] %s%s: allowWork=%s wantConv=%s wantCat=T%d -> %s%s",
+            i, tostring(d.name), hatchStr, tostring(st.shouldAllowWork == true), tostring(st.wantConv == true),
+            tonumber(st.wantCatTier) or 4, tostring(st.jobLabel), eutStr))
     end
+    local ps = runtimeState.powerSummary or {}
+    print(string.format("Fleet Power: total=%s EU/t (direct=%s, cat=%s) powerAware=%s",
+        fmtCheckEu(ps.totalEut), fmtCheckEu(ps.directEut), fmtCheckEu(ps.catEut),
+        tostring(cfg.powerAwareAssign ~= false)))
+    local ms = runtimeState.maintStatus or {}
+    print(string.format("Level Maintainer: enabled=%s link=%s freeCpus=%s/%s active=%d crafting=%d low=%d",
+        tostring(ms.enabled == true), tostring(ms.link or "none"),
+        tostring(ms.freeCpus or "?"), tostring(ms.totalCpus or "?"),
+        tonumber(ms.activeCount) or 0, tonumber(ms.craftingCount) or 0, tonumber(ms.lowCount) or 0))
     local autoFlushPolls = math.max(0, math.floor(tonumber(cfg.odAutoFlushPolls) or 0))
     local autoFlushStr = (autoFlushPolls > 0)
         and string.format("%ds(%dp)", math.floor(autoFlushPolls * (tonumber(cfg.pollInterval) or 2.0)), autoFlushPolls)
@@ -513,6 +558,7 @@ local function runGUI()
 
     local ui = UI.new(cfg, runtimeState, scheduleSave)
     local webBridge = WebBridge.new(cfg, runtimeState, ui, scheduleSave, Scheduler, Hardware)
+    if Hardware.openMeshPort then pcall(Hardware.openMeshPort) end
     webBridge:step(computer.uptime())
     if not okInit then
         ui.statusMsg = "Scheduler init error: " .. tostring(errInit)
@@ -527,13 +573,18 @@ local function runGUI()
         local nextPoll = computer.uptime() + interval
         local nextAnim = computer.uptime() + ANIM_INTERVAL
 
-        local function handleInputEvent(evName, a1, a2, a3)
+        local function handleInputEvent(evName, a0, a1, a2, a3, a4, a5, a6)
             if evName == "interrupted" then
                 savePending = true
                 ui.running = false
                 return true, false
             elseif evName == "internet_ready" then
                 return webBridge:drain(), false
+            elseif evName == "modem_message" then
+                if Hardware.handleMeshMessage and Hardware.handleMeshMessage(webBridge, a0, a1, a2, a4, a5, a6) then
+                    return true, false
+                end
+                return false, false
             elseif evName == "touch" then
                 ui:handleTouch(math.floor(tonumber(a1) or 0), math.floor(tonumber(a2) or 0), a3)
                 return true, false
@@ -568,15 +619,15 @@ local function runGUI()
             if (not forcePoll) and savePending then
                 timeout = math.min(timeout, math.max(0.02, saveDeadline - now))
             end
-            local ev, _, a1, a2, a3 = event.pull(timeout)
+            local ev, a0, a1, a2, a3, a4, a5, a6 = event.pull(timeout)
 
             if ev then
                 for _ = 1, MAX_EVENTS_PER_TICK do
                     if not ev or not ui.running then break end
-                    local handled, coalesced = handleInputEvent(ev, a1, a2, a3)
+                    local handled, coalesced = handleInputEvent(ev, a0, a1, a2, a3, a4, a5, a6)
                     if handled then dirty = true end
                     if not coalesced then break end
-                    ev, _, a1, a2, a3 = event.pull(0)
+                    ev, a0, a1, a2, a3, a4, a5, a6 = event.pull(0)
                 end
 
                 if ui.running and not ui.promptActive and ui:consumeConfigDirty() then
@@ -594,8 +645,15 @@ local function runGUI()
                     ui.animNow = nil
                 end
                 webBridge:step(computer.uptime())
+                if Hardware.pushMeshMetrics then
+                    pcall(Hardware.pushMeshMetrics, cfg, runtimeState, computer.uptime())
+                end
                 if webBridge:drain() then
                     dirty = true
+                end
+                if runtimeState._pendingReboot then
+                    savePending = true
+                    ui.running = false
                 end
                 interval = math.max(0.5, tonumber(cfg.pollInterval) or 3.0)
                 local nowDone = computer.uptime()
@@ -639,6 +697,9 @@ local function runGUI()
         print("DTPF Automation Controller stopped cleanly.")
     else
         io.stderr:write("DTPF Automation Controller error:\n" .. tostring(errLoop) .. "\n")
+    end
+    if runtimeState._pendingReboot and computer.shutdown then
+        pcall(computer.shutdown, true)
     end
 end
 

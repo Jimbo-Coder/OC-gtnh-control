@@ -311,6 +311,15 @@ function WebBridge:buildSnapshot()
             passiveStalled = (dst.passiveStalled == true),
             coverConflict = (dst.coverConflict == true),
             warmupEtaSec = dst.warmupEtaSec,
+            hatchLabel = dst.hatchLabel,
+            hatchAmps = dst.hatchAmps,
+            hatchTier = dst.hatchTier,
+            maxInputEu = dst.maxInputEu,
+            liveEut = dst.liveEut,
+            directEut = dst.directEut,
+            catEut = dst.catEut,
+            totalEut = dst.totalEut,
+            eutIsEstimate = (dst.eutIsEstimate ~= false),
         }
     end
 
@@ -370,6 +379,46 @@ function WebBridge:buildSnapshot()
         bnOut[idx] = { kind = bn.kind, name = bn.name, familyId = bn.familyId, reason = bn.reason }
     end
 
+    local rawMaint = st.maintStatus or {}
+    local maintById = {}
+    for i = 1, #(rawMaint.rules or {}) do
+        local sr = rawMaint.rules[i]
+        if sr and sr.id then maintById[sr.id] = sr end
+    end
+    local maintRulesOut = {}
+    for i = 1, #(cfg.maintRules or {}) do
+        local r = cfg.maintRules[i]
+        local sr = (r and r.id and maintById[r.id]) or {}
+        maintRulesOut[i] = {
+            id = r.id,
+            type = r.type or "item",
+            name = r.name,
+            damage = r.damage or 0,
+            label = r.label or r.name,
+            target = r.target or 1,
+            batch = r.batch or 1,
+            mode = r.mode or "auto",
+            demanded = (sr.demanded == true),
+            stock = sr.stock or 0,
+            stockKnown = (sr.stockKnown == true),
+            craftingCpu = sr.craftingCpu,
+            stateStr = sr.stateStr or (r.mode == "off" and "Off" or "Idle"),
+        }
+    end
+    local maintOut = {
+        enabled = (rawMaint.enabled ~= nil) and (rawMaint.enabled == true) or (cfg.maintEnabled == true),
+        link = rawMaint.link or "none",
+        linkError = rawMaint.linkError,
+        freeCpus = rawMaint.freeCpus or 0,
+        totalCpus = rawMaint.totalCpus or 0,
+        freeCpusReserve = rawMaint.freeCpusReserve or tonumber(cfg.maintFreeCpus) or 2,
+        pollSec = rawMaint.pollSec or tonumber(cfg.maintPollSec) or 15,
+        activeCount = rawMaint.activeCount or 0,
+        craftingCount = rawMaint.craftingCount or 0,
+        lowCount = rawMaint.lowCount or 0,
+        rules = maintRulesOut,
+    }
+
     return {
         ok = true,
         liveOc = true,
@@ -394,6 +443,11 @@ function WebBridge:buildSnapshot()
             fallbackEnabled = (cfg.fallbackEnabled == true),
             fallbackFamilyId = cfg.fallbackFamilyId or "molten_infinity",
             allowParallelSameRecipe = (cfg.allowParallelSameRecipe ~= false),
+            powerAwareAssign = (cfg.powerAwareAssign ~= false),
+            maintEnabled = (cfg.maintEnabled == true),
+            maintFreeCpus = tonumber(cfg.maintFreeCpus) or 2,
+            maintPollSec = tonumber(cfg.maintPollSec) or 15,
+            mainnetAddr = cfg.mainnetAddr or "auto",
         },
         catalysts = cats,
         dtr = {
@@ -405,6 +459,8 @@ function WebBridge:buildSnapshot()
         recipes = recipes,
         bottlenecks = bnOut,
         coverageWarning = st.coverageWarning,
+        power = st.powerSummary or { directEut = 0, catEut = 0, totalEut = 0 },
+        maintainer = maintOut,
         events = evOut,
     }
 end
@@ -454,6 +510,121 @@ function WebBridge:applyPatch(patch)
     if type(patch.allowParallelSameRecipe) == "boolean" then
         cfg.allowParallelSameRecipe = patch.allowParallelSameRecipe
         changed = true
+    end
+    if type(patch.powerAwareAssign) == "boolean" then
+        cfg.powerAwareAssign = patch.powerAwareAssign
+        changed = true
+    end
+    if type(patch.maintEnabled) == "boolean" then
+        cfg.maintEnabled = patch.maintEnabled
+        if self.state then
+            self.state._forceMaintSync = true
+            self.state._forcePollNow = true
+            if type(self.state.maintStatus) == "table" then
+                self.state.maintStatus.enabled = cfg.maintEnabled
+            end
+        end
+        changed = true
+    end
+    if patch.maintFreeCpus ~= nil then
+        local v = tonumber(patch.maintFreeCpus)
+        if v then
+            cfg.maintFreeCpus = math.max(0, math.min(32, math.floor(v)))
+            if self.state and type(self.state.maintStatus) == "table" then
+                self.state.maintStatus.freeCpusReserve = cfg.maintFreeCpus
+            end
+            changed = true
+        end
+    end
+    if patch.maintPollSec ~= nil then
+        local v = tonumber(patch.maintPollSec)
+        if v then
+            cfg.maintPollSec = math.max(5, math.min(300, math.floor(v)))
+            changed = true
+        end
+    end
+    if type(patch.mainnetAddr) == "string" and #patch.mainnetAddr > 0 then
+        cfg.mainnetAddr = patch.mainnetAddr
+        if self.state then self.state._forceMaintSync = true end
+        changed = true
+    end
+    if type(patch.maintRule) == "table" then
+        local rPatch = patch.maintRule
+        cfg.maintRules = cfg.maintRules or {}
+        local rules = cfg.maintRules
+        local matchIdx = nil
+        local matchId = type(rPatch.id) == "string" and rPatch.id or nil
+        if matchId then
+            for i = 1, #rules do
+                if rules[i] and rules[i].id == matchId then
+                    matchIdx = i
+                    break
+                end
+            end
+        elseif tonumber(rPatch.index) then
+            local idx = math.floor(tonumber(rPatch.index))
+            if idx >= 1 and idx <= #rules then matchIdx = idx end
+        end
+        if rPatch.delete == true or rPatch.remove == true then
+            if matchIdx then
+                table.remove(rules, matchIdx)
+                changed = true
+            else
+                return false, "unknown maintRule"
+            end
+        elseif matchIdx then
+            local rule = rules[matchIdx]
+            if rPatch.cycleMode == true then
+                local nextMode = { auto = "always", always = "off", off = "auto" }
+                rule.mode = nextMode[rule.mode or "auto"] or "auto"
+            elseif type(rPatch.mode) == "string" and (rPatch.mode == "auto" or rPatch.mode == "always" or rPatch.mode == "off") then
+                rule.mode = rPatch.mode
+            end
+            if rPatch.target ~= nil and tonumber(rPatch.target) then
+                rule.target = math.max(0, math.floor(tonumber(rPatch.target)))
+            end
+            if rPatch.batch ~= nil and tonumber(rPatch.batch) then
+                rule.batch = math.max(1, math.floor(tonumber(rPatch.batch)))
+            end
+            if type(rPatch.label) == "string" and #rPatch.label > 0 then
+                rule.label = rPatch.label
+            end
+            if type(rPatch.type) == "string" and (rPatch.type == "item" or rPatch.type == "fluid") then
+                rule.type = rPatch.type
+            end
+            if type(rPatch.name) == "string" and #rPatch.name > 0 then
+                rule.name = rPatch.name
+            end
+            if rPatch.damage ~= nil and tonumber(rPatch.damage) then
+                rule.damage = math.max(0, math.floor(tonumber(rPatch.damage)))
+            end
+            changed = true
+        else
+            local name = type(rPatch.name) == "string" and rPatch.name or ""
+            if #name == 0 then
+                return false, "maintRule.name required"
+            end
+            local rType = (rPatch.type == "fluid") and "fluid" or "item"
+            local dmg = math.max(0, math.floor(tonumber(rPatch.damage) or 0))
+            local rMode = rPatch.mode
+            if rMode ~= "auto" and rMode ~= "always" and rMode ~= "off" then rMode = "auto" end
+            local newId = matchId or (rType .. ":" .. name .. ":" .. tostring(dmg) .. ":" .. tostring(#rules + 1))
+            rules[#rules + 1] = {
+                id = newId,
+                type = rType,
+                name = name,
+                damage = dmg,
+                label = (type(rPatch.label) == "string" and #rPatch.label > 0) and rPatch.label or name,
+                target = math.max(0, math.floor(tonumber(rPatch.target) or 1000)),
+                batch = math.max(1, math.floor(tonumber(rPatch.batch) or 1000)),
+                mode = rMode,
+            }
+            changed = true
+        end
+        if self.state then
+            self.state._forceMaintSync = true
+            self.state._forcePollNow = true
+        end
     end
     if tonumber(patch.dtrReserveFloor) ~= nil then
         cfg.dtrReserveFloor = math.max(0, math.floor(tonumber(patch.dtrReserveFloor)))
@@ -569,30 +740,34 @@ function WebBridge:applyPatch(patch)
     return true, nil
 end
 
-function WebBridge:handleCommand(cmd)
+--- Execute a parsed JSON RPC table and return the response table without sending I/O.
+-- Shared by TCP handleCommand and in-game OC modem/tunnel Hardware.handleMeshMessage.
+function WebBridge:executeRpcTable(cmd)
+    if type(cmd) ~= "table" then
+        return { ok = false, error = "invalid command" }
+    end
     local op = cmd.op
     local id = cmd.id
     if op == "ping" then
-        self:sendLine({ id = id, ok = true, role = "dtpf", armed = (self.cfg.armed == true) })
-        return
+        return { id = id, ok = true, role = "dtpf", armed = (self.cfg.armed == true) }
     elseif op == "dtpf_state" then
         local snap = self:buildSnapshot()
         snap.id = id
-        self:sendLine(snap)
-        return
+        return snap
     elseif op == "dtpf_patch" then
         local okP, errP = self:applyPatch(cmd.patch or cmd)
         if not okP then
-            self:sendLine({ id = id, ok = false, error = tostring(errP or "patch failed") })
-            return
+            return { id = id, ok = false, error = tostring(errP or "patch failed") }
         end
         local snap = self:buildSnapshot()
         snap.id = id
-        self:sendLine(snap)
-        return
+        return snap
     elseif op == "dtpf_action" then
         local action = cmd.action
         if action == "poll_now" then
+            self.state._forcePollNow = true
+        elseif action == "maint_sync" then
+            self.state._forceMaintSync = true
             self.state._forcePollNow = true
         elseif action == "flush_od" then
             if self.state.odFlushActive then
@@ -603,20 +778,28 @@ function WebBridge:handleCommand(cmd)
         elseif action == "lock_autopull" and self.Hardware and self.Hardware.lockAllPassiveAutoPull then
             self.Hardware.lockAllPassiveAutoPull()
         else
-            self:sendLine({ id = id, ok = false, error = "unknown action: " .. tostring(action) })
-            return
+            return { id = id, ok = false, error = "unknown action: " .. tostring(action) }
         end
         local snap = self:buildSnapshot()
         snap.id = id
-        self:sendLine(snap)
-        return
+        return snap
     elseif op == "reboot" then
-        self:sendLine({ id = id, ok = true, rebooting = true })
+        if self.state then
+            self.state._pendingReboot = true
+        end
+        return { id = id, ok = true, rebooting = true }
+    end
+    return { id = id, ok = false, error = "unknown op: " .. tostring(op) }
+end
+
+function WebBridge:handleCommand(cmd)
+    local res = self:executeRpcTable(cmd)
+    if not res then return end
+    self:sendLine(res)
+    if res.rebooting then
         self:close()
         if computer.shutdown then pcall(computer.shutdown, true) end
-        return
     end
-    self:sendLine({ id = id, ok = false, error = "unknown op: " .. tostring(op) })
 end
 
 function WebBridge:ensureConnected(now)

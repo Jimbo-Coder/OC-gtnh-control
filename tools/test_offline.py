@@ -4669,6 +4669,335 @@ do
     component._reset()
 end
 
+-- ============================================================================
+-- TEST 24: Hatch/EU Telemetry, Power-Aware Routing, Level Maintainer & Mesh RPC
+-- ============================================================================
+do
+    Hardware.resetClusterState()
+    local parsedUHV = Hardware.parseDTPFSensor({
+        "GT5U.EBF.heat.s\\\\13,500",
+        "GT5U.multiblock.scanner.mei_amp\\\\§a8,796,093,022,208§r\\\\§a65,536§r\\\\§eUMV§r",
+        "GT5U.multiblock.scanner.usage\\\\§a3,355,443,200,000§r",
+        "GT5U.infodata.plasma_forge.convergence\\\\§aActive§r, perfect convergence achieved",
+    })
+    assertEq(parsedUHV.maxInputEu, 8796093022208, "T24 maxInputEu parsed from mei_amp")
+    assertEq(parsedUHV.hatchAmps, 65536, "T24 hatchAmps parsed")
+    assertEq(parsedUHV.hatchTier, "UMV", "T24 hatchTier parsed")
+    assertEq(parsedUHV.liveEut, 3355443200000, "T24 liveEut parsed from usage")
+    assert(type(parsedUHV.hatchLabel) == "string" and #parsedUHV.hatchLabel > 0, "T24 hatchLabel populated")
+
+    local parsedEng = Hardware.parseDTPFSensor({
+        "Max Energy Input: 137,438,953,472 EU/t (16,384A UEV)",
+        "Currently uses: 52,428,800,000 EU/t",
+    })
+    assertEq(parsedEng.maxInputEu, 137438953472, "T24 English Max Energy Input")
+    assertEq(parsedEng.hatchAmps, 16384, "T24 English hatchAmps")
+    assertEq(parsedEng.hatchTier, "UEV", "T24 English hatchTier")
+    assertEq(parsedEng.liveEut, 52428800000, "T24 English Currently uses")
+
+    -- Setup 5 independent channels with heterogeneous hatches (#1 small 1024A UMV, #5 huge 65536A UMV)
+    local env, fluids, items, _, _, _, _, _, _, dtpfStates = setupStandardEnv()
+    local RecipesDB = require("lib.recipes_db")
+    local WebBridge = require("lib.web_bridge")
+    local UI = require("lib.ui")
+    for _, fid in ipairs({ "molten_infinity", "molten_neutronium" }) do
+        local fam = RecipesDB.BY_ID[fid]
+        for _, mod in ipairs((fam and fam.modifiers) or {}) do
+            for _, tKey in ipairs({ "DTRC", "DTEC", "DTSC" }) do
+                local tier = mod and mod.tiers and mod.tiers[tKey]
+                if tier then
+                    for _, ii in ipairs(tier.itemsIn or {}) do
+                        items[tostring(ii.name) .. ":" .. tostring(ii.damage or 0)] = 1000000
+                    end
+                    for _, fi in ipairs(tier.fluidsIn or {}) do
+                        fluids[fi.name] = 100000000
+                    end
+                end
+            end
+        end
+    end
+    fluids["molten.neutronium"] = 0
+    fluids["molten.infinity"] = 0
+
+    local hatchSensors = {
+        { "GT5U.EBF.heat.s\\\\13,500", "GT5U.multiblock.scanner.mei_amp\\\\137,438,953,472\\\\1,024\\\\UMV" },
+        { "GT5U.EBF.heat.s\\\\13,500", "GT5U.multiblock.scanner.mei_amp\\\\549,755,813,888\\\\4,096\\\\UMV" },
+        { "GT5U.EBF.heat.s\\\\13,500", "GT5U.multiblock.scanner.mei_amp\\\\137,438,953,472\\\\1,024\\\\UMV" },
+        { "GT5U.EBF.heat.s\\\\13,500", "GT5U.multiblock.scanner.mei_amp\\\\137,438,953,472\\\\16,384\\\\UEV" },
+        { "GT5U.EBF.heat.s\\\\13,500", "GT5U.multiblock.scanner.mei_amp\\\\8,796,093,022,208\\\\65,536\\\\UMV" },
+    }
+    env.channels = {}
+    for c = 1, 5 do
+        env.channels[c] = { id = "ch" .. c, name = "Passive ch" .. c, mode = "storage_bus", shareOnDemand = false, enabled = true, hatchAddr = "sb-fluid-1", busAddr = "sb-item-1" }
+        env.dtpfs[c].channelId = "ch" .. c
+        dtpfStates[c].active = true
+        dtpfStates[c].maxProgress = 100
+        dtpfStates[c].progress = 20
+        local proxy = component.proxy("dtpf-" .. c)
+        proxy.getSensorInformation = function() return hatchSensors[c] end
+    end
+
+    local infFam = RecipesDB.BY_ID["molten_infinity"]
+    local infTier = infFam.modifiers[1].tiers.DTEC
+    local directHuge, catHuge, estHuge = Scheduler.estimateDtpfPower(
+        { active = true, maxInputEu = 8796093022208 }, infTier, "DTEC", 4, true
+    )
+    local directSmall, catSmall, estSmall = Scheduler.estimateDtpfPower(
+        { active = true, maxInputEu = 137438953472 }, infTier, "DTEC", 4, true
+    )
+    assert(estHuge == true and estSmall == true, "T24 estimateDtpfPower flags estimate when liveEut absent")
+    assert(directHuge > directSmall and catHuge > catSmall, "T24 larger hatch scales overclock EU/t & catalyst burn higher")
+
+    for _, rc in pairs(env.recipes) do rc.enabled = false; rc.forever = false; rc.maxDtpfs = 0 end
+    env.armed = true
+    env.fallbackEnabled = false
+    env.globalConvMode = "auto"
+    env.allowParallelSameRecipe = true
+    env.powerAwareAssign = true
+    env.recipes["molten_infinity"].enabled = true
+    env.recipes["molten_infinity"].forever = true
+    env.recipes["molten_infinity"].priority = 1
+    env.recipes["molten_infinity"].convMode = "force"
+    env.recipes["molten_infinity"].maxDtpfs = 1
+    env.recipes["molten_neutronium"].enabled = true
+    env.recipes["molten_neutronium"].forever = true
+    env.recipes["molten_neutronium"].priority = 2
+    env.recipes["molten_neutronium"].convMode = "off"
+    env.recipes["molten_neutronium"].maxDtpfs = 1
+
+    local st24 = {}
+    Scheduler.step(env, st24)
+    assert(st24.recipeStatus["molten_infinity"].runnable, "T24 inf blocked: " .. tostring(st24.recipeStatus["molten_infinity"].reason))
+    assert(st24.recipeStatus["molten_neutronium"].runnable, "T24 neut blocked: " .. tostring(st24.recipeStatus["molten_neutronium"].reason))
+    assertEq(st24.channelStatus["ch5"].familyId, "molten_infinity", "T24 powerAware routes Converged job to largest hatch ch5")
+    assertEq(st24.channelStatus["ch1"].familyId, "molten_neutronium", "T24 powerAware routes Non-Converged job to smallest hatch ch1")
+    assert(st24.powerSummary and st24.powerSummary.totalEut > 0, "T24 powerSummary populated")
+
+    env.powerAwareAssign = false
+    st24 = {}
+    Scheduler.step(env, st24)
+    assertEq(st24.channelStatus["ch1"].familyId, "molten_infinity", "T24 non-powerAware falls back to slot order ch1")
+
+    -- Level Maintainer: mock Mainnet AE2 proxy via component._register
+    local craftCalls = {}
+    local nextCraftStatus = { failMsg = nil, failErr = false }
+    local cpusMock = {
+        { name = "CPU #1", busy = false, storages = 1048576 },
+        { name = "CPU #2", busy = false, storages = 1048576 },
+        {
+            name = "CPU #3",
+            busy = true,
+            storages = 1048576,
+            cpu = {
+                finalOutput = function()
+                    return { name = "custom:busy_item", damage = 0, maxSize = 64, label = "Busy" }
+                end,
+            },
+        },
+        { name = "CPU #4", busy = false, storages = 1048576 },
+    }
+    local aeItemsStock = {
+        { name = "custom:always_item", damage = 0, label = "Always", size = 0 },
+        { name = "custom:auto_unused", damage = 0, label = "Auto Idle", size = 0 },
+        { name = "custom:off_item", damage = 0, label = "Off", size = 0 },
+        { name = "custom:busy_item", damage = 0, label = "Busy", size = 0 },
+    }
+    local realDemanded = infTier.itemsIn[1]
+    aeItemsStock[#aeItemsStock + 1] = {
+        name = realDemanded.name, damage = realDemanded.damage or 0, label = "Inf Cat", size = 10
+    }
+    component._register("mainnet-1", "me_interface", {
+        getItemsInNetwork = function(filter)
+            local out = {}
+            for _, it in ipairs(aeItemsStock) do
+                if (not filter or ((not filter.name or it.name == filter.name) and (filter.damage == nil or (it.damage or 0) == filter.damage))) then
+                    out[#out + 1] = it
+                end
+            end
+            return out
+        end,
+        getFluidsInNetwork = function(_) return {} end,
+        getCpus = function() return cpusMock end,
+        getCraftable = function(filter, cType)
+            return {
+                getItemStack = function() return { name = filter.name, damage = filter.damage or 0, maxSize = (cType == "fluid") and nil or 64 } end,
+                request = function(amt)
+                    if nextCraftStatus.failErr then return nil, "missing pattern" end
+                    craftCalls[#craftCalls + 1] = { name = filter.name, damage = filter.damage or 0, amount = amt }
+                    local fMsg = nextCraftStatus.failMsg
+                    return {
+                        isComputing = function() return false end,
+                        hasFailed = function()
+                            if fMsg then return true, fMsg end
+                            return false
+                        end,
+                    }
+                end,
+            }
+        end,
+        getCraftables = function(filter)
+            return {
+                {
+                    getItemStack = function() return { name = filter.name, damage = filter.damage or 0 } end,
+                    request = function(amt)
+                        if nextCraftStatus.failErr then return nil, "missing pattern" end
+                        craftCalls[#craftCalls + 1] = { name = filter.name, damage = filter.damage or 0, amount = amt }
+                        local fMsg = nextCraftStatus.failMsg
+                        return {
+                            isComputing = function() return false end,
+                            hasFailed = function()
+                                if fMsg then return true, fMsg end
+                                return false
+                            end,
+                        }
+                    end,
+                }
+            }
+        end,
+    })
+    env.mainnetAddr = "mainnet-1"
+    env.maintFreeCpus = 1
+    env.maintPollSec = 5
+    env.maintRules = {
+        { id = "r_always", type = "item", name = "custom:always_item", damage = 0, label = "Always", target = 500, batch = 250, mode = "always" },
+        { id = "r_auto_dem", type = "item", name = realDemanded.name, damage = realDemanded.damage or 0, label = "Inf Cat", target = 1000, batch = 100, mode = "auto" },
+        { id = "r_auto_idle", type = "item", name = "custom:auto_unused", damage = 0, label = "Auto Idle", target = 500, batch = 100, mode = "auto" },
+        { id = "r_off", type = "item", name = "custom:off_item", damage = 0, label = "Off", target = 500, batch = 100, mode = "off" },
+        { id = "r_busy", type = "item", name = "custom:busy_item", damage = 0, label = "Busy", target = 500, batch = 100, mode = "always" },
+    }
+
+    -- Disabled Maintainer must fire 0 crafts
+    env.maintEnabled = false
+    st24._forceMaintSync = true
+    Scheduler.step(env, st24)
+    assertEq(#craftCalls, 0, "T24 Maintainer OFF issues 0 craft requests")
+
+    -- Enabled: freeCpus = 3 (> reserve 1). Poll 1 dispatches highest deficit (custom:always_item, 100% deficit);
+    -- Poll 2 sees r_always inFlight and dispatches r_auto_dem (99% deficit). auto_idle, off_item, and busy_item stay skipped!
+    env.maintEnabled = true
+    st24._forceMaintSync = true
+    Scheduler.step(env, st24)
+    st24._forceMaintSync = true
+    Scheduler.step(env, st24)
+    local dispatched = {}
+    for _, c in ipairs(craftCalls) do dispatched[c.name] = c.amount end
+    assertEq(dispatched["custom:always_item"], 250, "T24 Maintainer dispatches ALWAYS rule when low")
+    assertEq(dispatched[realDemanded.name], 100, "T24 Maintainer dispatches AUTO rule demanded by enabled recipe")
+    assert(dispatched["custom:auto_unused"] == nil, "T24 Maintainer skips un-demanded AUTO rule")
+    assert(dispatched["custom:off_item"] == nil, "T24 Maintainer skips OFF rule")
+    assert(dispatched["custom:busy_item"] == nil, "T24 Maintainer dedups item already crafting on CPU")
+
+    -- Free CPU headroom guard: if freeCpus <= maintFreeCpus, 0 crafts dispatched
+    craftCalls = {}
+    env.maintRules = {
+        { id = "r_headroom", type = "item", name = "custom:always_item", damage = 0, label = "Always", target = 500, batch = 250, mode = "always" },
+    }
+    cpusMock = {
+        { name = "CPU #1", busy = false, storages = 1048576 },
+        { name = "CPU #2", busy = true, storages = 1048576, cpu = { finalOutput = function() return { name = "other:x", damage = 0, maxSize = 64, label = "Other" } end } },
+    }
+    st24._forceMaintSync = true
+    Scheduler.step(env, st24)
+    assertEq(#craftCalls, 0, "T24 Maintainer freeCpus == reserve blocks dispatch")
+
+    -- Verify 60s failure backoff when request fails
+    env.maintRules = {
+        { id = "r_fail", type = "item", name = "custom:always_item", damage = 0, label = "Always", target = 500, batch = 250, mode = "always" },
+    }
+    cpusMock = {
+        { name = "CPU #1", busy = false, storages = 1048576 },
+        { name = "CPU #2", busy = false, storages = 1048576 },
+    }
+    craftCalls = {}
+    nextCraftStatus.failErr = true
+    st24._forceMaintSync = true
+    Scheduler.step(env, st24) -- fails -> records backoff
+    nextCraftStatus.failErr = false
+    st24._forceMaintSync = true
+    Scheduler.step(env, st24) -- within 60s -> must still be backed off!
+    assertEq(#craftCalls, 0, "T24 Maintainer 60s failure backoff blocks immediate retry")
+
+    -- Test WebBridge:executeRpcTable + Modem chunked DTPF_REPLY
+    local modemSent = {}
+    component._register("modem-1", "modem", {
+        isWireless = function() return true end,
+        setStrength = function() return 400 end,
+        open = function(port) return port == Hardware.MESH_PORT end,
+        send = function(target, port, ...)
+            modemSent[#modemSent + 1] = { target = target, port = port, args = { ... } }
+            return true
+        end,
+        broadcast = function(port, ...)
+            modemSent[#modemSent + 1] = { target = "*", port = port, args = { ... } }
+            return true
+        end,
+    })
+    local gpu24 = component._newMockGPU(160, 50)
+    component.gpu = gpu24
+    local ui24 = UI.new(env, st24, function() end)
+    local wb24 = WebBridge.new(env, st24, ui24, function() end, Scheduler, Hardware)
+    local patchRes = wb24:executeRpcTable({
+        id = "p1",
+        op = "dtpf_patch",
+        patch = {
+            powerAwareAssign = true,
+            maintEnabled = true,
+            maintFreeCpus = 2,
+            maintRule = { name = "custom:added_rule", label = "Added", target = 900, batch = 50, mode = "always" },
+        },
+    })
+    assertEq(patchRes.policy.powerAwareAssign, true, "T24 RPC patch updated powerAwareAssign")
+    assertEq(patchRes.policy.maintFreeCpus, 2, "T24 RPC patch updated maintFreeCpus")
+    assertEq(#env.maintRules, 2, "T24 RPC patch appended maintRule")
+    wb24:executeRpcTable({ id = "p2", op = "dtpf_patch", patch = { maintRule = { index = 2, delete = true } } })
+    assertEq(#env.maintRules, 1, "T24 RPC patch deleted maintRule")
+
+    modemSent = {}
+    local handled = Hardware.handleMeshMessage(wb24, "modem-1", "mainnet-modem", Hardware.MESH_PORT, "DTPF_CMD", "req-42", serialization.serialize({ id = "req-42", op = "dtpf_state" }))
+    assert(handled == true, "T24 handleMeshMessage handled DTPF_CMD")
+    assert(#modemSent >= 2, "T24 chunked DTPF_REPLY split across >= 2 packets for large snapshot")
+    local parts = {}
+    local expectedTotal = modemSent[1].args[4]
+    for idx, pkt in ipairs(modemSent) do
+        assertEq(pkt.port, Hardware.MESH_PORT, "T24 reply sent on MESH_PORT")
+        assertEq(pkt.args[1], "DTPF_REPLY", "T24 reply msgType == DTPF_REPLY")
+        assertEq(pkt.args[2], "req-42", "T24 reply reqId == req-42")
+        assertEq(pkt.args[3], idx, "T24 reply chunk idx monotonic")
+        assertEq(pkt.args[4], expectedTotal, "T24 reply chunk total consistent")
+        assert(#pkt.args[5] <= 5500, "T24 reply chunk <= 5500 bytes")
+        parts[idx] = pkt.args[5]
+    end
+    local decoded = serialization.unserialize(table.concat(parts))
+    assert(type(decoded) == "table", "T24 reassembled DTPF_REPLY unserializes cleanly")
+    assert(decoded.power ~= nil and decoded.maintainer ~= nil, "T24 reassembled snapshot has power and maintainer")
+    assertEq(decoded.policy.powerAwareAssign, true, "T24 reassembled snapshot has policy.powerAwareAssign == true")
+
+    -- UI render + glyph capture on Tabs 1, 2, 4 + Maintainer modal
+    ui24.tab = 1
+    ui24:render()
+    for _, s in ipairs(gpu24._calls) do _G.__RENDERED_GPU_CALLS[#_G.__RENDERED_GPU_CALLS + 1] = s end
+    assert(gpu24._allText():find("[M]Maint", 1, true), "T24 Tab 1 footer renders [M]Maint")
+
+    ui24.tab = 2
+    ui24:render()
+    for _, s in ipairs(gpu24._calls) do _G.__RENDERED_GPU_CALLS[#_G.__RENDERED_GPU_CALLS + 1] = s end
+    assert(gpu24._allText():find("Pwr:", 1, true), "T24 Tab 2 renders Pwr:Smart/Order toggle")
+
+    ui24.tab = 4
+    ui24:render()
+    for _, s in ipairs(gpu24._calls) do _G.__RENDERED_GPU_CALLS[#_G.__RENDERED_GPU_CALLS + 1] = s end
+    assert(gpu24._allText():find("Maint:", 1, true), "T24 Tab 4 renders Maint:ON/OFF toggle")
+
+    ui24.maintModalActive = true
+    ui24:render()
+    for _, s in ipairs(gpu24._calls) do _G.__RENDERED_GPU_CALLS[#_G.__RENDERED_GPU_CALLS + 1] = s end
+    assert(gpu24._allText():find("AE2 LEVEL MAINTAINER:", 1, true), "T24 Maintainer modal renders")
+
+    component.gpu = nil
+    Hardware.resetClusterState()
+    component._reset()
+end
+
 return "OK"
 """
             res = host.exec_lua(test_suite, "test_suite")
@@ -4730,6 +5059,8 @@ return "OK"
                     ui.logModalActive = true
                     ui.logModalTab = 1; ui:render()
                     ui.logModalTab = 2; ui:render()
+                    ui.logModalActive = false
+                    ui.maintModalActive = true; ui:render()
                     rawset(_G, "__mem_hold", { cfg, st, ui, wb })
                     """,
                     "mem_check",
@@ -4740,7 +5071,7 @@ return "OK"
             finally:
                 mem_host.close()
 
-            print(f"ALL 23 OFFLINE TEST SUITES PASSED (0 bad-width glyphs, {live_kb} KB live JNLua heap, Lua 5.3 + OpenOS verified).")
+            print(f"ALL 24 OFFLINE TEST SUITES PASSED (0 bad-width glyphs, {live_kb} KB live JNLua heap, Lua 5.3 + OpenOS verified).")
             print("--- Sample main.lua --check output ---")
             for line in check_out.splitlines():
                 print("  " + line)

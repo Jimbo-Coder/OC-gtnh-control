@@ -82,13 +82,7 @@ local ROLE_MODES = {
     { id = "od_only", label = "OD ONLY", short = "OD" },
 }
 
-local FAMILY_BY_ID = RecipesDB.BY_ID or {}
-if not next(FAMILY_BY_ID) then
-    for i = 1, #RecipesDB.FAMILIES do
-        local f = RecipesDB.FAMILIES[i]
-        FAMILY_BY_ID[f.id] = f
-    end
-end
+local FAMILY_BY_ID = Scheduler.FAMILY_BY_ID
 
 local NO_CONV_PATCH_MSG = "Stock GTNH (no DriverDTPF OC patch): toggle Convergence in DTPF GUI."
 
@@ -465,6 +459,8 @@ function UI.new(cfg, runtimeState, onSaveCallback)
         logModalScroll = 0,
         logModalTab = 1,
         logStageFilter = "ALL",
+        maintModalActive = false,
+        maintModalScroll = 0,
         hitboxes = {},
         running = true,
         configDirty = false,
@@ -1262,17 +1258,28 @@ function UI:drawDTPFSquare(bx, by, bw, bh, slot, d, st, isSelected)
     local innerW = bw - 4
     local unitName = d.name or ("DTPF #" .. slot.index)
 
-    -- Row by (Top Border): Renameable [DTPF #N…] + optional [W] + (x,z) coordinates
+    -- Row by (Top Border): Renameable [DTPF #N…] + optional Hatch rating + [W] + (x,z) coordinates
     local coordStr = (innerW >= 22 and slot.x and slot.z) and string.format("(%d,%d)", slot.x, slot.z) or ""
+    local hatchAmps = st and tonumber(st.hatchAmps)
+    local hatchTier = st and st.hatchTier
+    local hatchShort = ""
+    if innerW >= 30 and hatchAmps and hatchTier and hatchAmps > 0 then
+        local aS = (hatchAmps >= 1000) and (tostring(math.floor(hatchAmps / 1000)) .. "K") or tostring(math.floor(hatchAmps))
+        hatchShort = aS .. "A·" .. tostring(hatchTier)
+    end
     local remoteW = (d.isRemote and bw >= 16) and 4 or 0
     if #coordStr > 0 then
         self:drawText(bx + bw - 2 - unicode.wlen(coordStr), by, coordStr, COLORS.muted, cardBg)
     end
+    if #hatchShort > 0 then
+        local hxPos = bx + bw - 2 - (#coordStr > 0 and (unicode.wlen(coordStr) + 1) or 0) - unicode.wlen(hatchShort)
+        self:drawText(hxPos, by, hatchShort, COLORS.cyan, cardBg)
+    end
     if remoteW > 0 then
-        local wx = bx + bw - 2 - (#coordStr > 0 and (unicode.wlen(coordStr) + 1) or 0) - 3
+        local wx = bx + bw - 2 - (#coordStr > 0 and (unicode.wlen(coordStr) + 1) or 0) - (#hatchShort > 0 and (unicode.wlen(hatchShort) + 1) or 0) - 3
         self:drawText(wx, by, "[W]", COLORS.purple, cardBg)
     end
-    local rightUsed = (#coordStr > 0 and (unicode.wlen(coordStr) + 1) or 0) + remoteW
+    local rightUsed = (#coordStr > 0 and (unicode.wlen(coordStr) + 1) or 0) + (#hatchShort > 0 and (unicode.wlen(hatchShort) + 1) or 0) + remoteW
     local nameBudget = math.max(6, bw - 4 - rightUsed)
     local suffix = (innerW >= 22) and "…" or ""
     local dispName = padOrTrunc(unitName, math.max(3, nameBudget - 2 - unicode.wlen(suffix)))
@@ -1463,7 +1470,7 @@ function UI:drawDTPFSquare(bx, by, bw, bh, slot, d, st, isSelected)
         openRecipeOrPassiveModal(self, slot, d, st, unitName, button)
     end)
 
-    -- Row +4: Clean stock context + rate/ETA line
+    -- Row +4: Clean stock context + rate/ETA + live EU/t draw
     local recSt = jumpFamId and self.state and self.state.recipeStatus and self.state.recipeStatus[jumpFamId]
     local recCfg = jumpFamId and self.cfg.recipes and self.cfg.recipes[jumpFamId]
     local ctxText, ctxCol = "Idle · Queue Standby", COLORS.muted
@@ -1502,13 +1509,13 @@ function UI:drawDTPFSquare(bx, by, bw, bh, slot, d, st, isSelected)
         ctxCol = getStockRatioColor(recSt.ratio or 0, true)
     elseif st and (st.jobMode == "FALLBACK" or curRole == "pinned_loop") and recSt then
         local isFl = recSt.trackedOutput and (recSt.trackedOutput.isFluid or recSt.trackedOutput.type == "fluid")
-        if tw >= 21 and recSt.ratePerMin and math.abs(recSt.ratePerMin) >= 1 then
+        if tw >= 21 and recSt.ratePerMin and math.abs(recSt.ratePerMin) >= 1 and (tonumber(st.directEut) or 0) <= 0 then
             ctxText = string.format("Loop:%s %s%s/m",
                 fmtCompactNum(recSt.currentStock or 0, isFl),
                 (recSt.ratePerMin >= 0) and "+" or "",
                 fmtCompactNum(recSt.ratePerMin, isFl))
         else
-            ctxText = string.format("Loop Stk: %s", fmtCompactNum(recSt.currentStock or 0, isFl))
+            ctxText = string.format("Loop Stk:%s", fmtCompactNum(recSt.currentStock or 0, isFl))
         end
         ctxCol = COLORS.cyan
     elseif curRole == "od_only" and (not st or st.jobMode ~= "ON-DEMAND") then
@@ -1518,10 +1525,23 @@ function UI:drawDTPFSquare(bx, by, bw, bh, slot, d, st, isSelected)
         ctxText = "Sleeping (Targets Met)"
         ctxCol = COLORS.muted
     elseif st and st.jobMode == "ON-DEMAND" then
-        ctxText = "Serving AE2 Auto-Craft"
+        ctxText = "AE2 Auto-Craft"
         ctxCol = COLORS.purple
     end
-    self:drawText(tx, by + 4, padOrTrunc(ctxText, tw), ctxCol, cardBg)
+    local dEut = (st and tonumber(st.directEut)) or 0
+    if d.enabled ~= false and not hasCover and not (st and st.passiveStalled) and dEut > 0 then
+        local eutTxt = (st and st.eutIsEstimate and "~" or "") .. fmtCompactNum(dEut, false) .. "/t"
+        local eutCol = (not convNow and dEut >= 1e12) and COLORS.yellow or (convNow and COLORS.purple or COLORS.fg)
+        local eutW = unicode.wlen(eutTxt)
+        if tw > eutW + 6 then
+            self:drawText(tx, by + 4, padOrTrunc(ctxText, tw - eutW - 1), ctxCol, cardBg)
+            self:drawText(tx + tw - eutW, by + 4, eutTxt, eutCol, cardBg)
+        else
+            self:drawText(tx, by + 4, padOrTrunc(ctxText, tw), ctxCol, cardBg)
+        end
+    else
+        self:drawText(tx, by + 4, padOrTrunc(ctxText, tw), ctxCol, cardBg)
+    end
 
     -- Row +5: Discount (+ Warmup ETA) + Clickable Coil Tier/Heat (or Cover/Disabled Hint)
     if d.enabled == false then
@@ -2154,6 +2174,16 @@ function UI:renderGlobalSettingsCard()
             self.cfg.allowParallelSameRecipe = not self.cfg.allowParallelSameRecipe
             self:save(self.cfg.allowParallelSameRecipe and "Queue Split -> Parallel DTPFs" or "Queue Split -> 1 DTPF per Recipe")
         end)
+    local pwrSmart = (self.cfg.powerAwareAssign ~= false)
+    self:drawButton(147, 7, pwrSmart and "[Pwr:Smart]" or "[Pwr:Order]",
+        pwrSmart and COLORS.cyan or COLORS.muted,
+        pwrSmart and COLORS.btnActiveBg or COLORS.btnBg,
+        function()
+            self.cfg.powerAwareAssign = not pwrSmart
+            self:save(self.cfg.powerAwareAssign
+                and "Power Placement -> Smart (Conv on big hatches, Passive/Loop on small)"
+                or "Power Placement -> Channel Order")
+        end)
 end
 
 function UI:renderPriorityQueueCard()
@@ -2632,10 +2662,17 @@ function UI:renderOverviewKpis(ov)
         and string.format("%d/%d Active · ! %d Issue(s)", ov.nActive, ov.nTotal, ov.nIssues)
         or string.format("%d/%d Active · %s", ov.nActive, ov.nTotal, discTxt)
     self:drawText(44, 7, padOrTrunc(fleetTop, 35), (ov.nIssues > 0 or ov.nOnline < ov.nTotal) and COLORS.yellow or COLORS.fg, COLORS.panelBg)
-    local fleetSub = (ov.nOd > 0)
-        and string.format("Queue:%d · Loop:%d · OD:%d · ⚡4x:%d", ov.nRun, ov.nLoop, ov.nOd, ov.convOn)
-        or string.format("Queue:%d · Loop:%d · ⚡4x:%d/%d", ov.nRun, ov.nLoop, ov.convOn, ov.nOnline)
-    self:drawText(44, 8, padOrTrunc(fleetSub, 35), COLORS.muted, COLORS.panelBg)
+    local pwr = self.state and self.state.powerSummary
+    local pwrTotal = (pwr and tonumber(pwr.totalEut)) or 0
+    local fleetSub
+    if pwrTotal > 0 then
+        fleetSub = string.format("Q:%d·L:%d·4x:%d · ⚡%s/t", ov.nRun, ov.nLoop, ov.convOn, fmtCompactNum(pwrTotal, false))
+    elseif ov.nOd > 0 then
+        fleetSub = string.format("Queue:%d · Loop:%d · OD:%d · ⚡4x:%d", ov.nRun, ov.nLoop, ov.nOd, ov.convOn)
+    else
+        fleetSub = string.format("Queue:%d · Loop:%d · ⚡4x:%d/%d", ov.nRun, ov.nLoop, ov.convOn, ov.nOnline)
+    end
+    self:drawText(44, 8, padOrTrunc(fleetSub, 35), (pwrTotal >= 2e12) and COLORS.yellow or COLORS.muted, COLORS.panelBg)
 
     -- Card 3: Stock Targets (x = 82..120, w = 39) -> click opens Recipes tab
     local qBorder = (ov.nEnabled == 0 or ov.nBlockedRec > 0) and COLORS.yellow or COLORS.accent
@@ -3985,7 +4022,7 @@ function UI:renderWiringReservesCard()
         end)
 
     self:drawText(46, 15, "NC:", COLORS.muted, COLORS.panelBg)
-    self:drawButton(50, 15,
+    local nx = self:drawButton(50, 15,
         self.cfg.uniformNcSubnet and "[Aux Subnet]" or "[Main Net  ]",
         self.cfg.uniformNcSubnet and COLORS.cyan or COLORS.yellow,
         COLORS.btnBg,
@@ -3993,6 +4030,14 @@ function UI:renderWiringReservesCard()
             self.cfg.uniformNcSubnet = not self.cfg.uniformNcSubnet
             for c = 1, #self.cfg.channels do self.cfg.channels[c].activeKey = nil end
             self:save("Non-Consumed Items -> " .. (self.cfg.uniformNcSubnet and "Uniform Aux Subnet" or "Main Net"))
+        end) + 2
+    local maintEn = (self.cfg.maintEnabled == true)
+    self:drawButton(nx, 15, maintEn and "[Maint:ON…]" or "[Maint:OFF…]",
+        maintEn and COLORS.green or COLORS.muted,
+        maintEn and COLORS.darkGreen or COLORS.btnBg,
+        function()
+            self.maintModalActive = true
+            self.maintModalScroll = 0
         end)
 end
 
@@ -5287,6 +5332,153 @@ function UI:renderLogRawSnapshotPane(mx, my, mw, mh)
     return #lines, maxRows, maxScroll
 end
 
+function UI:renderMaintModal()
+    if not self.maintModalActive then return end
+    self.hitboxes = {}
+
+    local mx, my, mw, mh = 6, 4, 148, 43
+    self:drawFrame(mx, my, mw, mh, COLORS.accent, COLORS.headerBg, "double")
+    self:fillRect(mx + 1, my + 1, mw - 2, mh - 2, " ", COLORS.headerBg)
+
+    local mSt = (self.state and self.state.maintStatus) or {}
+    local mEn = (self.cfg.maintEnabled == true)
+    self:drawText(mx + 2, my + 1, "AE2 LEVEL MAINTAINER:", COLORS.cyan, COLORS.headerBg)
+    local bx = self:drawButton(mx + 24, my + 1, mEn and "[● ON ]" or "[○ OFF]",
+        mEn and COLORS.green or COLORS.muted, mEn and COLORS.darkGreen or COLORS.btnBg, function()
+            self.cfg.maintEnabled = not mEn
+            self:save("In-Game Maintainer -> " .. (self.cfg.maintEnabled and "ON" or "OFF"))
+        end) + 2
+
+    local lk = mSt.link or "none"
+    local lkTxt = (lk == "adapter") and "✓ Mainnet Adapter"
+        or ((lk == "modem" or lk == "tunnel") and "✓ In-Game Modem"
+        or "! Unwired (Adapter/Modem)")
+    local lkCol = (lk ~= "none") and COLORS.green or COLORS.yellow
+    self:drawText(bx, my + 1, lkTxt, lkCol, COLORS.headerBg)
+    bx = bx + unicode.wlen(lkTxt) + 2
+
+    local freeRes = tonumber(self.cfg.maintFreeCpus) or 2
+    bx = self:drawButton(bx, my + 1, string.format("[Keep Free:%d CPUs]", freeRes), COLORS.fg, COLORS.btnBg, function(step)
+        self.cfg.maintFreeCpus = (freeRes + (step or 1) + 5) % 5
+        self:save("Maintainer Keep Free CPUs -> " .. tostring(self.cfg.maintFreeCpus))
+    end) + 1
+
+    self:drawButton(bx, my + 1, "[↻ Sync]", COLORS.cyan, COLORS.btnBg, function()
+        if self.state then self.state._forceMaintSync = true end
+        Scheduler.step(self.cfg, self.state, { cachedOnly = true, forceMaintSync = true })
+        self:setStatus("Synced Maintainer with Mainnet AE2.")
+    end)
+
+    self:drawButton(mx + mw - 13, my + 1, "[ X CLOSE ]", COLORS.red, COLORS.darkRed, function()
+        self.maintModalActive = false
+    end)
+
+    local sub = string.format("Active: %d · Low: %d · Crafting: %d · Free CPUs: %d/%d (> %d reserve) | Auto runs only when needed by enabled/pinned/fallback recipes",
+        mSt.activeCount or 0, mSt.lowCount or 0, mSt.craftingCount or 0, mSt.freeCpus or 0, mSt.totalCpus or 0, freeRes)
+    self:drawText(mx + 2, my + 2, padOrTrunc(sub, mw - 4), COLORS.muted, COLORS.headerBg)
+
+    local hdrY = my + 4
+    self:fillRect(mx + 1, hdrY, mw - 2, 1, " ", COLORS.panelBg)
+    self:drawText(mx + 2, hdrY, "MODE", COLORS.muted, COLORS.panelBg)
+    self:drawText(mx + 10, hdrY, "ITEM / FLUID", COLORS.muted, COLORS.panelBg)
+    self:drawText(mx + 52, hdrY, "STOCK", COLORS.muted, COLORS.panelBg)
+    self:drawText(mx + 65, hdrY, "TARGET", COLORS.muted, COLORS.panelBg)
+    self:drawText(mx + 81, hdrY, "BATCH", COLORS.muted, COLORS.panelBg)
+    self:drawText(mx + 97, hdrY, "DEMAND", COLORS.muted, COLORS.panelBg)
+    self:drawText(mx + 109, hdrY, "STATUS", COLORS.muted, COLORS.panelBg)
+
+    local rules = self.cfg.maintRules or {}
+    local rMap = {}
+    for k = 1, #(mSt.rules or {}) do
+        local sr = mSt.rules[k]
+        if sr and sr.id then rMap[sr.id] = sr end
+    end
+
+    local maxRows = mh - 7
+    local maxScroll = math.max(0, #rules - maxRows)
+    self.maintModalScroll = math.max(0, math.min(maxScroll, self.maintModalScroll or 0))
+    for row = 1, maxRows do
+        local y = hdrY + row
+        local rBg = (row % 2 == 0) and COLORS.rowAltBg or COLORS.panelBg
+        self:fillRect(mx + 1, y, mw - 2, 1, " ", rBg)
+        local rule = rules[row + self.maintModalScroll]
+        if rule then
+            local sr = rMap[rule.id] or {}
+            local isFl = (rule.type == "fluid")
+            local mMode = rule.mode or "auto"
+            local mLbl = (mMode == "always" and "[Alw ]") or (mMode == "off" and "[Off ]") or "[Auto]"
+            local mCol = (mMode == "always" and COLORS.green) or (mMode == "off" and COLORS.muted) or COLORS.cyan
+            self:drawText(mx + 2, y, mLbl, mCol, COLORS.btnBg)
+
+            self:drawText(mx + 10, y, padOrTrunc(rule.label, 40), (mMode == "off") and COLORS.muted or COLORS.fg, rBg)
+            local stkStr = sr.stockKnown and UI.formatNumber(sr.stock or 0, isFl) or "?"
+            self:drawText(mx + 52, y, padOrTrunc(stkStr, 11),
+                (sr.stockKnown and (sr.stock or 0) < (rule.target or 1) and sr.demanded) and COLORS.yellow or COLORS.muted, rBg)
+
+            self:drawText(mx + 65, y, "[" .. padOrTrunc(UI.formatNumber(rule.target or 1, isFl), 11):gsub("%s+$", "") .. "]",
+                COLORS.cyan, COLORS.btnBg)
+            self:drawText(mx + 81, y, "[" .. padOrTrunc(UI.formatNumber(rule.batch or 1, isFl), 11):gsub("%s+$", "") .. "]",
+                COLORS.fg, COLORS.btnBg)
+
+            local demTxt = (mMode == "always" and "Always") or (sr.demanded and "✓ Active" or "· Idle")
+            local demCol = (mMode == "always" or sr.demanded) and COLORS.green or COLORS.muted
+            self:drawText(mx + 97, y, padOrTrunc(demTxt, 10), demCol, rBg)
+
+            local sStr = tostring(sr.stateStr or (mMode == "off" and "Off" or "Idle"))
+            local sCol = COLORS.muted
+            if sStr == "OK" then sCol = COLORS.green
+            elseif sStr:find("Crafting", 1, true) or sStr:find("Starting", 1, true) or sStr:find("Dispatch", 1, true) then sCol = COLORS.cyan
+            elseif sStr:find("Wait", 1, true) or sStr:find("No ", 1, true) or sStr:find("CPU", 1, true) then sCol = COLORS.yellow
+            end
+            self:drawText(mx + 109, y, padOrTrunc(sStr, (mx + mw - 2) - (mx + 109)), sCol, rBg)
+        end
+    end
+    self.hitboxes[#self.hitboxes + 1] = {
+        x1 = mx + 2,
+        y1 = hdrY + 1,
+        x2 = mx + 94,
+        y2 = hdrY + maxRows,
+        fn = function(_, _, tx, ty)
+            local rule = rules[(ty - hdrY) + (self.maintModalScroll or 0)]
+            if not rule then return end
+            local isFl = (rule.type == "fluid")
+            if tx <= mx + 8 then
+                local mMode = rule.mode or "auto"
+                rule.mode = (mMode == "auto" and "always") or (mMode == "always" and "off") or "auto"
+                self:save(rule.label .. " maintainer -> " .. rule.mode)
+            elseif tx >= mx + 65 and tx <= mx + 79 then
+                self:openNumberPrompt("Target Stock for " .. rule.label .. ":", UI.formatNumber(rule.target or 1, false), function(val)
+                    local p = UI.parseNumber(val)
+                    if p and p > 0 then
+                        rule.target = p
+                        self:save(rule.label .. " target -> " .. UI.formatNumber(p, isFl))
+                    end
+                end)
+            elseif tx >= mx + 81 and tx <= mx + 94 then
+                self:openNumberPrompt("Batch Size for " .. rule.label .. ":", UI.formatNumber(rule.batch or 1, false), function(val)
+                    local p = UI.parseNumber(val)
+                    if p and p > 0 then
+                        rule.batch = p
+                        self:save(rule.label .. " batch -> " .. UI.formatNumber(p, isFl))
+                    end
+                end)
+            end
+        end,
+    }
+
+    local footY = my + mh - 2
+    self:drawButton(mx + 2, footY, "[▲ PgUp]", COLORS.fg, COLORS.btnBg, function()
+        self.maintModalScroll = math.max(0, (self.maintModalScroll or 0) - 8)
+    end)
+    self:drawButton(mx + 12, footY, "[▼ PgDn]", COLORS.fg, COLORS.btnBg, function()
+        self.maintModalScroll = math.min(maxScroll, (self.maintModalScroll or 0) + 8)
+    end)
+    local shownFrom = (#rules > 0) and (self.maintModalScroll + 1) or 0
+    local shownTo = math.min(#rules, self.maintModalScroll + maxRows)
+    self:drawText(mx + 23, footY, string.format("Showing %d-%d of %d rules | [Up/Dn]Scroll [M/Esc]Close", shownFrom, shownTo, #rules),
+        COLORS.muted, COLORS.headerBg)
+end
+
 function UI:renderLogModal()
     if not self.logModalActive then return end
     self.hitboxes = {}
@@ -5371,7 +5563,7 @@ function UI:renderFooter()
     self:drawText(sigX + 4, self.h, sigBy, COLORS.muted, COLORS.headerBg)
     self:drawText(sigX + 7, self.h, author, COLORS.accent, COLORS.headerBg)
 
-    local keysHint = "[1-4]Tab [[/]]DTPF [P]Pin [L]Log [A]Anim [R]Scan [Q]Quit"
+    local keysHint = "[1-4]Tab [[/]]DTPF [P]Pin [M]Maint [L]Log [A]Anim [R]Scan [Q]Quit"
     local keysX = sigX - unicode.wlen(keysHint) - 1
     self:drawText(keysX, self.h, keysHint, COLORS.muted, COLORS.headerBg)
 
@@ -5475,9 +5667,10 @@ function UI:render()
         self:renderWiringTab()
     end
     self:renderFooter()
-    self:renderPromptModal()
     self:renderPassiveModal()
+    self:renderMaintModal()
     self:renderLogModal()
+    self:renderPromptModal()
     self:flushFramebuffer()
 end
 
@@ -5486,7 +5679,7 @@ function UI:handleTouch(x, y, button)
     for i = #self.hitboxes, 1, -1 do
         local hb = self.hitboxes[i]
         if x >= hb.x1 and x <= hb.x2 and y >= hb.y1 and y <= hb.y2 then
-            hb.fn(step, button)
+            hb.fn(step, button, x, y)
             return
         end
     end
@@ -5494,6 +5687,45 @@ end
 
 function UI:handleScroll(dir, x, y)
     if self.promptActive then return end
+    if self.maintModalActive then
+        self.maintModalScroll = math.max(0, (self.maintModalScroll or 0) - (dir * 3))
+        return
+    end
+    if self.promptActive then
+        if code == 28 or char == 13 then -- Enter
+            local cb = self.promptCallback
+            local val = self.promptBuffer
+            self.promptActive = false
+            self.promptIsNumeric = false
+            self.promptCallback = nil
+            if cb then cb(val) end
+        elseif code == 1 then -- Escape
+            self.promptActive = false
+            self.promptIsNumeric = false
+            self.promptCallback = nil
+        elseif code == 14 or char == 8 then -- Backspace
+            if #self.promptBuffer > 0 then
+                self.promptBuffer = self.promptBuffer:sub(1, -2)
+            end
+        elseif char >= 32 and char <= 126 then
+            self.promptBuffer = self.promptBuffer .. string.char(char)
+        end
+        return
+    end
+    if self.maintModalActive then
+        if code == 1 or char == string.byte("m") or char == string.byte("M") then
+            self.maintModalActive = false
+        elseif code == 200 then
+            self.maintModalScroll = math.max(0, (self.maintModalScroll or 0) - 1)
+        elseif code == 208 then
+            self.maintModalScroll = (self.maintModalScroll or 0) + 1
+        elseif code == 201 then
+            self.maintModalScroll = math.max(0, (self.maintModalScroll or 0) - 8)
+        elseif code == 209 then
+            self.maintModalScroll = (self.maintModalScroll or 0) + 8
+        end
+        return
+    end
     if self.logModalActive then
         self.logModalScroll = math.max(0, (self.logModalScroll or 0) - (dir * 3))
         return
@@ -5526,6 +5758,41 @@ function UI:handleScroll(dir, x, y)
 end
 
 function UI:handleKeyDown(char, code)
+    if self.promptActive then
+        if code == 28 or char == 13 then -- Enter
+            local cb = self.promptCallback
+            local val = self.promptBuffer
+            self.promptActive = false
+            self.promptIsNumeric = false
+            self.promptCallback = nil
+            if cb then cb(val) end
+        elseif code == 1 then -- Escape
+            self.promptActive = false
+            self.promptIsNumeric = false
+            self.promptCallback = nil
+        elseif code == 14 or char == 8 then -- Backspace
+            if #self.promptBuffer > 0 then
+                self.promptBuffer = self.promptBuffer:sub(1, -2)
+            end
+        elseif char >= 32 and char <= 126 then
+            self.promptBuffer = self.promptBuffer .. string.char(char)
+        end
+        return
+    end
+    if self.maintModalActive then
+        if code == 1 or char == string.byte("m") or char == string.byte("M") then
+            self.maintModalActive = false
+        elseif code == 200 then
+            self.maintModalScroll = math.max(0, (self.maintModalScroll or 0) - 1)
+        elseif code == 208 then
+            self.maintModalScroll = (self.maintModalScroll or 0) + 1
+        elseif code == 201 then
+            self.maintModalScroll = math.max(0, (self.maintModalScroll or 0) - 8)
+        elseif code == 209 then
+            self.maintModalScroll = (self.maintModalScroll or 0) + 8
+        end
+        return
+    end
     if self.logModalActive then
         if code == 1 or char == string.byte("l") or char == string.byte("L") then
             self.logModalActive = false
@@ -5569,27 +5836,7 @@ function UI:handleKeyDown(char, code)
         end
         return
     end
-    if self.promptActive then
-        if code == 28 or char == 13 then -- Enter
-            local cb = self.promptCallback
-            local val = self.promptBuffer
-            self.promptActive = false
-            self.promptIsNumeric = false
-            self.promptCallback = nil
-            if cb then cb(val) end
-        elseif code == 1 then -- Escape
-            self.promptActive = false
-            self.promptIsNumeric = false
-            self.promptCallback = nil
-        elseif code == 14 or char == 8 then -- Backspace
-            if #self.promptBuffer > 0 then
-                self.promptBuffer = self.promptBuffer:sub(1, -2)
-            end
-        elseif char >= 32 and char <= 126 then
-            self.promptBuffer = self.promptBuffer .. string.char(char)
-        end
-        return
-    end
+    -- Top-level hotkeys below handle remaining non-modal navigation.
 
     if code == 15 or char == 9 then -- Tab
         self.tab = (self.tab % 4) + 1
@@ -5608,6 +5855,10 @@ function UI:handleKeyDown(char, code)
         if #self.cfg.dtpfs > 0 then
             self:openPassiveModal(self.selectedDtpf)
         end
+        return
+    elseif char == string.byte("m") or char == string.byte("M") then
+        self.maintModalActive = true
+        self.maintModalScroll = 0
         return
     elseif char == string.byte("l") or char == string.byte("L") then
         self.logModalActive = true
