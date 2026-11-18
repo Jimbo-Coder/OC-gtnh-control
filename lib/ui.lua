@@ -461,6 +461,7 @@ function UI.new(cfg, runtimeState, onSaveCallback)
         logStageFilter = "ALL",
         maintModalActive = false,
         maintModalScroll = 0,
+        maintFilterActive = true,
         hitboxes = {},
         running = true,
         configDirty = false,
@@ -3666,8 +3667,8 @@ function UI:renderRecipeInspectorPane(fam, pinnedByFam, rankById)
     end
     curY = curY + 1
 
-    -- Ingredients vs Live AE2 Stock Preview
-    self:drawText(87, curY, "── ◈ AE2 INPUTS & OUTPUTS " .. string.rep("─", 44), COLORS.border, COLORS.panelBg)
+    -- Ingredients vs Live AE2 Stock Preview (+ Click-to-Maintain tags)
+    self:drawText(87, curY, "── ◈ INPUTS (Click: Maint · RClick: Tgt) " .. string.rep("─", 31), COLORS.border, COLORS.panelBg)
     local stock = (self.state and self.state.stock) or { fluids = {}, items = {} }
     local stockFluids = stock.fluids or {}
     local stockItems = stock.items or {}
@@ -3691,6 +3692,7 @@ function UI:renderRecipeInspectorPane(fam, pinnedByFam, rankById)
                 cOk and "✓" or "✗", UI.formatNumber(cNeed, true), tostring(tCode),
                 UI.formatNumber(cHave, true), fmtCompactNum(cFloor, true)),
             col = cOk and COLORS.green or COLORS.yellow,
+            maintSpec = { type = "fluid", name = cFluid, damage = 0, label = tostring(tCode), amount = cNeed },
         }
     elseif (not usesCat) and convWanted then
         local cCode = (meta and meta.convCatCode) or CATALYST_SHORT[tIdx or 4] or "DTEC"
@@ -3703,6 +3705,7 @@ function UI:renderRecipeInspectorPane(fam, pinnedByFam, rankById)
                 and string.format("  ⚡ Conv %s (~%s | AE2: %s)", cCode, UI.formatNumber(meta and meta.convCatAmount or 0, true), UI.formatNumber(cHave, true))
                 or string.format("  ! Conv catalyst %s below floor -> runs safely at 2x", cCode),
             col = cSat and COLORS.purple or COLORS.yellow,
+            maintSpec = { type = "fluid", name = cFluid, damage = 0, label = cCode, amount = (meta and meta.convCatAmount) or 1000 },
         }
     end
 
@@ -3724,10 +3727,12 @@ function UI:renderRecipeInspectorPane(fam, pinnedByFam, rankById)
         else
             minCrafts = math.min(minCrafts, math.floor(have / need))
             local ok = (have >= need)
+            local canMaint = (f.name and f.name ~= "dimensionallytranscendentresidue")
             ingLines[#ingLines + 1] = {
                 txt = string.format("  %s %s x %s (AE2: %s)",
                     ok and "✓" or "✗", UI.formatNumber(need, true), tostring(f.label or f.name), UI.formatNumber(have, true)),
                 col = ok and COLORS.green or COLORS.red,
+                maintSpec = canMaint and { type = "fluid", name = f.name, damage = 0, label = tostring(f.label or f.name), amount = need } or nil,
             }
         end
     end
@@ -3750,6 +3755,7 @@ function UI:renderRecipeInspectorPane(fam, pinnedByFam, rankById)
                 txt = string.format("  %s %dx %s (AE2: %s)",
                     ok and "✓" or "✗", need, tostring(it.label or it.name), UI.formatNumber(have, false)),
                 col = ok and COLORS.green or COLORS.red,
+                maintSpec = (not isNC) and { type = "item", name = it.name, damage = it.damage or 0, label = tostring(it.label or it.name), amount = need } or nil,
             }
         end
     end
@@ -3769,8 +3775,73 @@ function UI:renderRecipeInspectorPane(fam, pinnedByFam, rankById)
     else
         addIngLine("INPUTS vs AE2 STOCK (✗ 0 crafts - missing/floor-limited below):", COLORS.yellow)
     end
+    local firstIngY = iy
+    local lastIngY = firstIngY - 1
     for i = 1, #ingLines do
-        addIngLine(ingLines[i].txt, ingLines[i].col)
+        if iy <= 47 then
+            local ent = ingLines[i]
+            local spec = ent.maintSpec
+            if spec then
+                self:drawText(87, iy, padOrTrunc(ent.txt, 59), ent.col or COLORS.fg, COLORS.panelBg)
+                local rule = Scheduler.findMaintRule(self.cfg, spec.type, spec.name, spec.damage)
+                local tagTxt, tagCol = "[  +Maint  ]", COLORS.muted
+                if rule and rule.mode == "auto" then
+                    tagTxt = padOrTrunc("[↻" .. fmtCompactNum(rule.target or 1, spec.type == "fluid"), 11) .. "]"
+                    tagCol = COLORS.cyan
+                elseif rule and rule.mode == "always" then
+                    tagTxt = padOrTrunc("[●" .. fmtCompactNum(rule.target or 1, spec.type == "fluid"), 11) .. "]"
+                    tagCol = COLORS.green
+                end
+                self:drawText(147, iy, tagTxt, tagCol, COLORS.btnBg)
+            else
+                self:drawText(87, iy, padOrTrunc(ent.txt, 72), ent.col or COLORS.fg, COLORS.panelBg)
+            end
+            lastIngY = iy
+            iy = iy + 1
+        end
+    end
+    if lastIngY >= firstIngY then
+        self.hitboxes[#self.hitboxes + 1] = {
+            x1 = 87,
+            y1 = firstIngY,
+            x2 = 158,
+            y2 = lastIngY,
+            fn = function(_, btn, _, ty)
+                local ent = ingLines[(ty - firstIngY) + 1]
+                local spec = ent and ent.maintSpec
+                if not spec then return end
+                local isFl = (spec.type == "fluid")
+                if btn == 1 then
+                    local rule = Scheduler.findMaintRule(self.cfg, spec.type, spec.name, spec.damage)
+                    if not rule or rule.mode == "off" then
+                        rule = Scheduler.upsertMaintInput(self.cfg, spec)
+                    end
+                    self:openNumberPrompt("Maintain Target for " .. rule.label .. ":", UI.formatNumber(rule.target or 1, false), function(val)
+                        local p = UI.parseNumber(val)
+                        if p and p > 0 then
+                            local oldDefBat = math.max(1, math.floor((rule.target or 1) / 2))
+                            rule.target = p
+                            if not rule.batch or rule.batch > p or rule.batch == oldDefBat then
+                                rule.batch = math.max(1, math.floor(p / 2))
+                            end
+                            self:save(rule.label .. " maintain target -> " .. UI.formatNumber(p, isFl))
+                        end
+                    end)
+                else
+                    local rule = Scheduler.findMaintRule(self.cfg, spec.type, spec.name, spec.damage)
+                    if not rule or rule.mode == "off" then
+                        rule = Scheduler.upsertMaintInput(self.cfg, spec)
+                        self:save("Maintainer + " .. tostring(rule.label) .. " (Auto)")
+                    elseif rule.mode == "auto" then
+                        rule.mode = "always"
+                        self:save(rule.label .. " maintainer -> always")
+                    else
+                        rule.mode = "off"
+                        self:save(rule.label .. " maintainer -> off")
+                    end
+                end
+            end,
+        }
     end
     if #ingLines == 0 then
         addIngLine("  (none)", COLORS.muted)
@@ -5363,6 +5434,13 @@ function UI:renderMaintModal()
         self:save("Maintainer Keep Free CPUs -> " .. tostring(self.cfg.maintFreeCpus))
     end) + 1
 
+    local filtAct = (self.maintFilterActive ~= false)
+    bx = self:drawButton(bx, my + 1, filtAct and "[Show:Active]" or "[Show:All   ]",
+        filtAct and COLORS.cyan or COLORS.fg, COLORS.btnBg, function()
+            self.maintFilterActive = not filtAct
+            self.maintModalScroll = 0
+        end) + 1
+
     self:drawButton(bx, my + 1, "[↻ Sync]", COLORS.cyan, COLORS.btnBg, function()
         if self.state then self.state._forceMaintSync = true end
         Scheduler.step(self.cfg, self.state, { cachedOnly = true, forceMaintSync = true })
@@ -5373,7 +5451,7 @@ function UI:renderMaintModal()
         self.maintModalActive = false
     end)
 
-    local sub = string.format("Active: %d · Low: %d · Crafting: %d · Free CPUs: %d/%d (> %d reserve) | Auto runs only when needed by enabled/pinned/fallback recipes",
+    local sub = string.format("Active: %d · Low: %d · Crafting: %d · Free CPUs: %d/%d (> %d reserve) | Tip: Click recipe inputs on Tab 3 to toggle maintenance",
         mSt.activeCount or 0, mSt.lowCount or 0, mSt.craftingCount or 0, mSt.freeCpus or 0, mSt.totalCpus or 0, freeRes)
     self:drawText(mx + 2, my + 2, padOrTrunc(sub, mw - 4), COLORS.muted, COLORS.headerBg)
 
@@ -5394,16 +5472,29 @@ function UI:renderMaintModal()
         if sr and sr.id then rMap[sr.id] = sr end
     end
 
+    local visRules = {}
+    for i = 1, #rules do
+        local r = rules[i]
+        if r then
+            local sr = rMap[r.id] or {}
+            local isAct = (r.mode == "always") or (sr.demanded == true)
+                or (sr.stockKnown and (sr.stock or 0) < (r.target or 1) and r.mode ~= "off")
+            if (not filtAct) or isAct then
+                visRules[#visRules + 1] = { rule = r, realIdx = i, sr = sr }
+            end
+        end
+    end
+
     local maxRows = mh - 7
-    local maxScroll = math.max(0, #rules - maxRows)
+    local maxScroll = math.max(0, #visRules - maxRows)
     self.maintModalScroll = math.max(0, math.min(maxScroll, self.maintModalScroll or 0))
     for row = 1, maxRows do
         local y = hdrY + row
         local rBg = (row % 2 == 0) and COLORS.rowAltBg or COLORS.panelBg
         self:fillRect(mx + 1, y, mw - 2, 1, " ", rBg)
-        local rule = rules[row + self.maintModalScroll]
-        if rule then
-            local sr = rMap[rule.id] or {}
+        local ent = visRules[row + self.maintModalScroll]
+        if ent then
+            local rule, sr = ent.rule, ent.sr
             local isFl = (rule.type == "fluid")
             local mMode = rule.mode or "auto"
             local mLbl = (mMode == "always" and "[Alw ]") or (mMode == "off" and "[Off ]") or "[Auto]"
@@ -5430,19 +5521,26 @@ function UI:renderMaintModal()
             elseif sStr:find("Crafting", 1, true) or sStr:find("Starting", 1, true) or sStr:find("Dispatch", 1, true) then sCol = COLORS.cyan
             elseif sStr:find("Wait", 1, true) or sStr:find("No ", 1, true) or sStr:find("CPU", 1, true) then sCol = COLORS.yellow
             end
-            self:drawText(mx + 109, y, padOrTrunc(sStr, (mx + mw - 2) - (mx + 109)), sCol, rBg)
+            self:drawText(mx + 109, y, padOrTrunc(sStr, (mx + mw - 6) - (mx + 109)), sCol, rBg)
+            self:drawText(mx + mw - 5, y, "[x]", COLORS.red, COLORS.btnBg)
+        elseif row == 1 and #visRules == 0 then
+            self:drawText(mx + 10, y, "No active rules. Click [Show:All   ], [+ Selected Recipe], or inputs on Tab 3.", COLORS.muted, rBg)
         end
     end
     self.hitboxes[#self.hitboxes + 1] = {
         x1 = mx + 2,
         y1 = hdrY + 1,
-        x2 = mx + 94,
+        x2 = mx + mw - 3,
         y2 = hdrY + maxRows,
         fn = function(_, _, tx, ty)
-            local rule = rules[(ty - hdrY) + (self.maintModalScroll or 0)]
-            if not rule then return end
+            local ent = visRules[(ty - hdrY) + (self.maintModalScroll or 0)]
+            if not ent then return end
+            local rule = ent.rule
             local isFl = (rule.type == "fluid")
-            if tx <= mx + 8 then
+            if tx >= mx + mw - 6 then
+                table.remove(self.cfg.maintRules, ent.realIdx)
+                self:save("Removed Maintainer rule: " .. tostring(rule.label or rule.name))
+            elseif tx <= mx + 8 then
                 local mMode = rule.mode or "auto"
                 rule.mode = (mMode == "auto" and "always") or (mMode == "always" and "off") or "auto"
                 self:save(rule.label .. " maintainer -> " .. rule.mode)
@@ -5473,9 +5571,16 @@ function UI:renderMaintModal()
     self:drawButton(mx + 12, footY, "[▼ PgDn]", COLORS.fg, COLORS.btnBg, function()
         self.maintModalScroll = math.min(maxScroll, (self.maintModalScroll or 0) + 8)
     end)
-    local shownFrom = (#rules > 0) and (self.maintModalScroll + 1) or 0
-    local shownTo = math.min(#rules, self.maintModalScroll + maxRows)
-    self:drawText(mx + 23, footY, string.format("Showing %d-%d of %d rules | [Up/Dn]Scroll [M/Esc]Close", shownFrom, shownTo, #rules),
+    self:drawButton(mx + 22, footY, "[+ Selected Recipe]", COLORS.green, COLORS.btnBg, function()
+        local inps = Scheduler.collectRecipeMaintInputs(self.cfg, self.selectedFamilyId)
+        for i = 1, #inps do
+            Scheduler.upsertMaintInput(self.cfg, inps[i])
+        end
+        self:save(string.format("Maintained %d inputs for %s", #inps, tostring(self.selectedFamilyId)))
+    end)
+    local shownFrom = (#visRules > 0) and (self.maintModalScroll + 1) or 0
+    local shownTo = math.min(#visRules, self.maintModalScroll + maxRows)
+    self:drawText(mx + 42, footY, string.format("Showing %d-%d of %d (%d total) | [Up/Dn]Scroll [M/Esc]Close", shownFrom, shownTo, #visRules, #rules),
         COLORS.muted, COLORS.headerBg)
 end
 

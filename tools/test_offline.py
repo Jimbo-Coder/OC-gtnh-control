@@ -4952,6 +4952,39 @@ do
     wb24:executeRpcTable({ id = "p2", op = "dtpf_patch", patch = { maintRule = { index = 2, delete = true } } })
     assertEq(#env.maintRules, 1, "T24 RPC patch deleted maintRule")
 
+    -- Test Scheduler.collectRecipeMaintInputs + maintRulesBatch + type+name+damage dedup + smart default target/batch
+    local rtInps = Scheduler.collectRecipeMaintInputs(env, "raw_tesseract")
+    assert(#rtInps >= 2, "T24 collectRecipeMaintInputs returns catalyst + consumed inputs for raw_tesseract")
+    for _, x in ipairs(rtInps) do
+        assert(x.name ~= "dimensionallytranscendentresidue", "T24 collectRecipeMaintInputs excludes DTR")
+    end
+    local countBeforeDedup = #env.maintRules
+    wb24:executeRpcTable({
+        id = "p3",
+        op = "dtpf_patch",
+        patch = { maintRule = { type = "item", name = "custom:dedup", damage = 1, label = "Dedup", amount = 64 } },
+    })
+    assertEq(#env.maintRules, countBeforeDedup + 1, "T24 maintRule creates with default target/batch")
+    assert(env.maintRules[#env.maintRules].target >= 1000 and env.maintRules[#env.maintRules].batch >= 64, "T24 smart default target/batch populated")
+    wb24:executeRpcTable({
+        id = "p4",
+        op = "dtpf_patch",
+        patch = { maintRule = { type = "item", name = "custom:dedup", damage = 1, target = 4096, mode = "always" } },
+    })
+    assertEq(#env.maintRules, countBeforeDedup + 1, "T24 type+name+damage deduplicates instead of appending duplicate rule")
+    assertEq(env.maintRules[#env.maintRules].target, 4096, "T24 deduped rule updated target")
+    wb24:executeRpcTable({
+        id = "p5",
+        op = "dtpf_patch",
+        patch = {
+            maintRulesBatch = {
+                { type = rtInps[1].type, name = rtInps[1].name, damage = rtInps[1].damage, label = rtInps[1].label, amount = rtInps[1].amount },
+                { type = rtInps[2].type, name = rtInps[2].name, damage = rtInps[2].damage, label = rtInps[2].label, amount = rtInps[2].amount },
+            },
+        },
+    })
+    assert(Scheduler.findMaintRule(env, rtInps[2].type, rtInps[2].name, rtInps[2].damage) ~= nil, "T24 maintRulesBatch added recipe inputs")
+
     modemSent = {}
     local handled = Hardware.handleMeshMessage(wb24, "modem-1", "mainnet-modem", Hardware.MESH_PORT, "DTPF_CMD", "req-42", serialization.serialize({ id = "req-42", op = "dtpf_state" }))
     assert(handled == true, "T24 handleMeshMessage handled DTPF_CMD")
@@ -4983,15 +5016,48 @@ do
     for _, s in ipairs(gpu24._calls) do _G.__RENDERED_GPU_CALLS[#_G.__RENDERED_GPU_CALLS + 1] = s end
     assert(gpu24._allText():find("Pwr:", 1, true), "T24 Tab 2 renders Pwr:Smart/Order toggle")
 
+    ui24.tab = 3
+    ui24.selectedFamilyId = "raw_tesseract"
+    env.maintRules = {}
+    ui24:render()
+    for _, s in ipairs(gpu24._calls) do _G.__RENDERED_GPU_CALLS[#_G.__RENDERED_GPU_CALLS + 1] = s end
+    local clickedMaintY = nil
+    for ry = 1, 49 do
+        if gpu24._rowText(ry):find("[  +Maint  ]", 1, true) then
+            clickedMaintY = ry
+            break
+        end
+    end
+    assert(clickedMaintY ~= nil, "T24 Tab 3 renders [+Maint] tags on recipe inputs")
+    ui24:handleTouch(150, clickedMaintY, 0)
+    ui24:render()
+    for _, s in ipairs(gpu24._calls) do _G.__RENDERED_GPU_CALLS[#_G.__RENDERED_GPU_CALLS + 1] = s end
+    assertEq(#env.maintRules, 1, "T24 clicking Tab 3 input row creates Maintainer rule")
+    assert(gpu24._rowText(clickedMaintY):find("[↻", 1, true), "T24 Tab 3 input tag switched to [Auto]")
+
     ui24.tab = 4
     ui24:render()
     for _, s in ipairs(gpu24._calls) do _G.__RENDERED_GPU_CALLS[#_G.__RENDERED_GPU_CALLS + 1] = s end
     assert(gpu24._allText():find("Maint:", 1, true), "T24 Tab 4 renders Maint:ON/OFF toggle")
 
     ui24.maintModalActive = true
+    ui24.maintFilterActive = true
     ui24:render()
     for _, s in ipairs(gpu24._calls) do _G.__RENDERED_GPU_CALLS[#_G.__RENDERED_GPU_CALLS + 1] = s end
     assert(gpu24._allText():find("AE2 LEVEL MAINTAINER:", 1, true), "T24 Maintainer modal renders")
+    assert(gpu24._allText():find("[+ Selected Recipe]", 1, true) and gpu24._allText():find("[Show:Active]", 1, true),
+        "T24 Maintainer modal renders [+ Selected Recipe] and [Show:Active]")
+    -- Click [+ Selected Recipe] footer button and verify all raw_tesseract inputs added
+    for i = #ui24.hitboxes, 1, -1 do
+        local hb = ui24.hitboxes[i]
+        if hb.y1 == 45 and unicode.sub(gpu24._rowText(45), hb.x1, hb.x2):find("Selected Recipe", 1, true) then
+            ui24:handleTouch(hb.x1, hb.y1, 0)
+            break
+        end
+    end
+    ui24:render()
+    for _, s in ipairs(gpu24._calls) do _G.__RENDERED_GPU_CALLS[#_G.__RENDERED_GPU_CALLS + 1] = s end
+    assert(#env.maintRules >= #rtInps, "T24 [+ Selected Recipe] maintains all inputs of selected recipe")
 
     component.gpu = nil
     Hardware.resetClusterState()

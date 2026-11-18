@@ -3686,6 +3686,132 @@ local function emitRawStepTrace(cfg, runtimeState, ctx, pushEvent)
     pushEvent("info", inMsg, { stage = "IN", minLevel = 3, allowRepeat = true })
 end
 
+local CATALYST_FULL_LABELS = {
+    exciteddtcc = "Excited Dimensionally Transcendent Crude Catalyst",
+    exciteddtpc = "Excited Dimensionally Transcendent Prosaic Catalyst",
+    exciteddtrc = "Excited Dimensionally Transcendent Resplendent Catalyst",
+    exciteddtec = "Excited Dimensionally Transcendent Exotic Catalyst",
+    exciteddtsc = "Excited Dimensionally Transcendent Stellar Catalyst",
+}
+
+local function roundNiceMaint(n)
+    n = tonumber(n) or 0
+    if n <= 0 then return 1 end
+    local p = 10 ^ math.floor(math.log(n, 10))
+    local norm = n / p
+    if norm <= 1.2 then return math.floor(p + 0.5)
+    elseif norm <= 2.5 then return math.floor(2 * p + 0.5)
+    elseif norm <= 6.0 then return math.floor(5 * p + 0.5)
+    else return math.floor(10 * p + 0.5) end
+end
+
+function Scheduler.defaultMaintTargetBatch(rType, name, perCraft)
+    if type(name) == "string" and name:sub(1, 9) == "exciteddt" then
+        return 50000000, 10000000
+    end
+    if rType == "fluid" then
+        local tgt = roundNiceMaint(math.max(1000000, (tonumber(perCraft) or 1000) * 250))
+        return tgt, math.max(100000, math.floor(tgt / 2))
+    end
+    local tgt = roundNiceMaint(math.max(1000, (tonumber(perCraft) or 1) * 128))
+    return tgt, math.max(64, math.floor(tgt / 2))
+end
+
+function Scheduler.findMaintRule(cfg, rType, name, damage)
+    local rules = (cfg and cfg.maintRules) or {}
+    local tp = (rType == "fluid") and "fluid" or "item"
+    local dmg = (tp == "fluid") and 0 or math.max(0, math.floor(tonumber(damage) or 0))
+    for i = 1, #rules do
+        local r = rules[i]
+        if type(r) == "table" and ((r.type == "fluid") and "fluid" or "item") == tp and r.name == name then
+            if tp == "fluid" or math.max(0, math.floor(tonumber(r.damage) or 0)) == dmg then
+                return r, i
+            end
+        end
+    end
+    return nil, nil
+end
+
+function Scheduler.upsertMaintInput(cfg, spec)
+    if not cfg or type(spec) ~= "table" or type(spec.name) ~= "string" or spec.name == "" then
+        return nil, nil, false
+    end
+    cfg.maintRules = cfg.maintRules or {}
+    local tp = (spec.type == "fluid") and "fluid" or "item"
+    local dmg = (tp == "fluid") and 0 or math.max(0, math.floor(tonumber(spec.damage) or 0))
+    local fullLbl = (tp == "fluid" and CATALYST_FULL_LABELS[spec.name]) or spec.label or spec.name
+    local existing, idx = Scheduler.findMaintRule(cfg, tp, spec.name, dmg)
+    if existing then
+        if spec.mode == "auto" or spec.mode == "always" or spec.mode == "off" then
+            existing.mode = spec.mode
+        elseif existing.mode == "off" then
+            existing.mode = "auto"
+        end
+        if spec.target ~= nil and tonumber(spec.target) then
+            existing.target = math.max(1, math.floor(tonumber(spec.target)))
+        end
+        if spec.batch ~= nil and tonumber(spec.batch) then
+            existing.batch = math.max(1, math.floor(tonumber(spec.batch)))
+        end
+        return existing, idx, false
+    end
+    local defTgt, defBat = Scheduler.defaultMaintTargetBatch(tp, spec.name, spec.amount)
+    local mode = (spec.mode == "always" or spec.mode == "off") and spec.mode or "auto"
+    local newRule = {
+        id = tp .. ":" .. spec.name .. ":" .. tostring(dmg) .. ":" .. tostring(#cfg.maintRules + 1),
+        type = tp,
+        name = spec.name,
+        damage = dmg,
+        label = tostring(fullLbl),
+        target = math.max(1, math.floor(tonumber(spec.target) or defTgt)),
+        batch = math.max(1, math.floor(tonumber(spec.batch) or defBat)),
+        mode = mode,
+    }
+    cfg.maintRules[#cfg.maintRules + 1] = newRule
+    return newRule, #cfg.maintRules, true
+end
+
+function Scheduler.collectRecipeMaintInputs(cfg, famId)
+    local fam = FAMILY_BY_ID[famId]
+    if not fam then return {} end
+    local rc = (cfg and cfg.recipes and cfg.recipes[famId]) or {}
+    local _, tCode, _, tData, catFluid = Scheduler.resolveRecipe(fam, rc, cfg or {}, nil, { wantConvergence = true })
+    local out, seen = {}, {}
+    local function push(tp, name, dmg, label, amount, short, isCat)
+        if type(name) ~= "string" or name == "" then return end
+        local d = (tp == "fluid") and 0 or math.max(0, math.floor(tonumber(dmg) or 0))
+        local k = tp .. ":" .. name .. ":" .. tostring(d)
+        if seen[k] then return end
+        seen[k] = true
+        out[#out + 1] = {
+            type = tp,
+            name = name,
+            damage = d,
+            label = (tp == "fluid" and CATALYST_FULL_LABELS[name]) or label or name,
+            amount = tonumber(amount) or 1,
+            short = short,
+            isCat = isCat == true,
+        }
+    end
+    if tCode and tCode ~= "NONE" and catFluid then
+        push("fluid", catFluid, 0, CATALYST_FULL_LABELS[catFluid] or catFluid,
+            tData and tData.catalystAmount or 1000, tCode, true)
+    end
+    if tData then
+        for _, fl in ipairs(tData.fluidsIn or {}) do
+            if fl.name and fl.name ~= "dimensionallytranscendentresidue" then
+                push("fluid", fl.name, 0, fl.label or fl.name, fl.amount or 144, nil, false)
+            end
+        end
+        for _, it in ipairs(tData.itemsIn or {}) do
+            if it.name and (not it.nonConsumed) and (tonumber(it.amount) or 0) > 0 then
+                push("item", it.name, it.damage or 0, it.label or it.name, it.amount, nil, false)
+            end
+        end
+    end
+    return out
+end
+
 -- Build demand key set ("fluid:<name>:0" | "item:<name>:<dmg>") for active recipes, fallback, and pins
 function Scheduler.computeMaintDemandSet(cfg, stock)
     local demanded = {}

@@ -548,8 +548,8 @@ function WebBridge:applyPatch(patch)
         if self.state then self.state._forceMaintSync = true end
         changed = true
     end
-    if type(patch.maintRule) == "table" then
-        local rPatch = patch.maintRule
+    local function applySingleMaintRule(rPatch)
+        if type(rPatch) ~= "table" then return false, "invalid maintRule" end
         cfg.maintRules = cfg.maintRules or {}
         local rules = cfg.maintRules
         local matchIdx = nil
@@ -561,17 +561,22 @@ function WebBridge:applyPatch(patch)
                     break
                 end
             end
-        elseif tonumber(rPatch.index) then
+        end
+        if not matchIdx and tonumber(rPatch.index) then
             local idx = math.floor(tonumber(rPatch.index))
             if idx >= 1 and idx <= #rules then matchIdx = idx end
         end
+        if not matchIdx and type(rPatch.name) == "string" and #rPatch.name > 0 and self.Scheduler and self.Scheduler.findMaintRule then
+            local _, foundIdx = self.Scheduler.findMaintRule(cfg, rPatch.type, rPatch.name, rPatch.damage)
+            if foundIdx then matchIdx = foundIdx end
+        end
+
         if rPatch.delete == true or rPatch.remove == true then
             if matchIdx then
                 table.remove(rules, matchIdx)
-                changed = true
-            else
-                return false, "unknown maintRule"
+                return true
             end
+            return false, "unknown maintRule"
         elseif matchIdx then
             local rule = rules[matchIdx]
             if rPatch.cycleMode == true then
@@ -581,7 +586,7 @@ function WebBridge:applyPatch(patch)
                 rule.mode = rPatch.mode
             end
             if rPatch.target ~= nil and tonumber(rPatch.target) then
-                rule.target = math.max(0, math.floor(tonumber(rPatch.target)))
+                rule.target = math.max(1, math.floor(tonumber(rPatch.target)))
             end
             if rPatch.batch ~= nil and tonumber(rPatch.batch) then
                 rule.batch = math.max(1, math.floor(tonumber(rPatch.batch)))
@@ -598,16 +603,20 @@ function WebBridge:applyPatch(patch)
             if rPatch.damage ~= nil and tonumber(rPatch.damage) then
                 rule.damage = math.max(0, math.floor(tonumber(rPatch.damage)))
             end
-            changed = true
+            return true
         else
             local name = type(rPatch.name) == "string" and rPatch.name or ""
             if #name == 0 then
                 return false, "maintRule.name required"
             end
             local rType = (rPatch.type == "fluid") and "fluid" or "item"
-            local dmg = math.max(0, math.floor(tonumber(rPatch.damage) or 0))
+            local dmg = (rType == "fluid") and 0 or math.max(0, math.floor(tonumber(rPatch.damage) or 0))
             local rMode = rPatch.mode
             if rMode ~= "auto" and rMode ~= "always" and rMode ~= "off" then rMode = "auto" end
+            local defTgt, defBat = 1000, 1000
+            if self.Scheduler and self.Scheduler.defaultMaintTargetBatch then
+                defTgt, defBat = self.Scheduler.defaultMaintTargetBatch(rType, name, rPatch.amount)
+            end
             local newId = matchId or (rType .. ":" .. name .. ":" .. tostring(dmg) .. ":" .. tostring(#rules + 1))
             rules[#rules + 1] = {
                 id = newId,
@@ -615,13 +624,30 @@ function WebBridge:applyPatch(patch)
                 name = name,
                 damage = dmg,
                 label = (type(rPatch.label) == "string" and #rPatch.label > 0) and rPatch.label or name,
-                target = math.max(0, math.floor(tonumber(rPatch.target) or 1000)),
-                batch = math.max(1, math.floor(tonumber(rPatch.batch) or 1000)),
+                target = math.max(1, math.floor(tonumber(rPatch.target) or defTgt)),
+                batch = math.max(1, math.floor(tonumber(rPatch.batch) or defBat)),
                 mode = rMode,
             }
+            return true
+        end
+    end
+
+    if type(patch.maintRule) == "table" then
+        local okR, errR = applySingleMaintRule(patch.maintRule)
+        if not okR then return false, errR end
+        changed = true
+        if self.state then
+            self.state._forceMaintSync = true
+            self.state._forcePollNow = true
+        end
+    end
+    if type(patch.maintRulesBatch) == "table" then
+        for _, rPatch in ipairs(patch.maintRulesBatch) do
+            local okR, errR = applySingleMaintRule(rPatch)
+            if not okR then return false, errR end
             changed = true
         end
-        if self.state then
+        if changed and self.state then
             self.state._forceMaintSync = true
             self.state._forcePollNow = true
         end
