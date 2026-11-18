@@ -2241,9 +2241,15 @@ function Hardware.queryMainnetMaintenance(cfg, itemsReq, compLib)
     local reqId = nextReqId()
     local payload = serialization.serialize({ items = itemsReq or {} })
     local viaTunnel = (Hardware._mainnetMeshViaTunnel == true) or (not modem and tunnel ~= nil)
+    local tStart = meshUptime()
     sendMeshPacket(cl, Hardware._mainnetMeshAddr, viaTunnel, "MESH_MAINT_SYNC", reqId, payload)
 
-    local tbl, sender, port = awaitMeshAck(tunnel, tAddr, reqId, "MESH_MAINT_ACK", 2.5, 16, 0.35)
+    local tbl, sender, port = awaitMeshAck(tunnel, tAddr, reqId, "MESH_MAINT_ACK", 2.2, 12, 0.35)
+    if not tbl and meshUptime() > tStart then
+        -- Fallback to broadcast once in case cached Mainnet modem address changed or was briefly starved by scan I/O.
+        sendMeshPacket(cl, nil, viaTunnel, "MESH_MAINT_SYNC", reqId, payload)
+        tbl, sender, port = awaitMeshAck(tunnel, tAddr, reqId, "MESH_MAINT_ACK", 2.5, 14, 0.35)
+    end
     if tbl then
         tbl.link = (port == 0) and "tunnel" or "modem"
         tbl.addr = sender

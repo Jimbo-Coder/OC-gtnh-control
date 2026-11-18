@@ -3883,13 +3883,24 @@ function Scheduler.stepLevelMaintainer(cfg, runtimeState, ctx, nowSec, opts, pus
     local forceSync = (runtimeState._forceMaintSync == true) or (opts and opts.forceMaintSync == true)
     if forceSync then runtimeState._forceMaintSync = false end
 
+    local freshSyncOk = false
     local shouldQuery = (not ctx or not ctx.useCache)
         and (forceSync or sync == nil or (cfg.maintEnabled and syncAge >= pollSec) or ((not cfg.maintEnabled) and syncAge >= 60))
     if shouldQuery and not (opts and opts.skipMaintQuery) then
-        sync = Hardware.queryMainnetMaintenance(cfg, activeReq)
-        runtimeState._lastMaintSync = sync
+        local polled = Hardware.queryMainnetMaintenance(cfg, activeReq)
         runtimeState._lastMaintPollSec = nowSec
-        if sync and sync.failed then
+        if polled and polled.ok == true then
+            sync = polled
+            runtimeState._lastMaintSync = sync
+            runtimeState._lastMaintOkSec = nowSec
+            freshSyncOk = true
+        elseif sync and sync.ok == true and (nowSec - (runtimeState._lastMaintOkSec or -1000)) < 180 then
+            -- Retain last valid Mainnet snapshot across transient wireless/scan contention (never dispatch crafts on stale sync).
+        else
+            sync = polled
+            runtimeState._lastMaintSync = sync
+        end
+        if freshSyncOk and sync and sync.failed then
             for fid, why in pairs(sync.failed) do
                 local tr = runtimeState._maintTrack[fid] or {}
                 tr.inFlightUntil = 0
@@ -3979,7 +3990,7 @@ function Scheduler.stepLevelMaintainer(cfg, runtimeState, ctx, nowSec, opts, pus
         }
     end
 
-    if (cfg and cfg.armed == true) and (cfg and cfg.maintEnabled == true) and cpuHeadroomOk and shouldQuery and #lowList > 0 then
+    if (cfg and cfg.armed == true) and (cfg and cfg.maintEnabled == true) and cpuHeadroomOk and freshSyncOk and #lowList > 0 then
         table.sort(lowList, function(a, b)
             if math.abs(a.deficit - b.deficit) > 0.001 then
                 return a.deficit > b.deficit
