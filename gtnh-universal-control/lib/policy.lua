@@ -94,61 +94,184 @@ function Policy.parseGtDye(val, fallback)
     return fb
 end
 
-local MAX_RECIPE_CACHE = 128
+Policy.DEFAULT_MAX_RECIPE_CACHE = 4096
+local SLOW_PROTECT_RATIO = 0.75
+local SLOW_BIT = 1 << 62
+local SEQ_MASK = 0x3FFFFFFF
+local RATE_MASK = 0xFFFFFFFF
 
--- Build a compact deterministic fingerprint of up to 8 sorted active ingredient keys.
+-- Build a compact deterministic fingerprint of up to 24 sorted active ingredient keys.
 function Policy.buildIngredientSig(activeItems, activeFluids)
     local parts = {}
     if type(activeItems) == "table" then
-        for i = 1, math.min(6, #activeItems) do
+        for i = 1, #activeItems do
             parts[#parts + 1] = "i:" .. tostring(activeItems[i].key or "")
         end
     end
     if type(activeFluids) == "table" then
-        for i = 1, math.min(6, #activeFluids) do
+        for i = 1, #activeFluids do
             parts[#parts + 1] = "f:" .. tostring(activeFluids[i].key or "")
         end
     end
     if #parts == 0 then return "" end
     table.sort(parts)
-    if #parts > 8 then
+    if #parts > 24 then
         local trimmed = {}
-        for i = 1, 8 do trimmed[i] = parts[i] end
+        for i = 1, 24 do trimmed[i] = parts[i] end
         return table.concat(trimmed, "|")
     end
     return table.concat(parts, "|")
 end
 
-local function recipeCacheKey(poolId, ncIdx, sig)
+-- Compute non-zero 64-bit FNV-1a integer hash for zero-string-allocation recipe cache keys.
+function Policy.fnv1a64(str)
+    if type(str) ~= "string" or str == "" then return nil end
+    local h = 0xcbf29ce484222325
+    for i = 1, #str do
+        h = (h ~ str:byte(i)) * 0x100000001b3
+    end
+    if h == 0 then h = 1 end
+    return h
+end
+
+function Policy.recipeHash(poolId, ncIdx, sig)
     if type(sig) ~= "string" or sig == "" then return nil end
-    return tostring(poolId) .. ":" .. tostring(ncIdx) .. ":" .. sig
+    return Policy.fnv1a64(tostring(poolId) .. ":" .. tostring(ncIdx) .. ":" .. sig)
+end
+
+function Policy.packRecipeEntry(rate, seq, isSlow)
+    local r = math.floor((tonumber(rate) or 0.01) * 1000 + 0.5)
+    if r < 1 then r = 1 elseif r > RATE_MASK then r = RATE_MASK end
+    local s = math.floor(tonumber(seq) or 1) & SEQ_MASK
+    local slowFlag = isSlow and SLOW_BIT or 0
+    return slowFlag | (s << 32) | r
+end
+
+function Policy.unpackRecipeEntry(packed)
+    if type(packed) ~= "number" then return nil end
+    local rate = (packed & RATE_MASK) / 1000.0
+    local seq = (packed >> 32) & SEQ_MASK
+    local isSlow = ((packed >> 62) & 1) == 1
+    return rate, seq, isSlow
+end
+
+function Policy.recountRecipeStats(state)
+    if not state then return 0, 0 end
+    local total, slow, maxSeq = 0, 0, 0
+    for _, p in pairs(state.recipeRates or {}) do
+        if type(p) == "number" then
+            total = total + 1
+            local s = (p >> 32) & SEQ_MASK
+            if s > maxSeq then maxSeq = s end
+            if ((p >> 62) & 1) == 1 then
+                slow = slow + 1
+            end
+        end
+    end
+    state.recipeRateCount = total
+    state.recipeSlowCount = slow
+    if (state.recipeSeq or 0) < maxSeq then
+        state.recipeSeq = maxSeq
+    end
+    return total, slow
+end
+
+function Policy.clearRecipeCache(state)
+    if not state then return end
+    state.recipeRates = {}
+    state.recipeRateCount = 0
+    state.recipeSlowCount = 0
+    state.recipeSeq = 0
+    state._ratesDirty = true
+end
+
+local function bumpRecipeSeq(state)
+    local seq = (state.recipeSeq or 0) + 1
+    if seq >= SEQ_MASK and type(state.recipeRates) == "table" then
+        local maxS = 1
+        for k, p in pairs(state.recipeRates) do
+            if type(p) == "number" then
+                local s = ((p >> 32) & SEQ_MASK) >> 1
+                state.recipeRates[k] = (p & (SLOW_BIT | RATE_MASK)) | (s << 32)
+                if s > maxS then maxS = s end
+            end
+        end
+        seq = maxS + 1
+    end
+    state.recipeSeq = seq
+    return seq
 end
 
 function Policy.lookupRecipeRate(state, poolId, ncIdx, sig)
     if not state or type(state.recipeRates) ~= "table" then return nil end
-    local k = recipeCacheKey(poolId, ncIdx, sig)
-    if not k then return nil end
-    return state.recipeRates[k]
+    local h = Policy.recipeHash(poolId, ncIdx, sig)
+    if not h then return nil end
+    local packed = state.recipeRates[h]
+    if packed == nil then return nil end
+    local rate, _, isSlow = Policy.unpackRecipeEntry(packed)
+    if rate == nil then return nil end
+    local seq = bumpRecipeSeq(state)
+    state.recipeRates[h] = (packed & (SLOW_BIT | RATE_MASK)) | ((seq & SEQ_MASK) << 32)
+    return rate, isSlow
 end
 
-function Policy.recordRecipeRate(state, poolId, ncIdx, sig, instRate)
+function Policy.recordRecipeRate(state, poolId, ncIdx, sig, instRate, isSlow, maxCap)
     if not state or type(instRate) ~= "number" or instRate <= 0 then return end
-    local k = recipeCacheKey(poolId, ncIdx, sig)
-    if not k then return end
+    local h = Policy.recipeHash(poolId, ncIdx, sig)
+    if not h then return end
     state.recipeRates = state.recipeRates or {}
-    state.recipeRateOrder = state.recipeRateOrder or {}
-
-    local prev = state.recipeRates[k]
-    if prev == nil then
-        while #state.recipeRateOrder >= MAX_RECIPE_CACHE do
-            local oldest = table.remove(state.recipeRateOrder, 1)
-            if oldest then state.recipeRates[oldest] = nil end
-        end
-        state.recipeRateOrder[#state.recipeRateOrder + 1] = k
-        state.recipeRates[k] = instRate
-    else
-        state.recipeRates[k] = 0.35 * instRate + 0.65 * prev
+    if state.recipeRateCount == nil or state.recipeSlowCount == nil then
+        Policy.recountRecipeStats(state)
     end
+
+    local cap = math.max(256, math.floor(tonumber(maxCap) or Policy.DEFAULT_MAX_RECIPE_CACHE))
+    local seq = bumpRecipeSeq(state)
+    local prev = state.recipeRates[h]
+
+    if prev == nil then
+        while (state.recipeRateCount or 0) >= cap do
+            local oldestFastH, oldestFastSeq = nil, nil
+            local oldestSlowH, oldestSlowSeq = nil, nil
+            for k, p in pairs(state.recipeRates) do
+                local s = (p >> 32) & SEQ_MASK
+                local pSlow = ((p >> 62) & 1) == 1
+                if pSlow then
+                    if oldestSlowSeq == nil or s < oldestSlowSeq then
+                        oldestSlowSeq, oldestSlowH = s, k
+                    end
+                else
+                    if oldestFastSeq == nil or s < oldestFastSeq then
+                        oldestFastSeq, oldestFastH = s, k
+                    end
+                end
+            end
+            local slowCap = math.floor(cap * SLOW_PROTECT_RATIO)
+            local victim = ((state.recipeSlowCount or 0) <= slowCap and oldestFastH ~= nil)
+                and oldestFastH or (oldestSlowH or oldestFastH)
+            if victim == nil then break end
+            local vPacked = state.recipeRates[victim]
+            state.recipeRates[victim] = nil
+            state.recipeRateCount = math.max(0, (state.recipeRateCount or 1) - 1)
+            if type(vPacked) == "number" and ((vPacked >> 62) & 1) == 1 then
+                state.recipeSlowCount = math.max(0, (state.recipeSlowCount or 1) - 1)
+            end
+        end
+        local slowFlag = (isSlow == true)
+        state.recipeRates[h] = Policy.packRecipeEntry(instRate, seq, slowFlag)
+        state.recipeRateCount = (state.recipeRateCount or 0) + 1
+        if slowFlag then
+            state.recipeSlowCount = (state.recipeSlowCount or 0) + 1
+        end
+    else
+        local prevRate, _, prevSlow = Policy.unpackRecipeEntry(prev)
+        local newRate = 0.35 * instRate + 0.65 * (prevRate or instRate)
+        local newSlow = (isSlow ~= nil) and (isSlow == true) or prevSlow
+        if newSlow ~= prevSlow then
+            state.recipeSlowCount = math.max(0, (state.recipeSlowCount or 0) + (newSlow and 1 or -1))
+        end
+        state.recipeRates[h] = Policy.packRecipeEntry(newRate, seq, newSlow)
+    end
+    state._ratesDirty = true
 end
 
 -- Classify a slice candidate and compute rate, ETA, wait aging, and MLFQ tier.

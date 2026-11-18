@@ -1236,11 +1236,12 @@ function UI:renderPoolsTab()
         self:save("Log verbosity -> " .. self.cfg.logLevel)
     end)
 
-    local cacheCnt = #(self.state.recipeRateOrder or {})
-    self:drawText(85, 41, string.format("Recipe Speed Cache : %d / 128", cacheCnt), COLORS.muted, COLORS.panelBg)
-    self:drawButton(124, 41, "[Clear Cache]", COLORS.yellow, COLORS.btnBg, function()
-        self.state.recipeRates = {}
-        self.state.recipeRateOrder = {}
+    local cacheCnt = self.state.recipeRateCount or 0
+    local cacheMax = self.cfg.maxRecipeCache or Policy.DEFAULT_MAX_RECIPE_CACHE or 4096
+    local cacheSlow = self.state.recipeSlowCount or 0
+    self:drawText(85, 41, padOrTrunc(string.format("Recipe Cache: %d/%d (%d slow)", cacheCnt, cacheMax, cacheSlow), 39), COLORS.muted, COLORS.panelBg)
+    self:drawButton(126, 41, "[Clear Cache]", COLORS.yellow, COLORS.btnBg, function()
+        Policy.clearRecipeCache(self.state)
         self:save("Cleared learned recipe speed cache.")
     end)
 end

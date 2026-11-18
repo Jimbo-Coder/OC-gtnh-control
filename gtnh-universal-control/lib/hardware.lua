@@ -142,20 +142,20 @@ end
 function Hardware.buildIngredientSig(activeItems, activeFluids)
     local parts = {}
     if type(activeItems) == "table" then
-        for i = 1, math.min(6, #activeItems) do
+        for i = 1, #activeItems do
             parts[#parts + 1] = "i:" .. tostring(activeItems[i].key or "")
         end
     end
     if type(activeFluids) == "table" then
-        for i = 1, math.min(6, #activeFluids) do
+        for i = 1, #activeFluids do
             parts[#parts + 1] = "f:" .. tostring(activeFluids[i].key or "")
         end
     end
     if #parts == 0 then return "" end
     table.sort(parts)
-    if #parts > 8 then
+    if #parts > 24 then
         local trimmed = {}
-        for i = 1, 8 do trimmed[i] = parts[i] end
+        for i = 1, 24 do trimmed[i] = parts[i] end
         return table.concat(trimmed, "|")
     end
     return table.concat(parts, "|")

@@ -99,6 +99,7 @@ function Scheduler.defaultConfig()
         stallTimeoutSec = 120.0,
         retryStalledSec = 60.0,
         defaultProbeRate = 8.0,
+        maxRecipeCache = 4096,
         ignoreBuiltinNC = true,
         extLinkMode = "auto",
         logLevel = "normal",
@@ -195,6 +196,7 @@ function Scheduler.normalizeConfig(cfg)
     cfg.stallTimeoutSec = math.max(5.0, math.min(3600.0, tonumber(cfg.stallTimeoutSec) or def.stallTimeoutSec))
     cfg.retryStalledSec = math.max(5.0, math.min(3600.0, tonumber(cfg.retryStalledSec) or def.retryStalledSec))
     cfg.defaultProbeRate = math.max(0.1, math.min(1000.0, tonumber(cfg.defaultProbeRate) or def.defaultProbeRate))
+    cfg.maxRecipeCache = math.max(256, math.min(8192, math.floor(tonumber(cfg.maxRecipeCache) or def.maxRecipeCache)))
     if cfg.ignoreBuiltinNC == nil then cfg.ignoreBuiltinNC = true else cfg.ignoreBuiltinNC = (cfg.ignoreBuiltinNC == true) end
     cfg.extLinkMode = (cfg.extLinkMode == "off") and "off" or "auto"
     if cfg.logLevel ~= "quiet" and cfg.logLevel ~= "normal" and cfg.logLevel ~= "raw" then
@@ -252,42 +254,9 @@ function Scheduler.normalizeConfig(cfg)
         end
     end
 
-    if type(cfg.recipeRates) == "table" then
-        local cleanRates = {}
-        local cleanOrder = {}
-        local seenK = {}
-        if type(cfg.recipeRateOrder) == "table" then
-            for _, k in ipairs(cfg.recipeRateOrder) do
-                local v = tonumber(cfg.recipeRates[k])
-                if type(k) == "string" and k ~= "" and v and v > 0 and not seenK[k] then
-                    seenK[k] = true
-                    cleanRates[k] = v
-                    cleanOrder[#cleanOrder + 1] = k
-                    if #cleanOrder >= 128 then break end
-                end
-            end
-        end
-        if #cleanOrder < 128 then
-            for k, rawV in pairs(cfg.recipeRates) do
-                local v = tonumber(rawV)
-                if type(k) == "string" and k ~= "" and v and v > 0 and not seenK[k] then
-                    seenK[k] = true
-                    cleanRates[k] = v
-                    cleanOrder[#cleanOrder + 1] = k
-                    if #cleanOrder >= 128 then break end
-                end
-            end
-        end
-        if #cleanOrder > 0 then
-            cfg.recipeRates = cleanRates
-            cfg.recipeRateOrder = cleanOrder
-        else
-            cfg.recipeRates = nil
-            cfg.recipeRateOrder = nil
-        end
-    else
+    cfg.recipeRateOrder = nil
+    if type(cfg.recipeRates) ~= "table" or next(cfg.recipeRates) == nil then
         cfg.recipeRates = nil
-        cfg.recipeRateOrder = nil
     end
 
     return cfg
@@ -298,7 +267,10 @@ function Scheduler.newState()
         poolStates = {},
         sliceStates = {},
         recipeRates = {},
-        recipeRateOrder = {},
+        recipeRateCount = 0,
+        recipeSlowCount = 0,
+        recipeSeq = 0,
+        _ratesDirty = false,
         queue = {},
         logs = {},
         rawSnapshot = {},
@@ -468,62 +440,110 @@ local function resetSliceBatchState(sState)
 end
 
 function Scheduler.loadPersistedRates(cfg, state)
-    if not cfg or not state or type(cfg.recipeRates) ~= "table" then return 0 end
-    state.recipeRates = {}
-    state.recipeRateOrder = {}
+    if not cfg or not state then return 0 end
+    if type(cfg.recipeRates) ~= "table" or next(cfg.recipeRates) == nil then
+        cfg.recipeRates = nil
+        cfg.recipeRateOrder = nil
+        return 0
+    end
+    state.recipeRates = state.recipeRates or {}
+    local cap = math.max(256, math.floor(tonumber(cfg.maxRecipeCache) or Policy.DEFAULT_MAX_RECIPE_CACHE))
     local loaded = 0
-    local order = type(cfg.recipeRateOrder) == "table" and cfg.recipeRateOrder or {}
-    local seen = {}
-    local function addEntry(k, rawV)
+    for k, rawV in pairs(cfg.recipeRates) do
         local v = tonumber(rawV)
-        if type(k) == "string" and k ~= "" and v and v > 0 and not seen[k] and #state.recipeRateOrder < 128 then
-            seen[k] = true
-            state.recipeRates[k] = v
-            state.recipeRateOrder[#state.recipeRateOrder + 1] = k
-            loaded = loaded + 1
+        if type(k) == "string" and k ~= "" and v and v > 0 and (state.recipeRateCount or 0) < cap then
+            local h = Policy.fnv1a64(k)
+            if h and state.recipeRates[h] == nil then
+                local slow = v < ((cfg.defaultProbeRate or 8.0) * 0.5)
+                state.recipeSeq = (state.recipeSeq or 0) + 1
+                state.recipeRates[h] = Policy.packRecipeEntry(v, state.recipeSeq, slow)
+                loaded = loaded + 1
+            end
         end
     end
-    for _, k in ipairs(order) do
-        addEntry(k, cfg.recipeRates[k])
+    Policy.recountRecipeStats(state)
+    if loaded > 0 then
+        state._ratesDirty = true
     end
-    for k, v in pairs(cfg.recipeRates) do
-        addEntry(k, v)
-    end
+    cfg.recipeRates = nil
+    cfg.recipeRateOrder = nil
     return loaded
 end
 
-function Scheduler.exportPersistedRates(cfg, state)
-    if not cfg or not state then return 0 end
-    if type(state.recipeRates) ~= "table" or next(state.recipeRates) == nil then
+function Scheduler.exportPersistedRates(cfg, _)
+    if cfg then
         cfg.recipeRates = nil
         cfg.recipeRateOrder = nil
-        return 0
     end
-    local outRates = {}
-    local outOrder = {}
-    local seen = {}
-    local function pushEntry(k, rawV)
-        local v = tonumber(rawV)
-        if type(k) == "string" and k ~= "" and v and v > 0 and not seen[k] and #outOrder < 128 then
-            seen[k] = true
-            outRates[k] = math.floor(v * 1000 + 0.5) / 1000
-            outOrder[#outOrder + 1] = k
+    return 0
+end
+
+local function writeRatesStream(path, rates)
+    if type(path) ~= "string" or path == "" then return false end
+    local f = io.open(path, "w")
+    if not f then return false end
+    f:write("# univ-rates-v2\n")
+    for k, v in pairs(rates or {}) do
+        if type(k) == "number" and type(v) == "number" then
+            f:write(string.format("%x:%x\n", k, v))
         end
     end
-    for _, k in ipairs(state.recipeRateOrder or {}) do
-        pushEntry(k, state.recipeRates[k])
+    f:close()
+    return true
+end
+
+function Scheduler.saveRatesFile(path, state, backupPath)
+    if not state then return 0 end
+    local rates = state.recipeRates or {}
+    local okMain = writeRatesStream(path, rates)
+    if backupPath and backupPath ~= "" then
+        writeRatesStream(backupPath, rates)
     end
-    for k, v in pairs(state.recipeRates) do
-        pushEntry(k, v)
+    if okMain then
+        state._ratesDirty = false
     end
-    if #outOrder == 0 then
-        cfg.recipeRates = nil
-        cfg.recipeRateOrder = nil
+    return state.recipeRateCount or 0
+end
+
+function Scheduler.loadRatesFile(path, state, maxCap, backupPath)
+    if not state then return 0 end
+    local raw = nil
+    for _, p in ipairs({ path, backupPath }) do
+        if type(p) == "string" and p ~= "" then
+            local f = io.open(p, "r")
+            if f then
+                raw = f:read("*a")
+                f:close()
+                if type(raw) == "string" and #raw > 0 then break end
+                raw = nil
+            end
+        end
+    end
+    state.recipeRates = {}
+    if not raw then
+        Policy.recountRecipeStats(state)
+        state._ratesDirty = false
         return 0
     end
-    cfg.recipeRates = outRates
-    cfg.recipeRateOrder = outOrder
-    return #outOrder
+    local cap = math.max(256, math.floor(tonumber(maxCap) or Policy.DEFAULT_MAX_RECIPE_CACHE))
+    local loaded = 0
+    for line in raw:gmatch("[^\r\n]+") do
+        if line:sub(1, 1) ~= "#" then
+            local kh, vh = line:match("^([0-9a-fA-F]+):([0-9a-fA-F]+)$")
+            if kh and vh then
+                local k = tonumber("0x" .. kh)
+                local v = tonumber("0x" .. vh)
+                if k and k ~= 0 and v and math.type(k) == "integer" and math.type(v) == "integer" then
+                    state.recipeRates[k] = v
+                    loaded = loaded + 1
+                    if loaded >= cap then break end
+                end
+            end
+        end
+    end
+    Policy.recountRecipeStats(state)
+    state._ratesDirty = false
+    return loaded
 end
 
 local function applyScanToSliceState(sState, scan, nowSec)
@@ -740,6 +760,7 @@ local function activateChannel(cs, pState, pool, ncIdx, sState, cfg, nowSec, sta
     cs.lastProgressAt = nowSec
     cs.lastWorkSampleAt = nowSec
     cs.lastActiveWork = sState.workScore
+    cs.batchWork = math.max(cs.batchWork or 0, sState.workScore or 0)
     cs.zeroStreak = 0
     cs.batchSig = sState.ingredientSig or ""
     cs.activeLabel = slice and slice.label or ("NC " .. tostring(ncIdx))
@@ -1037,12 +1058,18 @@ function Scheduler.step(cfg, state, nowSec, opts, compLib)
                                 aSlice.learnedRate = aSlice.learnedRate and (0.35 * instRate + 0.65 * aSlice.learnedRate) or instRate
                                 aState._batchSamples = (aState._batchSamples or 0) + 1
                                 aState._batchRate = aState._batchRate and (0.35 * instRate + 0.65 * aState._batchRate) or instRate
-                                Policy.recordRecipeRate(state, pool.id, ac, (cs.batchSig ~= "" and cs.batchSig) or aState.ingredientSig, instRate)
+                                local batchWork = math.max(cs.batchWork or 0, prevWork or 0, aState.workScore or 0)
+                                local effRate = aState._batchRate or instRate
+                                local isSlow = (aState.tier == "BULK")
+                                    or ((aState.activeRunSec or 0) >= (cfg.probeWindowSec or 1.5))
+                                    or ((batchWork / math.max(0.01, effRate)) > (cfg.fastThresholdSec or 3.0))
+                                Policy.recordRecipeRate(state, pool.id, ac, (cs.batchSig ~= "" and cs.batchSig) or aState.ingredientSig, instRate, isSlow, cfg.maxRecipeCache)
                                 cs.lastActiveWork = aState.workScore
                                 cs.lastWorkSampleAt = nowSec
                                 cs.lastProgressAt = nowSec
                             elseif prevWork == nil or aState.workScore > (prevWork + 1e-6) then
                                 cs.lastActiveWork = aState.workScore
+                                cs.batchWork = math.max(cs.batchWork or 0, aState.workScore or 0)
                                 cs.lastWorkSampleAt = nowSec
                                 cs.lastProgressAt = nowSec
                                 if aState.ingredientSig and aState.ingredientSig ~= "" then
@@ -1067,6 +1094,7 @@ function Scheduler.step(cfg, state, nowSec, opts, compLib)
                                     cs.lastOffAt = nowSec
                                     cs.phase = "IDLE"
                                     cs.activeNc = nil
+                                    cs.batchWork = 0
                                     cs.zeroStreak = 0
                                 end
                             else
@@ -1085,6 +1113,7 @@ function Scheduler.step(cfg, state, nowSec, opts, compLib)
                                     cs.lastOffAt = nowSec
                                     cs.phase = "IDLE"
                                     cs.activeNc = nil
+                                    cs.batchWork = 0
                                 end
                             end
                         end
@@ -1137,6 +1166,7 @@ function Scheduler.step(cfg, state, nowSec, opts, compLib)
                         cs.lastNc = prevNc
                         cs.lastOffAt = nowSec
                         cs.activeNc = nil
+                        cs.batchWork = 0
                         cs.zeroStreak = 0
                         cs.activeLabel = ""
                         cs.activeEtaSec = nil

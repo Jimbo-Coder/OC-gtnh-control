@@ -18,6 +18,8 @@ local DEFAULT_BRANCH = "main"
 local INSTALL_DIR = "/home/universal"
 local CONFIG_PATH = "/home/universal/config.cfg"
 local BACKUP_CONFIG_PATH = "/home/config.universal.bak"
+local RATES_CACHE_PATH = "/home/universal/rates.cache"
+local BACKUP_RATES_PATH = "/home/rates.universal.bak"
 local REPO_META_PATH = "/home/universal/.repo"
 local BIN_PATH = "/usr/bin/universal.lua"
 local SHRC_PATH = "/home/.shrc"
@@ -113,6 +115,16 @@ local function fetchUrl(internet, url)
 end
 
 local function syncSettingsBackup()
+    local existingRates = readWholeFile(RATES_CACHE_PATH)
+    if type(existingRates) == "string" and #existingRates > 0 then
+        writeWholeFile(BACKUP_RATES_PATH, existingRates)
+    else
+        local bakRates = readWholeFile(BACKUP_RATES_PATH)
+        if type(bakRates) == "string" and #bakRates > 0 then
+            writeWholeFile(RATES_CACHE_PATH, bakRates)
+        end
+    end
+
     local existing = readWholeFile(CONFIG_PATH)
     if type(existing) == "string" and #existing > 0 then
         if writeWholeFile(BACKUP_CONFIG_PATH, existing) then

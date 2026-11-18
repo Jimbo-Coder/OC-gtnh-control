@@ -25,6 +25,8 @@ end
 
 local CONFIG_PATH = filesystem.concat(scriptDir, "config.cfg")
 local BACKUP_CONFIG_PATH = "/home/config.universal.bak"
+local RATES_CACHE_PATH = filesystem.concat(scriptDir, "rates.cache")
+local BACKUP_RATES_PATH = "/home/rates.universal.bak"
 
 do
     local prevPath = package.path
@@ -83,6 +85,12 @@ local function saveConfig(cfg, state)
     return ok
 end
 
+local function flushRatesIfDirty(state)
+    if state and state._ratesDirty then
+        Scheduler.saveRatesFile(RATES_CACHE_PATH, state, BACKUP_RATES_PATH)
+    end
+end
+
 local function printHelp()
     print("GTNH Universal Control - Multi-Channel Bundled Toggle-Bus + MLFQ Scheduler")
     print("Usage:")
@@ -132,6 +140,7 @@ end
 local function runCheck()
     local cfg, cfgSource = loadConfig()
     local state = Scheduler.newState()
+    Scheduler.loadRatesFile(RATES_CACHE_PATH, state, cfg.maxRecipeCache, BACKUP_RATES_PATH)
     local disc = Scheduler.syncHardware(cfg, state)
     Scheduler.step(cfg, state, computer.uptime(), { dryRun = true, forceFullScan = true })
 
@@ -171,6 +180,7 @@ end
 local function runWorker()
     local cfg = loadConfig()
     local state = Scheduler.newState()
+    Scheduler.loadRatesFile(RATES_CACHE_PATH, state, cfg.maxRecipeCache, BACKUP_RATES_PATH)
     Scheduler.syncHardware(cfg, state)
     Hardware.zeroAllManagedPools(cfg, nil, state)
     Hardware.openMeshPort(cfg)
@@ -188,6 +198,7 @@ local function runWorker()
             if (now - lastRateSave) >= 60.0 then
                 lastRateSave = now
                 saveConfig(cfg, state)
+                flushRatesIfDirty(state)
             end
 
             local deadline = computer.uptime() + Scheduler.nextWakeupDelay(cfg, state, computer.uptime())
@@ -210,6 +221,7 @@ local function runWorker()
     pcall(Hardware.setGuidedSubscriptions, nil, false, nil, state)
     pcall(Hardware.zeroAllManagedPools, cfg, nil, state)
     pcall(saveConfig, cfg, state)
+    pcall(flushRatesIfDirty, state)
     if not okLoop then
         io.stderr:write("Universal Control worker error:\n" .. tostring(errLoop) .. "\n")
     else
@@ -220,6 +232,7 @@ end
 local function runGUI()
     local cfg = loadConfig()
     local state = Scheduler.newState()
+    Scheduler.loadRatesFile(RATES_CACHE_PATH, state, cfg.maxRecipeCache, BACKUP_RATES_PATH)
     Scheduler.syncHardware(cfg, state)
     Hardware.zeroAllManagedPools(cfg, nil, state)
     Hardware.openMeshPort(cfg)
@@ -242,6 +255,7 @@ local function runGUI()
         if savePending then
             savePending = false
             saveConfig(cfg, state)
+            flushRatesIfDirty(state)
         end
     end
 
@@ -295,6 +309,7 @@ local function runGUI()
                 if (curTime - lastPeriodicSave) >= 60.0 then
                     lastPeriodicSave = curTime
                     saveConfig(cfg, state)
+                    flushRatesIfDirty(state)
                 end
                 nextPoll = computer.uptime() + Scheduler.nextWakeupDelay(cfg, state, computer.uptime())
                 local curDigest = Scheduler.renderDigest(cfg, state)
@@ -318,6 +333,7 @@ local function runGUI()
     pcall(Hardware.zeroAllManagedPools, cfg, nil, state)
     flushSave()
     pcall(saveConfig, cfg, state)
+    pcall(flushRatesIfDirty, state)
     if component.isAvailable("gpu") then
         pcall(component.gpu.setBackground, 0x000000)
         pcall(component.gpu.setForeground, 0xFFFFFF)

@@ -1196,12 +1196,14 @@ itSlowS[1].size = 9998.5
 Scheduler.step(sCfg, sSt, 1.5)
 assertEq(sSt.sliceStates["1:0"].tier, "BULK", "NC 0 graduates to BULK")
 
--- Verify recipe rate persistence across simulated reboot (fresh state loaded from cfg)
-Scheduler.exportPersistedRates(sCfg, sSt)
-assert(sCfg.recipeRates ~= nil and next(sCfg.recipeRates) ~= nil, "exportPersistedRates populates cfg.recipeRates")
+-- Verify streaming rates.cache persistence across simulated reboot (fresh state loaded from disk)
+local savedCnt = Scheduler.saveRatesFile("/home/universal/test16_rates.cache", sSt, "/home/test16_rates.bak")
+assert(savedCnt > 0, "saveRatesFile persists learned rates")
 local rebootSt = Scheduler.newState()
-Scheduler.loadPersistedRates(sCfg, rebootSt)
-assert(next(rebootSt.recipeRates) ~= nil, "loadPersistedRates restores recipeRates on fresh boot")
+local loadedCnt = Scheduler.loadRatesFile("/home/universal/test16_rates.cache", rebootSt, sCfg.maxRecipeCache, "/home/test16_rates.bak")
+assertEq(loadedCnt, savedCnt, "loadRatesFile restores exact recipe count on fresh boot")
+os.remove("/home/universal/test16_rates.cache")
+os.remove("/home/test16_rates.bak")
 
 -- t=2.0: Continuous PROBE arrives -> preempts BULK NC 0, keeping NC 0 queued until t=182s!
 itFastS[1] = { name = "gt:fast_probe_a", damage = 0, size = 4, label = "Fast Probe" }
@@ -1230,7 +1232,39 @@ Scheduler.step(evCfg, evState, 25.0)
 local evIdleD2 = Scheduler.renderDigest(evCfg, evState)
 assertEq(evIdleD1, evIdleD2, "renderDigest remains identical across idle steps (0 redundant redraws)")
 
-rawset(_G, "__HELD_OBJECTS", { cfg, state, scanPool, evState, mSt2, mcSt, st32, dyeSt, cfg16, st16, ui16, sCfg, sSt })
+-- =========================================================================
+-- TEST 17: 4,096-Recipe Scale (113+ Full Pattern IFs) & Slow-Protected SLRU
+-- =========================================================================
+local st17 = Scheduler.newState()
+for i = 1, 250 do
+    Policy.recordRecipeRate(st17, 1, i % 16, "i:gt:slow_plate_" .. i, 0.25, true, 4096)
+end
+assertEq(st17.recipeRateCount, 250, "250 slow recipes recorded")
+assertEq(st17.recipeSlowCount, 250, "250 slow recipes flagged")
+
+-- Flood with 4,500 fast one-off recipes -> forces 654 evictions beyond 4096 cap!
+for i = 1, 4500 do
+    Policy.recordRecipeRate(st17, 1, i % 16, "i:gt:fast_junk_" .. i, 200.0, false, 4096)
+end
+assertEq(st17.recipeRateCount, 4096, "Cache capped cleanly at 4096")
+assertEq(st17.recipeSlowCount, 250, "0 slow recipes evicted under 4,500 fast arrivals!")
+
+local slowCfg17 = Scheduler.defaultConfig()
+local ssTest17 = { workScore = 10, ingredientSig = "i:gt:slow_plate_1" }
+local cand17 = Policy.classifyCandidate(1, 1, slowCfg17.pools[1].slices[1], ssTest17, st17, slowCfg17, 0.0, false)
+assertEq(cand17.tier, "BULK", "Survived slow recipe classifies BULK immediately at t=0")
+
+-- Stream 4096 packed entries to disk & reload into fresh state
+local wroteCnt = Scheduler.saveRatesFile("/home/universal/test17_rates.cache", st17, "/home/test17_rates.bak")
+assertEq(wroteCnt, 4096, "Streamed all 4096 packed entries to disk")
+local reload17 = Scheduler.newState()
+local loadCnt = Scheduler.loadRatesFile("/home/universal/test17_rates.cache", reload17, 4096, "/home/test17_rates.bak")
+assertEq(loadCnt, 4096, "Reloaded exact 4096 entries from rates.cache")
+assertEq(reload17.recipeSlowCount, 250, "Reloaded exact 250 protected slow recipes")
+os.remove("/home/universal/test17_rates.cache")
+os.remove("/home/test17_rates.bak")
+
+rawset(_G, "__HELD_OBJECTS", { cfg, state, scanPool, evState, mSt2, mcSt, st32, dyeSt, cfg16, st16, ui16, sCfg, sSt, st17 })
 """
             host.exec_lua(lua_suite, "universal_test_suite")
 
@@ -1327,12 +1361,20 @@ rawset(_G, "__HELD_OBJECTS", { cfg, state, scanPool, evState, mSt2, mcSt, st32, 
                     local f = io.open("/home/universal/config.cfg", "w")
                     f:write("{armed=false,customTag=999}")
                     f:close()
+                    local fr = io.open("/home/universal/rates.cache", "w")
+                    fr:write("# univ-rates-v2\\nabcd:1234\\n")
+                    fr:close()
                     local okUp = inst("--local", __UNIV_ROOT, "--update", "--yes")
                     assert(okUp, "Standalone update failed")
                     local f2 = io.open("/home/universal/config.cfg", "r")
                     local body = f2:read("*a")
                     f2:close()
                     assert(body:find("customTag=999", 1, true), "Update overwrote config.cfg!")
+                    local fr2 = io.open("/home/universal/rates.cache", "r")
+                    local rbody = fr2:read("*a")
+                    fr2:close()
+                    assert(rbody:find("abcd:1234", 1, true), "Update overwrote rates.cache!")
+                    assert(__py_exists("/home/rates.universal.bak"), "Missing backup /home/rates.universal.bak")
                     assert(__py_exists("/home/universal/main.lua"), "Missing installed main.lua")
                     assert(__py_exists("/home/universal/lib/policy.lua"), "Missing installed lib/policy.lua")
                     assert(__py_exists("/usr/bin/universal.lua"), "Missing /usr/bin/universal.lua")
