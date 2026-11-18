@@ -1,3 +1,4 @@
+local cliArgs = { ... }
 package.path = package.path .. ";/home/?.lua"
 
 local computer = require("computer")
@@ -6,19 +7,160 @@ local config = require("config")
 local internet = require("internet")
 local event = require("event")
 local okSer, serialization = pcall(require, "serialization")
+local okFs, filesystem = pcall(require, "filesystem")
+local okTerm, term = pcall(require, "term")
+local okUiMod, Ae2UI = pcall(require, "ae2_ui")
+
+local forceHeadless = false
+for i = 1, #cliArgs do
+    local a = tostring(cliArgs[i] or "")
+    if a == "--headless" or a == "headless" then
+        forceHeadless = true
+        break
+    end
+end
+
+local OVERRIDES_PATH = "/home/config_overrides.lua"
+local INTERVAL_KEYS = {
+    "itemInterval", "fluidInterval", "essentiaInterval", "energyInterval",
+    "energyAE2Interval", "cpuInterval", "tpsInterval", "allItemsInterval",
+}
+local TOGGLE_KEYS = {
+    "enableItems", "enableFluids", "enableEssentia", "enableEnergy", "enableWireless",
+    "enableEnergyAE2", "enableCpus", "enableTps", "detailedTps", "enableBridge",
+    "enableMesh", "enableLogging", "enableDebug",
+}
+
+local baseConfigSnapshot = { toggles = {}, intervals = {}, exportPaused = (config.exportPaused == true) }
+for _, k in ipairs(TOGGLE_KEYS) do
+    baseConfigSnapshot.toggles[k] = (config[k] == true)
+end
+config._sec = type(config._sec) == "table" and config._sec or {}
+for _, k in ipairs(INTERVAL_KEYS) do
+    local ticks = tonumber(config[k]) or 0
+    local sec = (config._sec[k] ~= nil) and tonumber(config._sec[k]) or math.floor((ticks / 72) + 0.5)
+    config._sec[k] = sec
+    baseConfigSnapshot.intervals[k] = ticks
+end
 
 local maxInt = 9223372036854775807
 local AuthHeader = nil
 local needExitFlag = false
 local lastItemScanSec = 0
+local uiActive = false
 
 local MESH_PORT = tonumber(config.meshPort) or 4205
-local dtpfMesh = { addr = nil, viaTunnel = false, lastSeen = -1000 }
+local dtpfMesh = { addr = nil, viaTunnel = false, lastSeen = -1000, status = nil }
 local pumpMesh = { addr = nil, viaTunnel = false, lastSeen = -1000, status = nil, statusUptime = -1000 }
 local univMesh = { addr = nil, viaTunnel = false, lastSeen = -1000, status = nil }
 local gorgeMesh = { addr = nil, viaTunnel = false, lastSeen = -1000, status = nil }
 local pendingMaintJobs = {}
 local meshReqSeq = 0
+
+local hubState = {
+    freeMem = 0,
+    totalMem = 0,
+    nowUptime = 0,
+    bridgeConnected = false,
+    meshModemOk = false,
+    meshTunnelOk = false,
+    lastScanDurSec = 0,
+    lastItemsCount = 0,
+    exporterPaused = (config.exportPaused == true),
+    ae2 = { connected = false, avgInjection = 0, avgUsage = 0, maxStorage = 0, currStorage = 0, idleUsage = 0 },
+    lsc = { online = false, pct = 0, net5s = 0, in5s = 0, out5s = 0, wirelessStr = "0", wirelessOn = true },
+    tps = { online = false, mspt = 0, tps = 20, chunks = 0, dims = 0 },
+    cpus = { list = {}, total = 0, busyCount = 0 },
+    peers = { dtpf = dtpfMesh, pump = pumpMesh, univ = univMesh, gorge = gorgeMesh },
+    logs = {},
+}
+
+local function logMsg(tag, msg)
+    local line = tostring(msg or "")
+    local logs = hubState.logs
+    logs[#logs + 1] = {
+        t = (computer.uptime and computer.uptime()) or os.clock() or 0,
+        tag = tag or "LOG",
+        msg = line,
+    }
+    if #logs > 160 then
+        table.remove(logs, 1)
+    end
+    if not uiActive and config.enableLogging then
+        print(line)
+    end
+end
+
+local function loadConfigOverrides()
+    if not okSer or not io or not io.open then return end
+    local okO, f = pcall(io.open, OVERRIDES_PATH, "r")
+    if not okO or not f then return end
+    local raw = f:read("*a")
+    f:close()
+    if type(raw) ~= "string" or raw == "" then return end
+    local okU, ov = pcall(serialization.unserialize, raw)
+    if not okU or type(ov) ~= "table" then return end
+    if ov.exportPaused ~= nil then
+        config.exportPaused = (ov.exportPaused == true)
+        hubState.exporterPaused = config.exportPaused
+    end
+    if type(ov.toggles) == "table" then
+        for _, k in ipairs(TOGGLE_KEYS) do
+            if ov.toggles[k] ~= nil then
+                config[k] = (ov.toggles[k] == true)
+            end
+        end
+    end
+    if type(ov.intervals) == "table" then
+        for _, k in ipairs(INTERVAL_KEYS) do
+            local sec = tonumber(ov.intervals[k])
+            if sec and sec >= 1 then
+                config._sec[k] = sec
+                config[k] = sec * 72
+            end
+        end
+    end
+end
+
+local function saveConfigOverrides()
+    if not okSer or not io or not io.open then return false end
+    local ov = {
+        exportPaused = (config.exportPaused == true),
+        toggles = {},
+        intervals = {},
+    }
+    for _, k in ipairs(TOGGLE_KEYS) do
+        ov.toggles[k] = (config[k] == true)
+    end
+    for _, k in ipairs(INTERVAL_KEYS) do
+        ov.intervals[k] = tonumber(config._sec[k]) or math.floor(((tonumber(config[k]) or 0) / 72) + 0.5)
+    end
+    local okO, f = pcall(io.open, OVERRIDES_PATH, "w")
+    if not okO or not f then return false end
+    f:write(serialization.serialize(ov))
+    f:close()
+    return true
+end
+
+local function resetConfigOverrides()
+    config.exportPaused = baseConfigSnapshot.exportPaused
+    hubState.exporterPaused = config.exportPaused
+    for _, k in ipairs(TOGGLE_KEYS) do
+        config[k] = baseConfigSnapshot.toggles[k]
+    end
+    for _, k in ipairs(INTERVAL_KEYS) do
+        local ticks = baseConfigSnapshot.intervals[k] or 0
+        config[k] = ticks
+        config._sec[k] = math.floor((ticks / 72) + 0.5)
+    end
+    if okFs and filesystem and filesystem.remove then
+        pcall(filesystem.remove, OVERRIDES_PATH)
+    elseif os and os.remove then
+        pcall(os.remove, OVERRIDES_PATH)
+    end
+end
+
+loadConfigOverrides()
 
 local function uptimeNow()
     return (computer.uptime and computer.uptime()) or os.clock()
@@ -28,43 +170,75 @@ local function isMeshFresh(peer, maxAge)
     return peer and peer.addr ~= nil and (uptimeNow() - (peer.lastSeen or -1000)) < maxAge
 end
 
+local cachedMeshModem = nil
+local cachedMeshTunnel = nil
+local meshCacheInit = false
+
+local function invalidateMeshCache()
+    cachedMeshModem = nil
+    cachedMeshTunnel = nil
+    meshCacheInit = false
+    hubState.meshModemOk = false
+    hubState.meshTunnelOk = false
+end
+
+local function configureModemProxy(m)
+    if not m then return end
+    local needOpen = true
+    if type(m.isOpen) == "function" then
+        local okO, isO = pcall(m.isOpen, MESH_PORT)
+        if okO and isO == true then needOpen = false end
+    end
+    if needOpen and m.open then pcall(m.open, MESH_PORT) end
+
+    local isW = false
+    if m.isWireless then
+        local okW, rW = pcall(m.isWireless)
+        isW = okW and (rW == true)
+    end
+    if isW and m.setStrength then
+        local needStr = true
+        if type(m.getStrength) == "function" then
+            local okG, curStr = pcall(m.getStrength)
+            if okG and tonumber(curStr) and tonumber(curStr) >= 400 then needStr = false end
+        end
+        if needStr then pcall(m.setStrength, 400) end
+    end
+    return isW
+end
+
 local function getMeshTransports()
     if config.enableMesh == false or not okSer then return nil, nil end
+    if meshCacheInit then
+        return cachedMeshModem, cachedMeshTunnel
+    end
     local firstModem, wirelessModem = nil, nil
     if component.list then
         for addr in component.list("modem", true) do
             local m = component.proxy(addr)
             if m then
-                if m.open then pcall(m.open, MESH_PORT) end
-                local isW = false
-                if m.isWireless then
-                    local okW, rW = pcall(m.isWireless)
-                    isW = okW and (rW == true)
-                end
-                if isW and m.setStrength then pcall(m.setStrength, 400) end
+                local isW = configureModemProxy(m)
                 if not firstModem then firstModem = m end
                 if isW and not wirelessModem then wirelessModem = m end
             end
         end
     elseif component.isAvailable and component.isAvailable("modem") and component.modem then
-        local m = component.modem
-        if m.open then pcall(m.open, MESH_PORT) end
-        local isW = false
-        if m.isWireless then
-            local okW, rW = pcall(m.isWireless)
-            isW = okW and (rW == true)
-        end
-        if isW and m.setStrength then pcall(m.setStrength, 400) end
-        firstModem = m
+        configureModemProxy(component.modem)
+        firstModem = component.modem
     end
     local modem = wirelessModem or firstModem
     local tunnel = nil
-    if component.isAvailable and component.isAvailable("tunnel") then
+    if component.isAvailable and component.isAvailable("tunnel") and component.tunnel then
         tunnel = component.tunnel
     elseif component.list then
         local tAddr = component.list("tunnel", true)()
         if tAddr then tunnel = component.proxy(tAddr) end
     end
+    cachedMeshModem = modem
+    cachedMeshTunnel = tunnel
+    meshCacheInit = true
+    hubState.meshModemOk = (modem ~= nil)
+    hubState.meshTunnelOk = (tunnel ~= nil)
     return modem, tunnel
 end
 
@@ -319,12 +493,11 @@ function json.decode(str)
 end
 
 local function postInflux(url, body)
+    if config.exportPaused then return true end
     if not body or body == "" then return true end
     local ok, req = pcall(internet.request, url, body, AuthHeader)
     if not ok or not req then
-        if config.enableLogging then
-            print("[Influx] Request error: " .. tostring(req))
-        end
+        logMsg("ERR", "[Influx] Request error: " .. tostring(req))
         return false
     end
     local drainOk, err = pcall(function()
@@ -335,17 +508,18 @@ local function postInflux(url, body)
             pcall(req.close)
         end
     end)
-    if not drainOk and config.enableLogging then
-        print("[Influx] Response error: " .. tostring(err))
+    if not drainOk then
+        logMsg("ERR", "[Influx] Response error: " .. tostring(err))
     end
     return drainOk
 end
 
 local function flushBatch(dbUrl, lines)
     if #lines == 0 then return end
+    if config.exportPaused then return end
     local payload = table.concat(lines, "\n") .. "\n"
     if config.enableDebug then
-        print(payload)
+        logMsg("DBG", payload)
     end
     postInflux(dbUrl, payload)
 end
@@ -583,6 +757,7 @@ local function exportItemsNumeric(interface, onStep)
     local batchSize = config.batchSize
     local slowRange = config.slowRange
     local currID = 0
+    local itemCount = 0
     while currID <= maxID do
         local range
         if (currID + batchSize < slowRange[1]) or (currID > slowRange[2]) then
@@ -599,6 +774,7 @@ local function exportItemsNumeric(interface, onStep)
         local ok, currReturn = pcall(interface.getItemsInNetworkById, range)
         if ok and currReturn then
             for _, item in pairs(currReturn) do
+                itemCount = itemCount + 1
                 if (item.size or 0) >= config.itemThreshold and item.label and item.label:find("^drop of") == nil then
                     lines[#lines + 1] = config.itemMeasurement .. ",item=" .. sanitize(item.label) .. " amount=" .. capInt(item.size) .. "i"
                     if #lines >= config.itemMaxExport then
@@ -614,6 +790,8 @@ local function exportItemsNumeric(interface, onStep)
     end
     flushBatch(config.dbURL .. config.itemDB, lines)
     lastItemScanSec = math.floor(((os.time() - tScan0) / 72) * 100 + 0.5) / 100
+    hubState.lastScanDurSec = lastItemScanSec
+    hubState.lastItemsCount = itemCount
 end
 
 local function exportItemsInfMem(interface)
@@ -662,9 +840,29 @@ local function formatFloatField(v)
     return string.format("%.15g", v)
 end
 
-local function exportEnergy(lsc, lscProxy)
+local function exportEnergy(lsc, lscProxy, skipPost)
     local sensorData = lsc and lsc.getSensorInformation and lsc.getSensorInformation() or {}
     local e = parseLscSensor(sensorData, lscProxy)
+
+    local i5s = e.input5s or 0
+    local o5s = e.output5s or 0
+    local i5m = e.input5m or 0
+    local o5m = e.output5m or 0
+    local i1h = e.input1h or 0
+    local o1h = e.output1h or 0
+    local wStr = e.exactWirelessStr or (e.wirelessF and string.format("%.0f", e.wirelessF)) or "0"
+
+    hubState.lsc = {
+        online = (e.fillPct ~= nil or e.currentF ~= nil or e.input5s ~= nil or e.wirelessF ~= nil or e.exactWirelessStr ~= nil),
+        pct = tonumber(e.fillPct) or 0,
+        in5s = i5s,
+        out5s = o5s,
+        net5s = i5s - o5s,
+        wirelessStr = wStr,
+        wirelessOn = (e.wirelessEnabled ~= false),
+    }
+
+    if skipPost or not config.enableEnergy then return end
 
     local fields = {}
     local function addField(k, v)
@@ -689,13 +887,6 @@ local function exportEnergy(lsc, lscProxy)
     end
 
     -- Legacy integer fields must keep `i` suffix so InfluxDB v1 shard types stay consistent
-    local i5s = e.input5s or 0
-    local o5s = e.output5s or 0
-    local i5m = e.input5m or 0
-    local o5m = e.output5m or 0
-    local i1h = e.input1h or 0
-    local o1h = e.output1h or 0
-
     addField("input5s", capIntStr(i5s) .. "i")
     addField("output5s", capIntStr(o5s) .. "i")
     addField("input5m", capIntStr(i5m) .. "i")
@@ -718,7 +909,6 @@ local function exportEnergy(lsc, lscProxy)
     if e.input1h ~= nil and e.output1h ~= nil then addField("net_1h", formatFloatField(i1h - o1h)) end
 
     if config.enableWireless then
-        local wStr = e.exactWirelessStr or (e.wirelessF and string.format("%.0f", e.wirelessF)) or "0"
         local wFloat = e.exactWirelessStr or formatFloatField(e.wirelessF or 0)
         local wBase = e.wirelessBase or 0
         local wExp = e.wirelessExp or 0
@@ -734,36 +924,62 @@ local function exportEnergy(lsc, lscProxy)
     if #fields == 0 then return end
     local postString = config.energyMeasurement .. " " .. table.concat(fields, ",") .. "\n"
     if config.enableDebug then
-        print(postString)
+        logMsg("DBG", postString)
     end
     postInflux(config.dbURL .. config.energyDB, postString)
 end
 
-local function exportCpus(interface)
+local function refreshCpuHubState(interface)
+    if not interface or not interface.getCpus then return nil end
     local ok, cpus = pcall(interface.getCpus)
-    if not ok or type(cpus) ~= "table" then return end
+    if not ok or type(cpus) ~= "table" then return nil end
+    local list = {}
+    local busyCount = 0
     local lines = {}
     for _, cpu in pairs(cpus) do
         if cpu.name and #cpu.name > 0 then
-            local okOut, output = pcall(cpu.cpu.finalOutput)
             local craftingItem = "N/A"
             local craftingCount = 0
-            if okOut and type(output) == "table" and output.label then
-                craftingItem = sanitizeFieldStr(output.label)
-                craftingCount = capInt(output.size or output.amount or 0)
+            if cpu.cpu and cpu.cpu.finalOutput then
+                local okOut, output = pcall(cpu.cpu.finalOutput)
+                if okOut and type(output) == "table" and output.label then
+                    craftingItem = tostring(output.label)
+                    craftingCount = capInt(output.size or output.amount or 0)
+                end
             end
+            local isBusy = (cpu.busy == true)
+            if isBusy then busyCount = busyCount + 1 end
+            list[#list + 1] = {
+                name = cpu.name,
+                storage = math.floor(tonumber(cpu.storage or 0) or 0),
+                coprocessors = math.floor(tonumber(cpu.coprocessors or 0) or 0),
+                busy = isBusy,
+                craftingItem = craftingItem,
+                craftingCount = craftingCount,
+            }
             lines[#lines + 1] = string.format(
                 '%s,cpuname=%s storage=%di,coprocessors=%di,busy=%s,craftingItem="%s",craftingCount=%di',
                 config.cpuMeasurement,
                 sanitize(cpu.name),
                 capInt(cpu.storage or 0),
                 capInt(cpu.coprocessors or 0),
-                tostring(cpu.busy == true),
-                craftingItem,
+                tostring(isBusy),
+                sanitizeFieldStr(craftingItem),
                 craftingCount
             )
         end
     end
+    table.sort(list, function(a, b)
+        if a.busy ~= b.busy then return a.busy end
+        return tostring(a.name) < tostring(b.name)
+    end)
+    hubState.cpus = { list = list, total = #list, busyCount = busyCount }
+    return lines
+end
+
+local function exportCpus(interface, skipPost)
+    local lines = refreshCpuHubState(interface)
+    if not lines or skipPost or not config.enableCpus then return end
     flushBatch(config.dbURL .. config.cpuDB, lines)
 end
 
@@ -778,14 +994,23 @@ local function updateItemIds(arr, interface)
     end
 end
 
-local function exportEnergyAE2(interface)
-    if not interface.getAvgPowerUsage then return end
+local function exportEnergyAE2(interface, skipPost)
+    if not interface or not interface.getAvgPowerUsage then return end
     local divisor = config.energyAE2ExportAsEU and 2 or 1
     local avgInjection = (interface.getAvgPowerInjection() or 0) / divisor
     local avgUsage = (interface.getAvgPowerUsage() or 0) / divisor
     local maxStorage = (interface.getMaxStoredPower() or 0) / divisor
     local currStorage = (interface.getStoredPower() or 0) / divisor
     local idleUsage = (interface.getIdlePowerUsage() or 0) / divisor
+    hubState.ae2 = {
+        connected = true,
+        avgInjection = avgInjection,
+        avgUsage = avgUsage,
+        maxStorage = maxStorage,
+        currStorage = currStorage,
+        idleUsage = idleUsage,
+    }
+    if skipPost or not config.enableEnergyAE2 then return end
     local postString = string.format(
         "%s injection=%s,usage=%s,max=%s,curr=%s,idle=%s\n",
         config.energyAE2Measurement,
@@ -796,15 +1021,25 @@ local function exportEnergyAE2(interface)
         formatFloatField(idleUsage)
     )
     if config.enableDebug then
-        print(postString)
+        logMsg("DBG", postString)
     end
     postInflux(config.dbURL .. config.energyAE2DB, postString)
 end
 
-local function exportTps(tpsCard)
+local function exportTps(tpsCard, skipPost)
+    if not tpsCard or not tpsCard.getOverallTickTime then return end
     local overallMspt = tpsCard.getOverallTickTime()
     local overallChunks = tpsCard.getOverallChunksLoaded()
     local overallDims = tpsCard.getOverallDimsLoaded()
+    local tpsVal = math.min(20.0, 1000.0 / math.max(50.0, tonumber(overallMspt) or 50.0))
+    hubState.tps = {
+        online = true,
+        mspt = tonumber(overallMspt) or 0,
+        tps = tpsVal,
+        chunks = tonumber(overallChunks) or 0,
+        dims = tonumber(overallDims) or 0,
+    }
+    if skipPost or not config.enableTps then return end
     local lines = {
         string.format('%s,dimension="overall" mspt=%s,chunks=%s,dims=%s',
             config.tpsMeasurement, formatFloatField(overallMspt), formatFloatField(overallChunks), formatFloatField(overallDims))
@@ -1107,7 +1342,10 @@ local function handleMeshModemEvent(interface, writeLineFn, localAddr, sender, p
         pumpMesh.status = st
         pumpMesh.statusUptime = now
         sendMeshPacket(sender, isTunnel, "PUMP_ACK", "ok")
-        if not wasFresh then emitMeshHelloIfOnline(writeLineFn) end
+        if not wasFresh then
+            logMsg("MESH", "Space Pump Array connected on OC Mesh.")
+            emitMeshHelloIfOnline(writeLineFn)
+        end
 
         local pumpsActive, pumpsTotal, totalMult = 0, 0, 0
         for _, p in ipairs(type(st.pumps) == "table" and st.pumps or {}) do
@@ -1143,8 +1381,12 @@ local function handleMeshModemEvent(interface, writeLineFn, localAddr, sender, p
         dtpfMesh.addr = sender
         dtpfMesh.viaTunnel = isTunnel
         dtpfMesh.lastSeen = now
+        dtpfMesh.status = pkt
         sendMeshPacket(sender, isTunnel, "DTPF_ACK", "ok")
-        if not wasFresh then emitMeshHelloIfOnline(writeLineFn) end
+        if not wasFresh then
+            logMsg("MESH", "DTPF Fleet connected on OC Mesh.")
+            emitMeshHelloIfOnline(writeLineFn)
+        end
 
         local units = type(pkt.units) == "table" and pkt.units or {}
         local onlineN, activeN, convN = 0, 0, 0
@@ -1206,7 +1448,10 @@ local function handleMeshModemEvent(interface, writeLineFn, localAddr, sender, p
         univMesh.lastSeen = now
         univMesh.status = pkt
         sendMeshPacket(sender, isTunnel, "UNIV_ACK", "ok")
-        if not wasFresh then emitMeshHelloIfOnline(writeLineFn) end
+        if not wasFresh then
+            logMsg("MESH", "Universal RS Controller connected on OC Mesh.")
+            emitMeshHelloIfOnline(writeLineFn)
+        end
         local line = string.format(
             "universal_control armed=%di,active_pools=%di,queued=%di,stalled=%di,completed=%di,preemptions=%di",
             pkt.armed and 1 or 0, math.floor(tonumber(pkt.activePools) or 0),
@@ -1225,7 +1470,27 @@ local function handleMeshModemEvent(interface, writeLineFn, localAddr, sender, p
         gorgeMesh.lastSeen = now
         gorgeMesh.status = pkt
         sendMeshPacket(sender, isTunnel, "GORGE_ACK", "ok")
-        if not wasFresh then emitMeshHelloIfOnline(writeLineFn) end
+        if not wasFresh then
+            logMsg("MESH", "Gorge & Exoticizer Rack connected on OC Mesh.")
+            emitMeshHelloIfOnline(writeLineFn)
+        end
+        local gf = type(pkt.godforge) == "table" and pkt.godforge or {}
+        local lscExtra = (pkt.lscPct ~= nil) and string.format(",lsc_pct=%.2f", tonumber(pkt.lscPct) or 0) or ""
+        local line = string.format(
+            "godforge_control armed=%di,active_exoticizers=%di,completed_cycles=%di,errors=%di,gf_online=%di,gf_active=%di,gf_work_allowed=%di,gf_rings=%di,gf_connected=%di,gf_upgrades=%di%s",
+            pkt.armed and 1 or 0,
+            math.floor(tonumber(pkt.activeCount) or 0),
+            math.floor(tonumber(pkt.completedCycles) or 0),
+            math.floor(tonumber(pkt.errorCount) or 0),
+            gf.online and 1 or 0,
+            gf.active and 1 or 0,
+            (gf.workAllowed ~= false) and 1 or 0,
+            math.floor(tonumber(gf.rings) or 0),
+            math.floor(tonumber(gf.connected) or 0),
+            math.floor(tonumber(gf.upgrades) or 0),
+            lscExtra
+        )
+        postInflux(dbUrl, line .. "\n")
         return true
 
     elseif msgType == "MESH_MAINT_SYNC" then
@@ -1385,6 +1650,8 @@ local function handleBridgeCommand(sockWriteLine, interface, cmd)
             lastItemScanSec = lastItemScanSec,
             meshDtpf = isMeshFresh(dtpfMesh, 60),
             meshPump = isMeshFresh(pumpMesh, 180),
+            meshUniv = isMeshFresh(univMesh, 60),
+            meshGorge = isMeshFresh(gorgeMesh, 60),
         })
     elseif op == "cpus" then
         if not interface then
@@ -1402,6 +1669,8 @@ local function handleBridgeCommand(sockWriteLine, interface, cmd)
             lastItemScanSec = lastItemScanSec,
             meshDtpf = isMeshFresh(dtpfMesh, 60),
             meshPump = isMeshFresh(pumpMesh, 180),
+            meshUniv = isMeshFresh(univMesh, 60),
+            meshGorge = isMeshFresh(gorgeMesh, 60),
         })
     elseif op == "item_stocks" then
         if not interface then
@@ -1609,10 +1878,12 @@ local function handleBridgeCommand(sockWriteLine, interface, cmd)
         for _, cpu in ipairs(cpus) do
             if cpu.name == targetCpu and cpu.cpu and cpu.cpu.cancel then
                 local okCan, cancelled = pcall(cpu.cpu.cancel)
+                refreshCpuHubState(interface)
                 if config.enableCpus then
-                    pcall(exportCpus, interface)
+                    pcall(exportCpus, interface, config.exportPaused)
                 end
                 if okCan and cancelled then
+                    logMsg("OUT", "Canceled crafting CPU " .. targetCpu .. " (via bridge)")
                     return reply({ ok = true, canceled = true, cpus = collectCpusSnapshot(interface) })
                 end
                 return reply({ ok = false, error = "CPU is not currently busy" })
@@ -1668,6 +1939,60 @@ local function handleBridgeCommand(sockWriteLine, interface, cmd)
             res.meshRouted = true
         end
         return reply(res)
+    elseif op == "univ_state" then
+        if univMesh.status and not cmd.force and isMeshFresh(univMesh, 60) then
+            return reply({
+                ok = true,
+                meshRouted = true,
+                ageSec = math.max(0, math.floor((uptimeNow() - (univMesh.lastSeen or 0)) * 10) / 10),
+                status = univMesh.status,
+            })
+        end
+        local res = callMeshRpc(interface, sockWriteLine, univMesh, "UNIV_CMD", { action = "poll_now" }, "UNIV_REPLY", 5.0)
+        if type(res) == "table" then
+            res.meshRouted = true
+            if univMesh.status and not res.status then res.status = univMesh.status end
+            return reply(res)
+        end
+        return reply({ ok = false, error = "Empty Universal mesh response" })
+    elseif op == "univ_action" then
+        local res = callMeshRpc(interface, sockWriteLine, univMesh, "UNIV_CMD", {
+            action = cmd.action,
+            poolId = cmd.poolId or cmd.poolIdx,
+            color = cmd.color,
+        }, "UNIV_REPLY", 5.0)
+        if type(res) == "table" then
+            res.meshRouted = true
+            return reply(res)
+        end
+        return reply({ ok = false, error = "Empty Universal mesh response" })
+    elseif op == "gorge_state" then
+        if gorgeMesh.status and not cmd.force and isMeshFresh(gorgeMesh, 60) then
+            return reply({
+                ok = true,
+                meshRouted = true,
+                ageSec = math.max(0, math.floor((uptimeNow() - (gorgeMesh.lastSeen or 0)) * 10) / 10),
+                status = gorgeMesh.status,
+            })
+        end
+        local res = callMeshRpc(interface, sockWriteLine, gorgeMesh, "GORGE_CMD", { action = "poll_now" }, "GORGE_REPLY", 5.0)
+        if type(res) == "table" then
+            res.meshRouted = true
+            if gorgeMesh.status and not res.status then res.status = gorgeMesh.status end
+            return reply(res)
+        end
+        return reply({ ok = false, error = "Empty Gorge mesh response" })
+    elseif op == "gorge_action" then
+        local res = callMeshRpc(interface, sockWriteLine, gorgeMesh, "GORGE_CMD", {
+            action = cmd.action,
+            exoticizerId = cmd.exoticizerId,
+            mode = cmd.mode,
+        }, "GORGE_REPLY", 5.0)
+        if type(res) == "table" then
+            res.meshRouted = true
+            return reply(res)
+        end
+        return reply({ ok = false, error = "Empty Gorge mesh response" })
     elseif op == "reboot" then
         reply({ ok = true, rebooting = true })
         pcall(os.sleep, 0.05)
@@ -1682,6 +2007,7 @@ end
 
 local function main()
     needExitFlag = false
+    uiActive = false
     local startTime = os.time()
     local lastFluidTime = startTime
     local lastItemTime = startTime
@@ -1692,35 +2018,42 @@ local function main()
     local lastTpsTime = startTime
     local lastAllItemsTime = (config.allItemsInterval == nil) and startTime or (startTime - config.allItemsInterval)
 
+    local wantGui = (not forceHeadless) and okUiMod and type(Ae2UI) == "table"
+        and component.isAvailable and component.isAvailable("gpu") and component.isAvailable("screen")
+
     local interface = nil
     local lsc = nil
     local lscProxy = nil
     local tpsCard = nil
 
-    if config.enableCpus or config.enableEssentia or config.enableFluids or config.enableItems or config.enableEnergyAE2 or config.enableBridge then
-        interface = findMainnetAE2()
+    local function discoverHardware(forceAll)
+        if not interface and (forceAll or config.enableCpus or config.enableEssentia or config.enableFluids or config.enableItems or config.enableEnergyAE2 or config.enableBridge) then
+            interface = findMainnetAE2()
+        end
+        if (not lsc and not lscProxy) and (forceAll or config.enableEnergy) then
+            for addr in component.list("gt_machine", true) do
+                local mod = component.proxy(addr)
+                if mod and mod.getName and mod.getName() == "multimachine.supercapacitor" then
+                    lsc = mod
+                    break
+                end
+            end
+            for addr in component.list("LSC", true) do
+                lscProxy = component.proxy(addr)
+                break
+            end
+        end
+        if not tpsCard and (forceAll or config.enableTps) then
+            tpsCard = component.tps_card
+        end
     end
+
+    discoverHardware(wantGui)
     do
         local m, t = getMeshTransports()
         if m or t then
             sendMeshPacket(nil, false, "MESH_MAINNET_HELLO", "boot")
         end
-    end
-    if config.enableEnergy then
-        for addr in component.list("gt_machine", true) do
-            local mod = component.proxy(addr)
-            if mod and mod.getName and mod.getName() == "multimachine.supercapacitor" then
-                lsc = mod
-                break
-            end
-        end
-        for addr in component.list("LSC", true) do
-            lscProxy = component.proxy(addr)
-            break
-        end
-    end
-    if config.enableTps then
-        tpsCard = component.tps_card
     end
 
     local allItemIds = {}
@@ -1742,6 +2075,7 @@ local function main()
         end
         sock = nil
         sockReady = false
+        hubState.bridgeConnected = false
         rxBuf = ""
         connectStartUptime = 0
     end
@@ -1752,9 +2086,7 @@ local function main()
         while #data > 0 do
             local okW, written, err = pcall(sock.write, data)
             if not okW or not written then
-                if config.enableLogging then
-                    print("[Bridge] Write closed: " .. tostring(err or written))
-                end
+                logMsg("WRN", "[Bridge] Write closed: " .. tostring(err or written))
                 closeBridgeSocket()
                 return false
             end
@@ -1768,7 +2100,11 @@ local function main()
     end
 
     local function ensureBridgeConnected(now)
-        if not config.enableBridge or not component.isAvailable("internet") then return end
+        if not config.enableBridge then
+            if sock then closeBridgeSocket() end
+            return
+        end
+        if not component.isAvailable("internet") then return end
         local rawInet = component.internet
         if not rawInet or not rawInet.connect then return end
 
@@ -1785,9 +2121,7 @@ local function main()
                 rxBuf = ""
                 connectStartUptime = now
             else
-                if config.enableLogging then
-                    print("[Bridge] Connect failed: " .. tostring(err or s))
-                end
+                logMsg("WRN", "[Bridge] Connect failed: " .. tostring(err or s))
                 sock = nil
             end
         end
@@ -1799,6 +2133,8 @@ local function main()
                 closeBridgeSocket()
             elseif ready == true then
                 sockReady = true
+                hubState.bridgeConnected = true
+                logMsg("OUT", "[Bridge] Connected to Web Bridge.")
                 writeBridgeLine(json.encode({
                     op = "hello",
                     version = 2,
@@ -1808,6 +2144,8 @@ local function main()
                     lastItemScanSec = lastItemScanSec,
                     meshDtpf = isMeshFresh(dtpfMesh, 60),
                     meshPump = isMeshFresh(pumpMesh, 180),
+                    meshUniv = isMeshFresh(univMesh, 60),
+                    meshGorge = isMeshFresh(gorgeMesh, 60),
                 }))
             end
         end
@@ -1834,12 +2172,182 @@ local function main()
                     local cmd = json.decode(rawLine)
                     if type(cmd) == "table" and cmd.op then
                         local okH, errH = pcall(handleBridgeCommand, writeBridgeLine, interface, cmd)
-                        if not okH and config.enableLogging then
-                            print("[Bridge] Command error (" .. tostring(cmd.op) .. "): " .. tostring(errH))
+                        if not okH then
+                            logMsg("ERR", "[Bridge] Command error (" .. tostring(cmd.op) .. "): " .. tostring(errH))
                         end
                     end
                 end
             end
+        end
+    end
+
+    local ui = nil
+    local uiDirty = false
+
+    local function refreshLocalTelemetryForUi(doPost)
+        local skip = (not doPost) or (config.exportPaused == true)
+        if interface then
+            refreshCpuHubState(interface)
+            exportEnergyAE2(interface, skip)
+        end
+        if lsc or lscProxy then
+            exportEnergy(lsc, lscProxy, skip)
+        end
+        if tpsCard then
+            exportTps(tpsCard, skip)
+        end
+    end
+
+    if wantGui then
+        local uiCallbacks = {
+            onTogglePauseExport = function()
+                config.exportPaused = not (config.exportPaused == true)
+                hubState.exporterPaused = config.exportPaused
+                saveConfigOverrides()
+                logMsg("OUT", config.exportPaused and "InfluxDB exports PAUSED via GUI." or "InfluxDB exports RESUMED via GUI.")
+                return config.exportPaused and "Exports PAUSED (mesh & UI stay live)." or "Exports RESUMED."
+            end,
+            onScanNow = function()
+                hubState._forceScanNow = true
+                discoverHardware(true)
+                refreshLocalTelemetryForUi(true)
+                uiDirty = true
+            end,
+            onMeshPing = function()
+                invalidateMeshCache()
+                local m, t = getMeshTransports()
+                if m or t then
+                    sendMeshPacket(nil, false, "MESH_MAINNET_HELLO", "gui_ping")
+                    logMsg("MESH", "Broadcast MESH_MAINNET_HELLO beacon from UI.")
+                else
+                    logMsg("WRN", "No Wireless Modem or Linked Card available.")
+                end
+            end,
+            onCancelCpu = function(targetName)
+                if not interface or not interface.getCpus then
+                    return false, "No AE2 interface bound."
+                end
+                local cpus = interface.getCpus() or {}
+                for _, cpu in ipairs(cpus) do
+                    if cpu.name == targetName and cpu.cpu and cpu.cpu.cancel then
+                        local okCan, canceled = pcall(cpu.cpu.cancel)
+                        refreshCpuHubState(interface)
+                        if okCan and canceled then
+                            logMsg("OUT", "Canceled crafting job on " .. tostring(targetName))
+                            return true, "Canceled crafting job on " .. tostring(targetName)
+                        end
+                        return false, "CPU is no longer busy."
+                    end
+                end
+                return false, "CPU not found: " .. tostring(targetName)
+            end,
+            onPeerAction = function(peerKey, action)
+                if peerKey == "dtpf" then
+                    local payload
+                    if action == "pause" then
+                        payload = { op = "dtpf_patch", patch = { armed = false } }
+                    elseif action == "resume" then
+                        payload = { op = "dtpf_patch", patch = { armed = true } }
+                    else
+                        payload = { op = "dtpf_action", action = "poll_now" }
+                    end
+                    local res = callMeshRpc(interface, writeBridgeLine, dtpfMesh, "DTPF_CMD", payload, "DTPF_REPLY", 2.5)
+                    if type(res) == "table" and res.ok then
+                        if type(res.units) == "table" then dtpfMesh.status = res end
+                        logMsg("MESH", "DTPF action '" .. tostring(action) .. "' acknowledged.")
+                        return "DTPF: " .. tostring(action) .. " OK."
+                    end
+                    return "DTPF: " .. tostring(type(res) == "table" and res.error or "No response")
+                elseif peerKey == "pump" then
+                    if action == "pause" or action == "resume" then
+                        return "Space Pump runs on stock targets; use [Poll] to wake/refresh."
+                    end
+                    local res = callMeshRpc(interface, writeBridgeLine, pumpMesh, "PUMP_CMD", { op = "action", action = "wake" }, "PUMP_REPLY", 2.5)
+                    if type(res) == "table" and res.ok then
+                        if type(res.status) == "table" then
+                            pumpMesh.status = res.status
+                            pumpMesh.statusUptime = uptimeNow()
+                        end
+                        logMsg("MESH", "Space Pump refreshed via OC Mesh.")
+                        return "Space Pump: wake/refresh OK."
+                    end
+                    return "Space Pump: " .. tostring(type(res) == "table" and res.error or "No response")
+                elseif peerKey == "univ" then
+                    local act = (action == "poll") and "poll_now" or action
+                    local res = callMeshRpc(interface, writeBridgeLine, univMesh, "UNIV_CMD", { action = act }, "UNIV_REPLY", 2.5)
+                    if type(res) == "table" and res.ok then
+                        if res.armed ~= nil and type(univMesh.status) == "table" then univMesh.status.armed = res.armed end
+                        logMsg("MESH", "Universal action '" .. tostring(act) .. "' OK.")
+                        return "Universal: " .. tostring(act) .. " OK."
+                    end
+                    return "Universal: " .. tostring(type(res) == "table" and res.error or "No response")
+                elseif peerKey == "gorge" then
+                    local act = (action == "poll") and "poll_now" or action
+                    local res = callMeshRpc(interface, writeBridgeLine, gorgeMesh, "GORGE_CMD", { action = act }, "GORGE_REPLY", 2.5)
+                    if type(res) == "table" and res.ok then
+                        if res.armed ~= nil and type(gorgeMesh.status) == "table" then gorgeMesh.status.armed = res.armed end
+                        logMsg("MESH", "Gorge action '" .. tostring(act) .. "' OK.")
+                        return "Gorge: " .. tostring(act) .. " OK."
+                    end
+                    return "Gorge: " .. tostring(type(res) == "table" and res.error or "No response")
+                end
+                return "Unknown peer."
+            end,
+            onConfigChanged = function(kind, key, val)
+                if kind == "toggle" then
+                    config[key] = (val == true)
+                    if key == "enableMesh" then
+                        invalidateMeshCache()
+                        if config.enableMesh then getMeshTransports() end
+                    elseif key == "enableBridge" and not config.enableBridge then
+                        closeBridgeSocket()
+                    else
+                        discoverHardware(false)
+                    end
+                elseif kind == "interval" then
+                    local sec = math.max(1, math.floor(tonumber(val) or 1))
+                    config._sec[key] = sec
+                    config[key] = sec * 72
+                end
+                saveConfigOverrides()
+            end,
+            onResetOverrides = function()
+                resetConfigOverrides()
+                invalidateMeshCache()
+                if config.enableMesh ~= false then getMeshTransports() end
+                if not config.enableBridge then closeBridgeSocket() end
+                uiDirty = true
+                logMsg("OUT", "Reset overrides -> restored /home/config.lua defaults.")
+                return "Reset overrides to /home/config.lua defaults."
+            end,
+        }
+        ui = Ae2UI.new(config, hubState, uiCallbacks)
+        uiActive = true
+    end
+
+    local function drainUiEvents()
+        if not ui then return end
+        for _ = 1, 8 do
+            local evName, a1, a2, a3, a4 = event.pull(0, "touch")
+            if not evName then break end
+            if ui:handleTouch(math.floor(tonumber(a2) or 0), math.floor(tonumber(a3) or 0), a4) then
+                uiDirty = true
+            end
+        end
+        for _ = 1, 4 do
+            local evName, _, _, _, dir = event.pull(0, "scroll")
+            if not evName then break end
+            ui:handleScroll(tonumber(dir) or 0)
+            uiDirty = true
+        end
+        for _ = 1, 4 do
+            local evName, _, ch, cd = event.pull(0, "key_down")
+            if not evName then break end
+            ui:handleKeyDown(tonumber(ch) or 0, tonumber(cd) or 0)
+            uiDirty = true
+        end
+        if not ui.running then
+            needExitFlag = true
         end
     end
 
@@ -1849,7 +2357,9 @@ local function main()
             local evName, lAddr, sAddr, port, _, msgType, a1, a2 = event.pull(0, "modem_message")
             if not evName then break end
             if evName == "modem_message" then
-                handleMeshModemEvent(interface, writeBridgeLine, lAddr, sAddr, port, msgType, a1, a2)
+                if handleMeshModemEvent(interface, writeBridgeLine, lAddr, sAddr, port, msgType, a1, a2) then
+                    uiDirty = true
+                end
             else
                 if evName == "interrupted" or (evName == "key_up" and sAddr == 113) then
                     needExitFlag = true
@@ -1862,29 +2372,82 @@ local function main()
     local function stepBackgroundIo()
         drainMeshIncoming()
         drainBridgeIncoming()
+        drainUiEvents()
     end
 
     local function pollAndWait()
-        local evName, lAddr, sAddr, port, _, msgType, a1, a2 = event.pull(1.0)
+        local waitSec = ui and 0.5 or 1.0
+        local evName, lAddr, sAddr, port, a4, msgType, a1, a2 = event.pull(waitSec)
         if evName == "interrupted" then
             needExitFlag = true
-        elseif evName == "key_up" and sAddr == 113 then
+        elseif not ui and evName == "key_up" and sAddr == 113 then
             needExitFlag = true
         elseif evName == "internet_ready" then
             drainBridgeIncoming()
         elseif evName == "modem_message" then
-            handleMeshModemEvent(interface, writeBridgeLine, lAddr, sAddr, port, msgType, a1, a2)
+            if handleMeshModemEvent(interface, writeBridgeLine, lAddr, sAddr, port, msgType, a1, a2) then
+                uiDirty = true
+            end
+        elseif ui then
+            if evName == "touch" then
+                if ui:handleTouch(math.floor(tonumber(sAddr) or 0), math.floor(tonumber(port) or 0), a4) then
+                    uiDirty = true
+                end
+            elseif evName == "scroll" then
+                ui:handleScroll(tonumber(a4) or 0)
+                uiDirty = true
+            elseif evName == "key_down" then
+                ui:handleKeyDown(tonumber(sAddr) or 0, tonumber(port) or 0)
+                uiDirty = true
+            end
+            if not ui.running then
+                needExitFlag = true
+            end
         end
     end
 
+    if ui then
+        hubState.nowUptime = uptimeNow()
+        hubState.freeMem = computer.freeMemory and computer.freeMemory() or 0
+        hubState.totalMem = computer.totalMemory and computer.totalMemory() or 0
+        refreshLocalTelemetryForUi(false)
+        ui:render()
+    end
+
     local lastMeshBeaconUptime = uptimeNow()
+    local lastUiTelemetryAt = uptimeNow()
+    local lastUiRenderAt = uptimeNow()
+
     local okLoop, loopErr = xpcall(function()
         while not needExitFlag do
-            local upNow = (computer.uptime and computer.uptime()) or 0
+            local upNow = uptimeNow()
+            hubState.nowUptime = upNow
+            hubState.freeMem = computer.freeMemory and computer.freeMemory() or 0
+            hubState.totalMem = computer.totalMemory and computer.totalMemory() or 0
+            hubState.exporterPaused = (config.exportPaused == true)
+
             ensureBridgeConnected(upNow)
             drainBridgeIncoming()
+
+            if hubState._forceScanNow then
+                hubState._forceScanNow = false
+                if not config.exportPaused then
+                    lastFluidTime = 0
+                    lastItemTime = 0
+                    lastEssentiaTime = 0
+                    lastEnergyTime = 0
+                    lastEnergyAE2Time = 0
+                    lastCpuTime = 0
+                    lastTpsTime = 0
+                else
+                    refreshLocalTelemetryForUi(false)
+                end
+                uiDirty = true
+            end
+
             if config.enableMesh ~= false and (upNow - lastMeshBeaconUptime) >= 20
-                and (not isMeshFresh(dtpfMesh, 60) or not isMeshFresh(pumpMesh, 180)) then
+                and (not isMeshFresh(dtpfMesh, 60) or not isMeshFresh(pumpMesh, 180)
+                     or not isMeshFresh(univMesh, 60) or not isMeshFresh(gorgeMesh, 60)) then
                 lastMeshBeaconUptime = upNow
                 local m, t = getMeshTransports()
                 if m or t then
@@ -1892,89 +2455,107 @@ local function main()
                 end
             end
 
-            if config.enableItems and (config.allItemsMode == 1 or config.allItemsMode == 3) and os.time() > lastAllItemsTime + config.allItemsInterval then
+            if (not config.exportPaused) and config.enableItems and interface and (config.allItemsMode == 1 or config.allItemsMode == 3) and os.time() > lastAllItemsTime + config.allItemsInterval then
                 if config.allItemsMode == 1 then
                     allItemIds = {}
                 end
                 updateItemIds(allItemIds, interface)
                 lastAllItemsTime = os.time()
-                if config.enableLogging then
-                    print("[" .. os.time() .. "] Set item IDs; free RAM: " .. computer.freeMemory() .. " bytes")
-                end
+                logMsg("OUT", "[" .. os.time() .. "] Set item IDs; free RAM: " .. computer.freeMemory() .. " bytes")
             end
-            if config.enableItems and interface and os.time() > lastItemTime + config.itemInterval then
+            if (not config.exportPaused) and config.enableItems and interface and os.time() > lastItemTime + config.itemInterval then
                 if config.allItemsMode == 4 then
                     exportItemsInfMem(interface)
                 elseif config.allItemsMode == 5 then
                     local startTimeAI5 = os.time()
                     exportItemsNumeric(interface, stepBackgroundIo)
-                    if config.enableLogging then
-                        print("allItems mode 5 took " .. (os.time() - startTimeAI5) / 72 .. " seconds to run.")
-                    end
+                    logMsg("OUT", "allItems mode 5 took " .. (os.time() - startTimeAI5) / 72 .. " seconds to run.")
                 elseif (config.allItemsMode ~= nil and config.allItemsMode > 0) then
                     exportItemsIds(interface, allItemIds)
                 else
                     exportItems(interface)
                 end
                 lastItemTime = os.time()
-                if config.enableLogging then
-                    print("[" .. os.time() .. "] Exported items; free RAM: " .. computer.freeMemory() .. " bytes")
-                end
+                logMsg("OUT", "[" .. os.time() .. "] Exported items; free RAM: " .. computer.freeMemory() .. " bytes")
                 stepBackgroundIo()
             end
-            if config.enableFluids and interface and os.time() > lastFluidTime + config.fluidInterval then
+            if (not config.exportPaused) and config.enableFluids and interface and os.time() > lastFluidTime + config.fluidInterval then
                 exportFluids(interface)
                 lastFluidTime = os.time()
-                if config.enableLogging then
-                    print("[" .. os.time() .. "] Exported fluids; free RAM: " .. computer.freeMemory() .. " bytes")
-                end
+                logMsg("OUT", "[" .. os.time() .. "] Exported fluids; free RAM: " .. computer.freeMemory() .. " bytes")
                 stepBackgroundIo()
             end
-            if config.enableEssentia and interface and os.time() > lastEssentiaTime + config.essentiaInterval then
+            if (not config.exportPaused) and config.enableEssentia and interface and os.time() > lastEssentiaTime + config.essentiaInterval then
                 exportEssentia(interface)
                 lastEssentiaTime = os.time()
-                if config.enableLogging then
-                    print("[" .. os.time() .. "] Exported essentia; free RAM: " .. computer.freeMemory() .. " bytes")
-                end
+                logMsg("OUT", "[" .. os.time() .. "] Exported essentia; free RAM: " .. computer.freeMemory() .. " bytes")
                 stepBackgroundIo()
             end
             if config.enableEnergy and (lsc or lscProxy) and os.time() > lastEnergyTime + config.energyInterval then
-                exportEnergy(lsc, lscProxy)
+                exportEnergy(lsc, lscProxy, config.exportPaused == true)
                 lastEnergyTime = os.time()
-                if config.enableLogging then
-                    print("[" .. os.time() .. "] Exported energy; free RAM: " .. computer.freeMemory() .. " bytes")
+                if not config.exportPaused then
+                    logMsg("OUT", "[" .. os.time() .. "] Exported energy; free RAM: " .. computer.freeMemory() .. " bytes")
                 end
                 stepBackgroundIo()
+                uiDirty = true
             end
             if config.enableEnergyAE2 and interface and os.time() > lastEnergyAE2Time + config.energyAE2Interval then
-                exportEnergyAE2(interface)
+                exportEnergyAE2(interface, config.exportPaused == true)
                 lastEnergyAE2Time = os.time()
-                if config.enableLogging then
-                    print("[" .. os.time() .. "] Exported AE2 energy; free RAM: " .. computer.freeMemory() .. " bytes")
+                if not config.exportPaused then
+                    logMsg("OUT", "[" .. os.time() .. "] Exported AE2 energy; free RAM: " .. computer.freeMemory() .. " bytes")
                 end
                 stepBackgroundIo()
+                uiDirty = true
             end
             if config.enableCpus and interface and os.time() > lastCpuTime + config.cpuInterval then
-                exportCpus(interface)
+                exportCpus(interface, config.exportPaused == true)
                 lastCpuTime = os.time()
-                if config.enableLogging then
-                    print("[" .. os.time() .. "] Exported CPUs; free RAM: " .. computer.freeMemory() .. " bytes")
+                if not config.exportPaused then
+                    logMsg("OUT", "[" .. os.time() .. "] Exported CPUs; free RAM: " .. computer.freeMemory() .. " bytes")
                 end
                 stepBackgroundIo()
+                uiDirty = true
             end
             if config.enableTps and tpsCard and os.time() > lastTpsTime + config.tpsInterval then
-                exportTps(tpsCard)
+                exportTps(tpsCard, config.exportPaused == true)
                 lastTpsTime = os.time()
-                if config.enableLogging then
-                    print("[" .. os.time() .. "] Exported TPS; free RAM: " .. computer.freeMemory() .. " bytes")
+                if not config.exportPaused then
+                    logMsg("OUT", "[" .. os.time() .. "] Exported TPS; free RAM: " .. computer.freeMemory() .. " bytes")
                 end
+                uiDirty = true
             end
 
-            pollAndWait()
+            if ui and (uptimeNow() - lastUiTelemetryAt) >= 2.0 then
+                lastUiTelemetryAt = uptimeNow()
+                refreshLocalTelemetryForUi(false)
+                uiDirty = true
+            end
+
+            if ui and not needExitFlag and (uiDirty or (uptimeNow() - lastUiRenderAt) >= 1.5) then
+                uiDirty = false
+                lastUiRenderAt = uptimeNow()
+                ui:render()
+            end
+
+            if not needExitFlag then
+                pollAndWait()
+            end
         end
     end, debug.traceback)
 
     closeBridgeSocket()
+    if ui then
+        uiActive = false
+        if component.isAvailable and component.isAvailable("gpu") and component.gpu then
+            pcall(component.gpu.setBackground, 0x000000)
+            pcall(component.gpu.setForeground, 0xFFFFFF)
+        end
+        if okTerm and term and term.clear then
+            pcall(term.clear)
+        end
+    end
     if not okLoop then
         error(loopErr, 0)
     end

@@ -1,14 +1,20 @@
-# GTNH Forge of the Gods & Exoticizer Control (`gtnh-gorge-control`) — Scaffolded
+# GTNH Forge of the Gods & Multi-Exoticizer Control (`gtnh-gorge-control`)
 
-> **Status**: Reserved & scaffolded architecture slot in `OC-gtnh-control`.
+**Self-Healing Multi-Exoticizer Automation + Forge of the Gods (`Godforge`) Controller & `160x50` Touch GUI.**
 
-This module is planned to unify:
-1. **Multi-Instance Heliofusion Exoticizer Scheduling** (merging dual separate OC computers — e.g. Magmatter + Quark-Gluon Plasma — onto one OpenComputers Server Rack).
-2. **Direct Godforge Controller Telemetry & On-Demand Throttling** (`gt_machine` via Adapter or Wireless MFU targeting the Forge of the Gods controller).
-3. **Whole-Base OC Mesh Integration (`port 4205`)** (`GORGE_METRICS` / `GORGE_CMD`) so `gtnh-ae2-control` and DTPF/Universal loops can coordinate plasma/magmatter demand dynamically.
+- **Multi-Exoticizer on 1 Server Rack**: Runs `1..8` Heliofusion Exoticizer modules (`"magmatter"`, `"gluon"`, or `"auto"` mode) from a single OpenComputers server using **dynamic 10-slot/module Database Upgrade partitioning** (only the `3` or `7` active batch plasmas are written per cycle).
+- **GTNH 2.9 Bytecode-Verified Plasma Map (`lib/plasmas.lua`)**: Full 82-plasma Quark-Gluon map (`Chrome`, `Bismuth`, `Mercury`, `Tiny Pile of ... Dust`, full `Dust`, clean `%s+Gas` stripping) + 17-entry Magmatter math (`|Spatial - Temporal| * 144`).
+- **Fixes Upstream Deadlocks & Crashes**:
+  - Self-healing component proxies re-resolve automatically if chunks/AE2 grids reload (`no such component`).
+  - Dynamic cell count (`1..6` cells via `ME IO Port`) instead of hardcoded 3-cell / slot 9 loops.
+  - Bounded `RETRY_WAIT` backoff auto-recovers from transient CPU contention or missing plasma instead of freezing at a manual `Press Enter` prompt.
+- **Godforge Controller & Optional LSC Guard (`gt_machine`)**: Reads Rings, Connected Modules, Unlocked Upgrades, Progress, and optionally gates `setWorkAllowed(true/false)` on Mainnet LSC EU hysteresis (`minLscPct` / `resumeLscPct`).
+- **Optional OC Mesh (`port 4205`)**: Reports `GORGE_METRICS` and handles `GORGE_CMD` (`pause`, `resume`, `poll_now`, `set_mode`, `retry_errors`), with `[Ext:Standalone]` opt-out.
 
-See [`DESIGN.md`](DESIGN.md) and [`config.example.lua`](config.example.lua) for the planned schema.
+## One-Line Install (OpenComputers)
 
-## Upstream Credit
+```sh
+wget -f https://raw.githubusercontent.com/Jimbo-Coder/OC-gtnh-control/main/install.lua /tmp/install.lua && /tmp/install.lua gorge
+```
 
-- Multi-Exoticizer ME I/O Port + Drive Transposer pattern inspired by **Navatusein**'s [`GTNH-OC-God-Forge-Control`](https://github.com/Navatusein/GTNH-OC-God-Forge-Control).
+CLI commands: `gorge` (Touch GUI / headless fallback), `gorge --worker`, `gorge --check`, `gorge --off`, `gorge --update`.

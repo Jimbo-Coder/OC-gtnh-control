@@ -21,7 +21,7 @@ local MODULES = {
     { key = "universal", subdir = "gtnh-universal-control", desc = "Universal Automation (Multi-Ch Toggle Bus + Push Events + MLFQ)", detect = "/home/universal/main.lua" },
     { key = "ae2",       subdir = "gtnh-ae2-control",       desc = "AE2 Control & Hub (Influx Exporter, Craft Requester & Mesh Gateway)", detect = "/home/exporter.lua" },
     { key = "pump",      subdir = "gtnh-space-pump",        desc = "Space Elevator Pump (Target Fluid Pumping + Optional Mesh)",         detect = "/home/autoPump.lua" },
-    { key = "gorge",     subdir = "gtnh-gorge-control",     desc = "Forge of the Gods & Exoticizer Control [Scaffolded / Design Only]",  detect = "/home/gorge/main.lua" },
+    { key = "gorge",     subdir = "gtnh-gorge-control",     desc = "Forge of the Gods & Multi-Exoticizer Control (Self-Healing + GUI)",   detect = "/home/gorge/main.lua" },
 }
 
 local BY_KEY = {}
@@ -159,7 +159,7 @@ local function runSubInstaller(spec, manifest, localDir, extraFlags)
     end
 
     local ok = chunk(table.unpack(passArgs))
-    if ok ~= false and spec.key ~= "gorge" then
+    if ok ~= false then
         manifest.modules[spec.key] = true
         saveManifest(manifest)
     end
@@ -215,7 +215,7 @@ local function main(args)
         local targets = (#chosen > 0) and chosen or {}
         if #targets == 0 then
             for _, m in ipairs(MODULES) do
-                if manifest.modules[m.key] and m.key ~= "gorge" then
+                if manifest.modules[m.key] then
                     targets[#targets + 1] = m
                 end
             end

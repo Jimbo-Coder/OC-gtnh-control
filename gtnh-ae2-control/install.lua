@@ -1,5 +1,5 @@
 -- Installer & updater for GTNH AE2 Control / Mainnet Telemetry & Mesh Hub
--- Installs /home/exporter.lua and preserves existing /home/config.lua.
+-- Installs /home/exporter.lua + /home/ae2_ui.lua and preserves existing /home/config.lua and /home/config_overrides.lua.
 
 local cliArgs = { ... }
 
@@ -10,6 +10,7 @@ local DEFAULT_REPO = "Jimbo-Coder/OC-gtnh-control"
 local SUBDIR = "gtnh-ae2-control"
 local DEFAULT_BRANCH = "main"
 local EXPORTER_PATH = "/home/exporter.lua"
+local UI_PATH = "/home/ae2_ui.lua"
 local CONFIG_PATH = "/home/config.lua"
 local EXAMPLE_DEST = "/home/config.ae2.example.lua"
 local REPO_META_PATH = "/home/.ae2_repo"
@@ -130,20 +131,27 @@ local function runInstaller(args)
     local okLoad, synErr = load(expBody, "@exporter.lua", "t")
     if not okLoad then io.stderr:write("ERROR: Invalid Lua in exporter.lua: " .. tostring(synErr) .. "\n"); return false, synErr end
 
+    local uiBody, uiErr = getFile("ae2_ui.lua")
+    if not uiBody then io.stderr:write("ERROR: " .. tostring(uiErr) .. "\n"); return false, uiErr end
+    local okUi, synUi = load(uiBody, "@ae2_ui.lua", "t")
+    if not okUi then io.stderr:write("ERROR: Invalid Lua in ae2_ui.lua: " .. tostring(synUi) .. "\n"); return false, synUi end
+
     local cfgBody, cfgErr = getFile("config.example.lua")
     if not cfgBody then io.stderr:write("ERROR: " .. tostring(cfgErr) .. "\n"); return false, cfgErr end
     local okCfg, synCfg = load(cfgBody, "@config.example.lua", "t")
     if not okCfg then io.stderr:write("ERROR: Invalid Lua in config.example.lua: " .. tostring(synCfg) .. "\n"); return false, synCfg end
 
     writeWholeFile(EXPORTER_PATH, expBody)
-    print(string.format("[OK 1/2] %s (%d bytes)", EXPORTER_PATH, #expBody))
+    print(string.format("[OK 1/3] %s (%d bytes)", EXPORTER_PATH, #expBody))
+    writeWholeFile(UI_PATH, uiBody)
+    print(string.format("[OK 2/3] %s (%d bytes)", UI_PATH, #uiBody))
     writeWholeFile(EXAMPLE_DEST, cfgBody)
 
     if filesystem.exists(CONFIG_PATH) then
         print("[KEEP]    Preserved existing " .. CONFIG_PATH .. " (reference -> " .. EXAMPLE_DEST .. ")")
     else
         writeWholeFile(CONFIG_PATH, cfgBody)
-        print("[OK 2/2] Created " .. CONFIG_PATH .. " from defaults")
+        print("[OK 3/3] Created " .. CONFIG_PATH .. " from defaults")
     end
 
     writeWholeFile(REPO_META_PATH, repo .. "\n" .. branch .. "\n")

@@ -14,7 +14,7 @@ Each subfolder is **100% self-contained** (no hidden cross-folder runtime depend
 | **Universal Control** | [`gtnh-universal-control/`](gtnh-universal-control/) | Bundled-Redstone `ME Toggle Bus` + SRTF Preemption + Dual-Trunk Arbitrary-NC Support | Production |
 | **AE2 Control** | [`gtnh-ae2-control/`](gtnh-ae2-control/) | Mainnet InfluxDB Exporter, Remote Craft Requester/Canceller & OC Mesh Hub (`port 4205`) | Production |
 | **Space Pump** | [`gtnh-space-pump/`](gtnh-space-pump/) | Space Elevator Fluid Pump target stock controller + optional `port 4205` Mesh (`enableMesh`) | Production |
-| **Gorge Control** | [`gtnh-gorge-control/`](gtnh-gorge-control/) | Unified Forge of the Gods controller + multi-Exoticizer Rack (`Magmatter` + `QGP`) | Scaffolded |
+| **Gorge Control** | [`gtnh-gorge-control/`](gtnh-gorge-control/) | Unified Forge of the Gods controller + multi-Exoticizer Rack (`Magmatter` + `QGP`) | Production |
 
 ---
 
@@ -27,7 +27,7 @@ wget -f https://raw.githubusercontent.com/Jimbo-Coder/OC-gtnh-control/main/insta
 
 Direct install or list:
 ```sh
-/tmp/install.lua universal      # or: dtpf, ae2, pump
+/tmp/install.lua universal      # or: dtpf, ae2, pump, gorge
 /tmp/install.lua --list
 ```
 

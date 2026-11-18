@@ -1,33 +1,18 @@
-# Planned Design — GTNH Forge of the Gods & Exoticizer Control
+# Architecture — GTNH Gorge & Multi-Exoticizer Control
 
-## 1. Consolidating 2 Exoticizer Computers into 1 Server Rack
+## 1. Dynamic 10-Slot Database Partitioning (Up to 8 Exoticizers on 1 Tier-3 Database)
 
-Currently in late-game GTNH bases, players often run one OC computer per Heliofusion Exoticizer module (one dedicated to Magmatter, one dedicated to Quark-Gluon Plasma), each polling an Input/Output AE subnet Transposer + ME IO Port + ME Drive + Level Emitter Redstone I/O.
+Upstream Exoticizer controllers pre-loaded 80 static plasma entries into a single 81-slot Tier-3 `Database Upgrade`, locking one computer to a single Exoticizer module.
 
-`gtnh-gorge-control` consolidates **all** Exoticizer modules into one OC Server Rack configuration array:
+`gtnh-gorge-control` writes **only the active batch** dynamically:
+- Exoticizer `#i` (`1..8`) owns slots `slotBase .. slotBase + 9` where `slotBase = (i - 1) * 10 + 1`:
+  - `slotBase`: Marker item (`minecraft:paper` named `Fake recipe G<i> <dbShort>`) used as the Slot-1 Pattern Output and safe idle self-loop input.
+  - `slotBase + 1 .. slotBase + 7`: Active `ae2fc:fluid_drop` inputs (`{Fluid:"..."}`), encoded alongside `setInterfacePatternInput` amounts right before draining the Output Subnet ME Drive (`3` plasmas for Magmatter, `7` for Quark-Gluon Plasma).
 
-```text
-exoticizers = {
-  { id = 1, name = "Exoticizer #1", mode = "magmatter", ... },
-  { id = 2, name = "Exoticizer #2", mode = "gluon",     ... },
-}
-```
+## 2. Non-Blocking, Self-Healing State Machine (`lib/scheduler.lua`)
 
-Each entry stores its own component UUIDs (`inputMeInterfaceAddress`, `outputMeInterfaceAddress`, `transposerAddress`, `meIoPortSide`, `meDriveSide`, `redstoneIoAddress`, `redstoneIoSide`) alongside a dynamic `mode` (`"magmatter"` | `"gluon"` | `"auto"`).
-
----
-
-## 2. Direct Forge of the Gods Controller Adapter (`gt_machine`)
-
-Connecting an OpenComputers Adapter (or Wireless MFU) to the main **Forge of the Gods (`Godforge`)** multiblock controller enables:
-- Reading heat / fuel / stellar energy / milestone telemetry from `getSensorInformation()` and `getWorkProgress()` / `getWorkMaxProgress()`.
-- On-demand gating (`setWorkAllowed(true/false)`) based on Mainnet LSC EU % or target fuel reserves (e.g. DTR / SpaceTime / Shirabon).
-- Automatic `auto` Exoticizer rebalancing: switching Exoticizer `#2` dynamically between Quark-Gluon Plasma and Magmatter depending on Mainnet stock ratios vs targets.
-
----
-
-## 3. Reserved Port `4205` Mesh Contract (`gtnh-ae2-control` Gateway)
-
-- Outbound beacon: `GORGE_METRICS` (serialized state of Godforge controller + Exoticizer modules, already recognized & ACKed with `GORGE_ACK` by `gtnh-ae2-control/exporter.lua`).
-- Inbound RPC: `GORGE_CMD` (`set_mode`, `pause`, `resume`, `poll_now`).
-- Opt-out: `extLinkMode = "off"` runs strictly locally with zero modem traffic.
+Each Exoticizer runs independently through:
+`IDLE -> ENCODE -> CLEAR_AE -> REQUEST -> WAIT_END -> IDLE`
+- Any transient error (`no such component`, `missing plasma`, `IO port timeout`, `3x craft failure`) moves that Exoticizer into **`RETRY_WAIT` (`retryBackoffSec = 15s`)**, logs once (no log spam), and automatically retries without blocking sibling Exoticizer modules.
+- Returning from `WAIT_END` cancels any active fake recipe with a bounded `2s` loop and resets Slot 1 back to the safe placeholder pattern.
+- `clearOutputCells` measures the exact occupied cell count (`1..10`) on `meDriveSide`, drains all moved cells through `meIoPortSide` (`slots 7..12`), and returns them even if IO Port times out.
