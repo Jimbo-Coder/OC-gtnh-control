@@ -12,12 +12,16 @@ Scheduler.PRIORITY_WEIGHTS = Policy.PRIORITY_WEIGHTS
 Scheduler.PRIORITY_ORDER = Policy.PRIORITY_ORDER
 Scheduler.POOL_MODES = Policy.POLICIES
 
-local DEFAULT_CHANNEL_META = {
-    [1] = { name = "Ch1 High", gtColor = "Black (Prio 1)" },
-    [2] = { name = "Ch2 Low",  gtColor = "Blue (Prio 5)" },
-    [3] = { name = "Ch3 Low",  gtColor = "Orange (Prio 15)" },
-    [4] = { name = "Ch4 Low",  gtColor = "White (Prio 16)" },
-}
+local DEFAULT_CHANNEL_DYES = { [1] = 0, [2] = 4, [3] = 14, [4] = 15 }
+local DEFAULT_CHANNEL_NAMES = { [1] = "Ch1 High", [2] = "Ch2 Low", [3] = "Ch3 Low", [4] = "Ch4 Low" }
+
+local function formatGtColorLabel(gtDye)
+    local info = Policy.dyeInfo(gtDye)
+    if info.gtDye < 0 then
+        return "Unpainted"
+    end
+    return string.format("%s (#%d)", info.name, info.rank)
+end
 
 local function makeSlice(idx)
     local ci = Hardware.COLORS[idx % 16] or { name = "Color " .. tostring(idx % 16) }
@@ -34,15 +38,16 @@ local function makeSlice(idx)
     }
 end
 
-function Scheduler.newChannel(chIdx, rsAddr, side)
+function Scheduler.newChannel(chIdx, rsAddr, side, gtDye)
     chIdx = math.max(1, math.min(4, math.floor(tonumber(chIdx) or 1)))
-    local meta = DEFAULT_CHANNEL_META[chIdx] or { name = "Ch" .. tostring(chIdx), gtColor = "Black" }
+    local d = Policy.parseGtDye(gtDye, DEFAULT_CHANNEL_DYES[chIdx] or 15)
     local b1Side = (side ~= nil) and side or ((chIdx == 1) and 2 or ((chIdx == 2) and 3 or (chIdx + 1) % 6))
     local b2Side = (b1Side == 2 and 4) or ((b1Side == 3 and 5) or ((b1Side + 2) % 6))
     return {
         id = chIdx,
-        name = meta.name,
-        gtColor = meta.gtColor,
+        name = DEFAULT_CHANNEL_NAMES[chIdx] or ("Ch" .. tostring(chIdx)),
+        gtDye = d,
+        gtColor = formatGtColorLabel(d),
         enabled = true,
         banks = {
             [1] = { rsAddr = rsAddr, side = b1Side },
@@ -124,9 +129,10 @@ local function normalizeChannels(pool)
             pool.channels[ci] = ch
         end
         ch.id = ci
-        local meta = DEFAULT_CHANNEL_META[ci] or { name = "Ch" .. tostring(ci), gtColor = "Black" }
-        ch.name = (type(ch.name) == "string" and ch.name ~= "") and ch.name or meta.name
-        ch.gtColor = (type(ch.gtColor) == "string" and ch.gtColor ~= "") and ch.gtColor or meta.gtColor
+        ch.name = (type(ch.name) == "string" and ch.name ~= "") and ch.name or (DEFAULT_CHANNEL_NAMES[ci] or ("Ch" .. tostring(ci)))
+        local defDye = DEFAULT_CHANNEL_DYES[ci] or 15
+        ch.gtDye = Policy.parseGtDye((ch.gtDye ~= nil) and ch.gtDye or ch.gtColor, defDye)
+        ch.gtColor = formatGtColorLabel(ch.gtDye)
         if ch.enabled == nil then ch.enabled = true else ch.enabled = (ch.enabled == true) end
 
         if type(ch.banks) ~= "table" then ch.banks = {} end
@@ -645,7 +651,14 @@ end
 local function syncPoolSummaryFields(pool, pState)
     local bestCh = nil
     local hasPulse, hasSettle, hasActive = false, false, false
+    local ordered = Policy.orderedEnabledChannels(pool)
+    local seen = {}
+    for _, ci in ipairs(ordered) do seen[ci] = true end
     for ci = 1, #(pool.channels or {}) do
+        if not seen[ci] then ordered[#ordered + 1] = ci end
+    end
+
+    for _, ci in ipairs(ordered) do
         local cs = pState.channels[ci]
         if cs then
             if cs.phase == "PULSE_TEST" then
@@ -692,11 +705,33 @@ local function syncPoolSummaryFields(pool, pState)
         pState.activeRate = nil
     end
 
-    local c1 = pState.channels[1]
+    local firstIdx = ordered[1] or 1
+    local c1 = pState.channels[firstIdx]
     if c1 then
         pState.lastServedColor = c1.lastServedNc
         pState.lastOffAt = c1.lastOffAt
     end
+end
+
+-- Check GTNH 2.9 hatch color validity on multi-channel pools (warn on unpainted -1 or duplicate colors).
+function Scheduler.validateChannelColors(pool)
+    local enCh = Policy.orderedEnabledChannels(pool)
+    if #enCh < 2 then return nil end
+    local seenDye = {}
+    for _, ci in ipairs(enCh) do
+        local ch = pool.channels[ci]
+        local d = tonumber(ch.gtDye)
+        if d == nil or d < 0 then
+            return string.format("%s Ch%d is Unpainted: in multi-channel mode unpainted hatches accept ALL colors!", pool.name, ci)
+        end
+        if seenDye[d] then
+            local info = Policy.dyeInfo(d)
+            return string.format("%s Ch%d & Ch%d share GT hatch color %s (#%d): use distinct spray colors!",
+                pool.name, seenDye[d], ci, info.name, info.rank)
+        end
+        seenDye[d] = ci
+    end
+    return nil
 end
 
 function Scheduler.step(cfg, state, nowSec, opts, compLib)
@@ -1057,7 +1092,16 @@ function Scheduler.step(cfg, state, nowSec, opts, compLib)
             end
         end
 
-        -- 4. Flush all dirty Bundled Wires for this pool (with duplicate-wire conflict guard)
+        local colorWarn = Scheduler.validateChannelColors(pool)
+        if colorWarn ~= pState._lastColorWarn then
+            pState._lastColorWarn = colorWarn
+            if colorWarn then
+                Scheduler.log(state, cfg, "normal", "WRN", colorWarn)
+            end
+        end
+
+        -- 4. Flush all dirty Bundled Wires for this pool (with duplicate-wire conflict guard;
+        --    highest native GT hatch dye priority channel claims shared wire first!)
         if not opts.dryRun then
             local wireTargets = {}
             for _, ch in ipairs(pool.channels or {}) do
@@ -1078,7 +1122,12 @@ function Scheduler.step(cfg, state, nowSec, opts, compLib)
                 end
             end
 
-            for ci = 1, numCh do
+            local wireOrder = Policy.orderedEnabledChannels(pool)
+            local seenWire = {}
+            for _, ci in ipairs(wireOrder) do seenWire[ci] = true end
+            for ci = 1, numCh do if not seenWire[ci] then wireOrder[#wireOrder + 1] = ci end end
+
+            for _, ci in ipairs(wireOrder) do
                 local cs = pState.channels[ci]
                 local driveNc = (cs.phase == "ACTIVE" and cs.activeNc) or (cs.phase == "PULSE_TEST" and cs.pulseNc) or nil
                 if driveNc ~= nil then
@@ -1087,7 +1136,7 @@ function Scheduler.step(cfg, state, nowSec, opts, compLib)
                         wireTargets[rsAddr] = wireTargets[rsAddr] or {}
                         if type(wireTargets[rsAddr][side]) == "number" then
                             Scheduler.log(state, cfg, "normal", "WRN", string.format(
-                                "%s Ch%d shares wire (%s side %d) with higher channel! Change Ch%d Side.",
+                                "%s Ch%d shares wire (%s side %d) with higher-priority channel! Change Ch%d Side.",
                                 pool.name, ci, Hardware.shortAddr(rsAddr), side, ci))
                         else
                             wireTargets[rsAddr][side] = color

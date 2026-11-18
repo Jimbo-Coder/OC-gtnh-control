@@ -916,6 +916,8 @@ function Hardware.pushMeshMetrics(cfg, state, nowSec, compLib, force)
             chOut[#chOut + 1] = {
                 id = chIdx,
                 name = ch.name,
+                gtDye = ch.gtDye,
+                gtColor = ch.gtColor,
                 phase = cs.phase or "IDLE",
                 activeNc = cs.activeNc,
                 activeLabel = cs.activeLabel or "",

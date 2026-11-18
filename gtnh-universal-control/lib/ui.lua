@@ -473,14 +473,17 @@ function UI:renderOverviewTab()
 
         if nCh <= 1 then
             local cs1 = pst.channels and pst.channels[1]
+            local ch1 = pool.channels and pool.channels[1]
+            local di1 = Policy.dyeInfo(ch1 and ch1.gtDye or 0)
             local actNc = (cs1 and cs1.activeNc) or pst.activeColor
             if actNc ~= nil then
                 local ci = Hardware.COLORS[actNc % 16]
-                self:drawText(px + 3, 15, string.format("Ch1 NC %02d [%-9s]", actNc, ci and ci.name or "?"), COLORS.fg, COLORS.panelBg)
-                self:drawText(px + 24, 15, "■", ci and ci.hex or COLORS.fg, COLORS.panelBg)
+                self:drawText(px + 3, 15, "■", di1.hex == 0x21262D and COLORS.fg or di1.hex, COLORS.panelBg)
+                self:drawText(px + 5, 15, string.format("Ch1 NC %02d [%-9s]", actNc, ci and ci.name or "?"), COLORS.fg, COLORS.panelBg)
+                self:drawText(px + 26, 15, "■", ci and ci.hex or COLORS.fg, COLORS.panelBg)
                 local ss = self.state.sliceStates and self.state.sliceStates[Scheduler.sliceKey(pool.id, actNc)]
                 local tStr = ss and tostring(ss.tier or "BULK") or "BULK"
-                self:drawText(px + 27, 15, padOrTrunc(string.format("[%s] %s", tStr, tostring(pst.activeLabel or "")), pW - 30), COLORS.cyan, COLORS.panelBg)
+                self:drawText(px + 29, 15, padOrTrunc(string.format("[%s] %s", tStr, tostring(pst.activeLabel or "")), pW - 32), COLORS.cyan, COLORS.panelBg)
                 local held = (self.state.lastStepSec or 0) - ((cs1 and cs1.activeSince) or pst.activeSince or 0)
                 local rTxt = string.format("ETA: %-8s  Rate: %.1f/s  Hold: %ds",
                     UI.formatEta(pst.activeEtaSec), tonumber(pst.activeRate) or 0, math.max(0, math.floor(held)))
@@ -494,23 +497,32 @@ function UI:renderOverviewTab()
                 self:drawText(px + 3, 15, "No active craft slice.", COLORS.muted, COLORS.panelBg)
             end
         else
-            for ciIdx = 1, math.min(4, nCh) do
+            local ordered = Policy.orderedEnabledChannels(pool)
+            local seen = {}
+            for _, ciIdx in ipairs(ordered) do seen[ciIdx] = true end
+            for ciIdx = 1, nCh do if not seen[ciIdx] then ordered[#ordered + 1] = ciIdx end end
+
+            for rowPos = 1, math.min(4, #ordered) do
+                local ciIdx = ordered[rowPos]
                 local ch = pool.channels[ciIdx]
                 local cs = pst.channels and pst.channels[ciIdx] or {}
-                local ryCh = 14 + ciIdx
+                local di = Policy.dyeInfo(ch and ch.gtDye)
+                local ryCh = 14 + rowPos
+                self:drawText(px + 3, ryCh, "■", di.hex == 0x21262D and COLORS.fg or di.hex, COLORS.panelBg)
+                local rankStr = (di.gtDye >= 0) and string.format("#%d", di.rank) or "UNP"
                 if cs.phase == "ACTIVE" and cs.activeNc ~= nil then
                     local ss = self.state.sliceStates and self.state.sliceStates[Scheduler.sliceKey(pool.id, cs.activeNc)]
                     local tier = ss and tostring(ss.tier or "BULK") or "BULK"
-                    local cLine = string.format("Ch%d [%s]: NC%02d %s (%s | ETA %s)",
-                        ciIdx, padOrTrunc(ch.name, 8), cs.activeNc, padOrTrunc(cs.activeLabel, 14),
+                    local cLine = string.format("P%d Ch%d(%s %-4s): NC%02d %s (%s %s)",
+                        rowPos, ciIdx, rankStr, padOrTrunc(di.short, 4), cs.activeNc, padOrTrunc(cs.activeLabel, 13),
                         tier, UI.formatEta(cs.activeEtaSec))
-                    self:drawText(px + 3, ryCh, padOrTrunc(cLine, pW - 6), COLORS.green, COLORS.panelBg)
+                    self:drawText(px + 5, ryCh, padOrTrunc(cLine, pW - 8), COLORS.green, COLORS.panelBg)
                 elseif cs.phase == "SETTLING" then
-                    self:drawText(px + 3, ryCh, padOrTrunc(string.format("Ch%d [%s]: SETTLING -> NC%02d",
-                        ciIdx, padOrTrunc(ch.name, 8), tonumber(cs.pendingNc) or 0), pW - 6), COLORS.yellow, COLORS.panelBg)
+                    self:drawText(px + 5, ryCh, padOrTrunc(string.format("P%d Ch%d(%s): SETTLING -> NC%02d",
+                        rowPos, ciIdx, rankStr, tonumber(cs.pendingNc) or 0), pW - 8), COLORS.yellow, COLORS.panelBg)
                 else
-                    self:drawText(px + 3, ryCh, padOrTrunc(string.format("Ch%d [%s]: %s (Pre-settled free)",
-                        ciIdx, padOrTrunc(ch.name, 8), tostring(cs.phase or "IDLE")), pW - 6), COLORS.muted, COLORS.panelBg)
+                    self:drawText(px + 5, ryCh, padOrTrunc(string.format("P%d Ch%d(%s %-4s): %s (Pre-settled)",
+                        rowPos, ciIdx, rankStr, padOrTrunc(di.short, 4), tostring(cs.phase or "IDLE")), pW - 8), COLORS.muted, COLORS.panelBg)
                 end
             end
         end
@@ -847,43 +859,88 @@ function UI:renderPoolsTab()
             end
         end)
 
-        -- Channel List (y=11..16)
-        self:drawText(4, 11, "Input Channels (GTNH Hatch Priority: Ch1 High -> ChK Low):", COLORS.muted, COLORS.panelBg)
+        -- Channel List sorted view (y=11..16)
+        local ordered = Policy.orderedEnabledChannels(pool)
+        local relRank = {}
+        for pos, chIdx in ipairs(ordered) do
+            relRank[chIdx] = string.format("P%d", pos)
+        end
+        self:drawText(4, 11, "Wire Priority = GT Hatch Color (0=Black #1 .. 15=White #16):", COLORS.muted, COLORS.panelBg)
         for ci, ch in ipairs(pool.channels or {}) do
             local ryC = 11 + ci
             local sel = (ci == self.selectedChIdx)
+            local rowBg = sel and COLORS.selectedBg or COLORS.panelBg
+            self:fillRect(4, ryC, 75, 1, " ", rowBg)
+            local di = Policy.dyeInfo(ch.gtDye)
             local b1 = ch.banks and ch.banks[1] or {}
             local b2 = ch.banks and ch.banks[2] or {}
-            local rowTxt = string.format("%s Ch%d [%-9s] %-14s B1:%s(%s) B2:%s(%s)",
-                sel and ">" or " ", ci, padOrTrunc(ch.name, 9), padOrTrunc(ch.gtColor, 14),
-                Hardware.shortAddr(b1.rsAddr), Hardware.SIDE_NAMES[b1.side] or "?",
+            local rTag = relRank[ci] or "OFF"
+            self:drawText(4, ryC, sel and ">" or " ", COLORS.accent, rowBg)
+            self:drawText(6, ryC, string.format("Ch%d", ci), sel and COLORS.fg or COLORS.cyan, rowBg)
+            self:drawText(10, ryC, rTag, rTag == "P1" and COLORS.green or (rTag == "OFF" and COLORS.red or COLORS.yellow), rowBg)
+            self:drawText(14, ryC, "■", di.hex == 0x21262D and COLORS.fg or di.hex, rowBg)
+            local colorLbl = padOrTrunc(di.gtDye >= 0 and (di.name .. "#" .. di.rank) or "Unpainted", 13)
+            self:drawText(16, ryC, colorLbl, di.gtDye < 0 and COLORS.yellow or COLORS.fg, rowBg)
+            local restTxt = string.format("%-8s B1:%s(%s) B2:%s(%s)",
+                padOrTrunc(ch.name, 8), Hardware.shortAddr(b1.rsAddr), Hardware.SIDE_NAMES[b1.side] or "?",
                 Hardware.shortAddr(b2.rsAddr), Hardware.SIDE_NAMES[b2.side] or "?")
-            self:drawButton(4, ryC, padOrTrunc(rowTxt, 74),
-                sel and COLORS.fg or (ch.enabled ~= false and COLORS.cyan or COLORS.muted),
-                sel and COLORS.selectedBg or COLORS.panelBg,
-                function() self.selectedChIdx = ci end)
+            self:drawText(30, ryC, padOrTrunc(restTxt, 48), COLORS.muted, rowBg)
+            self:addHitbox(4, ryC, 78, ryC, function() self.selectedChIdx = ci end)
         end
 
-        -- Selected Channel Editor (y=18..43)
+        local colorWarn = Scheduler.validateChannelColors(pool)
+        if colorWarn then
+            self:drawText(4, 16, padOrTrunc("! " .. colorWarn, 75), COLORS.yellow, COLORS.panelBg)
+        else
+            self:drawText(4, 16, "Native GT Check Order: P1 checked 1st by multiblocks, PK checked last.", COLORS.muted, COLORS.panelBg)
+        end
+
+        -- Selected Channel Editor (y=17..43)
         local ch = pool.channels and pool.channels[self.selectedChIdx]
         if ch then
             local ci = self.selectedChIdx
-            self:drawText(4, 18, string.rep("─", 74), COLORS.border, COLORS.panelBg)
-            self:drawText(4, 19, string.format("Editing Input Channel %d (%s):", ci, ch.gtColor), COLORS.accent, COLORS.panelBg)
-            self:drawButton(4, 21, "[Name: " .. padOrTrunc(ch.name, 12) .. "]", COLORS.fg, COLORS.btnBg, function()
+            local di = Policy.dyeInfo(ch.gtDye)
+            self:drawText(4, 17, string.rep("─", 74), COLORS.border, COLORS.panelBg)
+            self:drawText(4, 18, string.format("Editing Ch%d | Hatch Dye: %s | Wire Priority: %s",
+                ci, ch.gtColor or di.name, relRank[ci] or "OFF"), COLORS.accent, COLORS.panelBg)
+            self:drawButton(4, 20, "[Name: " .. padOrTrunc(ch.name, 10) .. "]", COLORS.fg, COLORS.btnBg, function()
                 self:openTextPrompt("Channel Name (e.g. Ch1 High / Express):", ch.name, function(v)
                     if v and v ~= "" then ch.name = v; self:save("Renamed Ch" .. ci .. " -> " .. v) end
                 end)
             end)
-            self:drawButton(27, 21, ch.enabled ~= false and "[Ch: ENABLED]" or "[Ch: OFF]",
+            self:drawButton(24, 20, ch.enabled ~= false and "[Ch: ENABLED]" or "[Ch: OFF]",
                 ch.enabled ~= false and COLORS.green or COLORS.red, COLORS.btnBg, function()
                     ch.enabled = not (ch.enabled ~= false)
                     self:save(string.format("%s Ch%d -> %s", pool.name, ci, tostring(ch.enabled)))
                 end)
-            self:drawButton(43, 21, "[Dye: " .. padOrTrunc(ch.gtColor, 16) .. "]", COLORS.cyan, COLORS.btnBg, function()
-                self:openTextPrompt("GT Hatch Dye Label (Black=1, Red=2, Blue=5, Orange=15):", ch.gtColor, function(v)
-                    if v and v ~= "" then ch.gtColor = v; self:save("Updated GT Dye label.") end
+            self:drawButton(40, 20, "[Hatch Dye: " .. padOrTrunc(ch.gtColor or di.name, 15) .. "]", COLORS.cyan, COLORS.btnBg, function(step)
+                local curD = tonumber(ch.gtDye) or 0
+                local nxt = ((curD + 1 + (step or 1)) % 17) - 1
+                ch.gtDye = nxt
+                Scheduler.normalizeConfig(self.cfg)
+                self:save(string.format("Ch%d Hatch Dye -> %s", ci, ch.gtColor))
+            end)
+
+            -- Inline 16-color GT spray-can swatch strip (High Prio Black=0 -> Low Prio White=15 + [U] unpainted)
+            self:drawText(4, 22, "Spray Color (Hi->Lo):", COLORS.muted, COLORS.panelBg)
+            for d = 0, 15 do
+                local dInfo = Policy.GT_DYES[d]
+                local sx = 26 + d * 3
+                local selD = (ch.gtDye == d)
+                local bgS = selD and COLORS.selectedBg or COLORS.panelBg
+                self:drawText(sx, 22, selD and "[" or " ", COLORS.yellow, bgS)
+                self:drawText(sx + 1, 22, "■", dInfo.hex == 0x21262D and 0x3A4352 or dInfo.hex, bgS)
+                self:drawText(sx + 2, 22, selD and "]" or " ", COLORS.yellow, bgS)
+                self:addHitbox(sx, 22, sx + 2, 22, function()
+                    ch.gtDye = d
+                    Scheduler.normalizeConfig(self.cfg)
+                    self:save(string.format("Ch%d Hatch Color -> %s (#%d)", ci, dInfo.name, dInfo.rank))
                 end)
+            end
+            self:drawButton(74, 22, "[U]", ch.gtDye == -1 and COLORS.yellow or COLORS.muted, COLORS.btnBg, function()
+                ch.gtDye = -1
+                Scheduler.normalizeConfig(self.cfg)
+                self:save("Ch" .. ci .. " Hatch Color -> Unpainted")
             end)
 
             local b1 = ch.banks[1]

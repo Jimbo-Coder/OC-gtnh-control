@@ -986,8 +986,65 @@ pCands[1].priWeight = 3
 local dPri = Policy.decide(polPool, nil, pCands, {}, cfg32, 30)
 assertEq(dPri[1], 0, "Priority picks higher priWeight (3 > 2)")
 
+-- =========================================================================
+-- TEST 15: Native GT Hatch Spray-Color Priority Mapping & Color Validation
+-- =========================================================================
+component._reset()
+local rsDye, sidesDye = makeBundledRS()
+local ifDyeA, itDyeA = makeSubnetIF({ { name = "gt:heavy_polymer", damage = 0, size = 5000, label = "Heavy Polymer" } })
+local ifDyeB, itDyeB = makeSubnetIF({})
+component._register("rs-dye", "redstone", rsDye)
+component._register("if-dye-a", "me_interface", ifDyeA)
+component._register("if-dye-b", "me_interface", ifDyeB)
+
+-- Configure Ch1 (North, side=2) = Orange (gtDye=14, GT #15 LOW) and
+--           Ch2 (South, side=3) = Red    (gtDye=1,  GT #2  HIGH)!
+-- Array order Ch1..Ch2 is reversed relative to native GT priority!
+local dyeCfg = Scheduler.defaultConfig()
+dyeCfg.armed = true
+dyeCfg.settleSec = 1.0
+dyeCfg.probeWindowSec = 1.5
+dyeCfg.pools[1].mode = "mlfq"
+dyeCfg.pools[1].channels = {
+    [1] = Scheduler.newChannel(1, "rs-dye", 2, 14), -- North = Orange (Low prio #15)
+    [2] = Scheduler.newChannel(2, "rs-dye", 3, 1),  -- South = Red (High prio #2)
+}
+dyeCfg.pools[1].rsAddr = "rs-dye"
+dyeCfg.pools[1].side = 2
+dyeCfg.pools[1].slices[0].ifaceAddr = "if-dye-a"
+dyeCfg.pools[1].slices[4].ifaceAddr = "if-dye-b"
+
+local dyeSt = Scheduler.newState()
+Scheduler.syncHardware(dyeCfg, dyeSt)
+assertEq(Scheduler.validateChannelColors(dyeCfg.pools[1]), nil, "Distinct Orange & Red colors valid")
+
+-- t=0.0: New job starts on Ch2 (South, Red = native HIGH priority wire!)
+Scheduler.step(dyeCfg, dyeSt, 0.0)
+assertEq(sidesDye[3][0], 255, "t=0.0 PROBE uses Ch2 South (Red #2 HIGH) over Ch1 North (Orange #15 LOW)")
+assertEq(sidesDye[2][0], 0, "Ch1 Orange stays OFF initially")
+
+-- t=1.5: Graduates to BULK -> demotes from Ch2 (Red) to Ch1 (Orange), freeing Ch2 (Red) pre-settled!
+itDyeA[1].size = 4990
+Scheduler.step(dyeCfg, dyeSt, 1.5)
+assertEq(sidesDye[3][0], 0, "t=1.5 Ch2 Red turns OFF on demotion")
+assertEq(sidesDye[2][0], 255, "t=1.5 Ch1 Orange takes over BULK NC0")
+
+-- t=3.0: Fast craft arrives in NC4 -> Ch2 Red is already pre-settled and starts with 0s delay!
+itDyeB[1] = { name = "gt:fast_wafer", damage = 0, size = 8, label = "Fast Wafer" }
+Scheduler.step(dyeCfg, dyeSt, 3.0)
+assertEq(sidesDye[3][4], 255, "t=3.0 Ch2 Red activates NC4 immediately (0s delay)")
+assertEq(sidesDye[2][0], 255, "t=3.0 Ch1 Orange continues BULK NC0 uninterrupted")
+
+-- Validation catches duplicate GT dye colors and unpainted (-1) on multi-channel pools
+local origD = dyeCfg.pools[1].channels[2].gtDye
+dyeCfg.pools[1].channels[2].gtDye = 14
+assert(Scheduler.validateChannelColors(dyeCfg.pools[1]) ~= nil, "Duplicate Orange dye triggers validation warning")
+dyeCfg.pools[1].channels[2].gtDye = -1
+assert(Scheduler.validateChannelColors(dyeCfg.pools[1]) ~= nil, "Unpainted (-1) on 2-channel pool triggers warning")
+dyeCfg.pools[1].channels[2].gtDye = origD
+
 -- Keep objects alive so Python checks true live heap usage
-rawset(_G, "__HELD_OBJECTS", { cfg, state, ui, scanPool, evState, mSt2, mcSt, st32 })
+rawset(_G, "__HELD_OBJECTS", { cfg, state, ui, scanPool, evState, mSt2, mcSt, st32, dyeSt })
 """
             host.exec_lua(lua_suite, "universal_test_suite")
 

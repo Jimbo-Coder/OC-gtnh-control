@@ -15,24 +15,84 @@ Policy.PRIORITY_WEIGHTS = {
 }
 
 -- GregTech 2.9.0 Dyes.mIndex hatch check priority order (MTEMultiBlockBase scans 0 -> 15).
-Policy.GT_DYE_PRIORITY = {
-    [0]  = "Black",
-    [1]  = "Red",
-    [2]  = "Green",
-    [3]  = "Brown",
-    [4]  = "Blue",
-    [5]  = "Purple",
-    [6]  = "Cyan",
-    [7]  = "LightGray",
-    [8]  = "Gray",
-    [9]  = "Pink",
-    [10] = "Lime",
-    [11] = "Yellow",
-    [12] = "LightBlue",
-    [13] = "Magenta",
-    [14] = "Orange",
-    [15] = "White",
+-- aeColor = 15 - gtDye (Dyes.transformDyeIndex); -1 = Unpainted (matches EVERY color pass in GT).
+Policy.GT_DYES = {
+    [-1] = { gtDye = -1, aeColor = -1, rank = 99, name = "Unpainted", short = "NONE", hex = 0x7D8590 },
+    [0]  = { gtDye = 0,  aeColor = 15, rank = 1,  name = "Black",     short = "BLK",  hex = 0x21262D },
+    [1]  = { gtDye = 1,  aeColor = 14, rank = 2,  name = "Red",       short = "RED",  hex = 0xDA3633 },
+    [2]  = { gtDye = 2,  aeColor = 13, rank = 3,  name = "Green",     short = "GRN",  hex = 0x238636 },
+    [3]  = { gtDye = 3,  aeColor = 12, rank = 4,  name = "Brown",     short = "BRN",  hex = 0x8B5A2B },
+    [4]  = { gtDye = 4,  aeColor = 11, rank = 5,  name = "Blue",      short = "BLU",  hex = 0x1F6FEB },
+    [5]  = { gtDye = 5,  aeColor = 10, rank = 6,  name = "Purple",    short = "PRP",  hex = 0xBC8CFF },
+    [6]  = { gtDye = 6,  aeColor = 9,  rank = 7,  name = "Cyan",      short = "CYN",  hex = 0x39C5CF },
+    [7]  = { gtDye = 7,  aeColor = 8,  rank = 8,  name = "LightGray", short = "SLV",  hex = 0xB1BAC4 },
+    [8]  = { gtDye = 8,  aeColor = 7,  rank = 9,  name = "Gray",      short = "GRY",  hex = 0x6E7681 },
+    [9]  = { gtDye = 9,  aeColor = 6,  rank = 10, name = "Pink",      short = "PNK",  hex = 0xF778BA },
+    [10] = { gtDye = 10, aeColor = 5,  rank = 11, name = "Lime",      short = "LIM",  hex = 0x56D364 },
+    [11] = { gtDye = 11, aeColor = 4,  rank = 12, name = "Yellow",    short = "YEL",  hex = 0xE3B341 },
+    [12] = { gtDye = 12, aeColor = 3,  rank = 13, name = "LightBlue", short = "LBL",  hex = 0x58A6FF },
+    [13] = { gtDye = 13, aeColor = 2,  rank = 14, name = "Magenta",   short = "MAG",  hex = 0xDB61A2 },
+    [14] = { gtDye = 14, aeColor = 1,  rank = 15, name = "Orange",    short = "ORG",  hex = 0xF0883E },
+    [15] = { gtDye = 15, aeColor = 0,  rank = 16, name = "White",     short = "WHT",  hex = 0xF0F6FC },
 }
+
+Policy.GT_DYE_PRIORITY = {}
+for d = 0, 15 do
+    Policy.GT_DYE_PRIORITY[d] = Policy.GT_DYES[d].name
+end
+
+function Policy.dyeInfo(gtDye)
+    local d = tonumber(gtDye)
+    if d ~= nil then
+        d = math.floor(d)
+        if Policy.GT_DYES[d] then return Policy.GT_DYES[d] end
+    end
+    return Policy.GT_DYES[-1]
+end
+
+local DYE_NAME_PATTERNS = {
+    { pat = "unpainted", gtDye = -1 },
+    { pat = "none",      gtDye = -1 },
+    { pat = "lightblue", gtDye = 12 },
+    { pat = "lightgray", gtDye = 7 },
+    { pat = "silver",    gtDye = 7 },
+    { pat = "black",     gtDye = 0 },
+    { pat = "red",       gtDye = 1 },
+    { pat = "green",     gtDye = 2 },
+    { pat = "brown",     gtDye = 3 },
+    { pat = "blue",      gtDye = 4 },
+    { pat = "purple",    gtDye = 5 },
+    { pat = "cyan",      gtDye = 6 },
+    { pat = "gray",      gtDye = 8 },
+    { pat = "pink",      gtDye = 9 },
+    { pat = "lime",      gtDye = 10 },
+    { pat = "yellow",    gtDye = 11 },
+    { pat = "magenta",   gtDye = 13 },
+    { pat = "orange",    gtDye = 14 },
+    { pat = "white",     gtDye = 15 },
+}
+
+function Policy.parseGtDye(val, fallback)
+    local fb = (tonumber(fallback) ~= nil) and math.floor(tonumber(fallback)) or 0
+    if fb < -1 or fb > 15 then fb = 0 end
+    if type(val) == "number" then
+        local d = math.floor(val)
+        return (d >= -1 and d <= 15) and d or fb
+    elseif type(val) == "string" then
+        local num = tonumber(val)
+        if num ~= nil then
+            local d = math.floor(num)
+            return (d >= -1 and d <= 15) and d or fb
+        end
+        local norm = val:lower():gsub("[^%a]", "")
+        for _, entry in ipairs(DYE_NAME_PATTERNS) do
+            if norm:find(entry.pat, 1, true) then
+                return entry.gtDye
+            end
+        end
+    end
+    return fb
+end
 
 local MAX_RECIPE_CACHE = 128
 
@@ -263,18 +323,33 @@ local function isChannelConfigured(pool, chIdx, ch)
     return false
 end
 
--- Decide desired NC index (0..numSlices-1) or nil for every enabled channel in `pool`.
--- Invariants guaranteed:
---   1. At most 1 NC assigned per enabled channel; no two channels get the same NC.
---   2. In MLFQ with K >= 2 channels and fewer runnable NCs than K, BULK NCs are placed
---      on lowest-priority enabled channels so Channel 1 (High Prio) stays IDLE & pre-settled.
-function Policy.decide(pool, pState, candidates, state, cfg, nowSec)
+-- Collect enabled configured channel indices sorted by native GTNH hatch dye priority
+-- (0=Black highest -> 15=White lowest -> -1=Unpainted last; tie-break by array index).
+function Policy.orderedEnabledChannels(pool)
     local enCh = {}
-    for chIdx, ch in ipairs(pool.channels or {}) do
+    if not pool or type(pool.channels) ~= "table" then return enCh end
+    for chIdx, ch in ipairs(pool.channels) do
         if isChannelConfigured(pool, chIdx, ch) then
             enCh[#enCh + 1] = chIdx
         end
     end
+    table.sort(enCh, function(a, b)
+        local ra = Policy.dyeInfo(pool.channels[a].gtDye).rank
+        local rb = Policy.dyeInfo(pool.channels[b].gtDye).rank
+        if ra ~= rb then return ra < rb end
+        return a < b
+    end)
+    return enCh
+end
+
+-- Decide desired NC index (0..numSlices-1) or nil for every enabled channel in `pool`.
+-- Invariants guaranteed:
+--   1. Enabled channels are ranked strictly by native GT hatch spray-can color (0=Black .. 15=White).
+--   2. At most 1 NC assigned per enabled channel; no two channels get the same NC.
+--   3. In MLFQ with K >= 2 channels and fewer runnable NCs than K, BULK NCs demote
+--      to lowest native-priority channels so highest-priority wire stays IDLE & pre-settled.
+function Policy.decide(pool, pState, candidates, state, cfg, nowSec)
+    local enCh = Policy.orderedEnabledChannels(pool)
     if #enCh == 0 then return {}, {} end
 
     local desired = {}
