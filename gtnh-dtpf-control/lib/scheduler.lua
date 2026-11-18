@@ -568,6 +568,7 @@ function Scheduler.ensureConfig(cfg)
     cfg.maintFreeCpus = math.max(0, math.floor(tonumber(cfg.maintFreeCpus) or 2))
     cfg.maintPollSec = math.max(5, math.floor(tonumber(cfg.maintPollSec) or 15))
     cfg.mainnetAddr = cfg.mainnetAddr or "auto"
+    cfg.extLinkMode = (cfg.extLinkMode == "off") and "off" or "auto"
     if type(cfg.maintRules) ~= "table" then
         cfg.maintRules = {}
         for line in DEFAULT_MAINT_SPEC:gmatch("[^\r\n]+") do

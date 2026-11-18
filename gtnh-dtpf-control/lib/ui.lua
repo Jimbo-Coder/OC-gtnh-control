@@ -4129,6 +4129,14 @@ function UI:renderWiringTopologyCard(ctx)
     -- Right Card: Subnets & Bridge (x = 82..159, y = 9..17)
     self:drawFrame(82, 9, 78, 9, COLORS.border, COLORS.panelBg, "round")
     self:drawText(84, 9, " ◈ SUBNETS & BRIDGE ", COLORS.accent, COLORS.panelBg)
+    local isStandalone = (self.cfg.extLinkMode == "off")
+    self:drawButton(140, 9, isStandalone and "[Ext:Standalone]" or "[Ext:Mesh/Auto ]",
+        isStandalone and COLORS.yellow or COLORS.cyan,
+        isStandalone and COLORS.amberBg or COLORS.btnBg,
+        function()
+            self.cfg.extLinkMode = isStandalone and "auto" or "off"
+            self:save("External Link -> " .. (self.cfg.extLinkMode == "off" and "Standalone (No Mesh/Web)" or "Mesh / Auto"))
+        end)
 
     local stockOK = (sNet ~= nil)
     self:drawText(85, 11, "Passive DI :", COLORS.muted, COLORS.panelBg)

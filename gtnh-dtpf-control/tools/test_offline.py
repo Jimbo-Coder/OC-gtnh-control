@@ -14,11 +14,18 @@ from pathlib import Path
 DTPF_ROOT = Path(__file__).resolve().parent.parent
 
 
+def _find_gtnh_root(start: Path) -> Path:
+    for parent in start.parents:
+        if (parent / "tools/jdks").exists() or list(parent.glob("GT_NH_*/mods/OpenComputers-*.jar")):
+            return parent
+    return start.parent.parent
+
+
 def _discover_jvm_dylib() -> Path:
     env = os.environ.get("JVM_DYLIB")
     if env:
         return Path(env)
-    gtnh_root = DTPF_ROOT.parent.parent
+    gtnh_root = _find_gtnh_root(DTPF_ROOT)
     cands = sorted(gtnh_root.glob("tools/jdks/**/libjvm.dylib"), reverse=True) + sorted(gtnh_root.glob("tools/jdks/**/libjvm.so"), reverse=True)
     if cands:
         return cands[0]
@@ -35,7 +42,7 @@ def _discover_oc_jar() -> Path:
     env = os.environ.get("OC_JAR")
     if env:
         return Path(env)
-    gtnh_root = DTPF_ROOT.parent.parent
+    gtnh_root = _find_gtnh_root(DTPF_ROOT)
     cands = sorted(gtnh_root.glob("GT_NH_*/mods/OpenComputers-*.jar"), reverse=True)
     if cands:
         return cands[0]

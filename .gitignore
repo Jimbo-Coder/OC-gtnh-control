@@ -1,8 +1,11 @@
-# Runtime / world-specific state (never commit personal saves or secrets)
+# Personal notes & world-specific runtime state
+**/human_instructions.md
 config.cfg
 .repo
+.oc-gtnh.manifest
 *.bak
 *.tmp
+*.log
 
 # OS / Python scratch
 __pycache__/

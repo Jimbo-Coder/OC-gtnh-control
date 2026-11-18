@@ -558,7 +558,7 @@ local function runGUI()
 
     local ui = UI.new(cfg, runtimeState, scheduleSave)
     local webBridge = WebBridge.new(cfg, runtimeState, ui, scheduleSave, Scheduler, Hardware)
-    if Hardware.openMeshPort then pcall(Hardware.openMeshPort) end
+    if (cfg.extLinkMode ~= "off") and Hardware.openMeshPort then pcall(Hardware.openMeshPort) end
     webBridge:step(computer.uptime())
     if not okInit then
         ui.statusMsg = "Scheduler init error: " .. tostring(errInit)

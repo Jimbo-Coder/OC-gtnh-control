@@ -1,38 +1,35 @@
--- /home/dtpf/install.lua
--- One-step OpenComputers Internet Card installer & updater for GTNH DTPF Controller.
--- Fresh install:
---   wget -f https://raw.githubusercontent.com/Jimbo-Coder/gtnh-dtpf-control/main/install.lua && install
--- Local / floppy install (no Internet Card needed):
---   install --local <sourceDir> [owner/repo] [branch]
--- Update existing install (preserves & backs up config.cfg):
---   dtpf --update [owner/repo] [branch]
+-- /tmp/install.lua (root monorepo selector & updater for OC-gtnh-control)
+-- One-line install:
+--   wget -f https://raw.githubusercontent.com/Jimbo-Coder/OC-gtnh-control/main/install.lua /tmp/install.lua && /tmp/install.lua
+-- Direct module install:
+--   /tmp/install.lua <dtpf|universal|ae2|pump|gorge> [--yes] [--no-autostart]
+-- Update all modules installed on this computer:
+--   /tmp/install.lua --update
 
 local cliArgs = { ... }
 
 local component = require("component")
 local filesystem = require("filesystem")
+local serialization = require("serialization")
 
-local DEFAULT_REPO = "Jimbo-Coder/gtnh-dtpf-control"
+local DEFAULT_REPO = "Jimbo-Coder/OC-gtnh-control"
 local DEFAULT_BRANCH = "main"
-local INSTALL_DIR = "/home/dtpf"
-local CONFIG_PATH = "/home/dtpf/config.cfg"
-local BACKUP_CONFIG_PATH = "/home/config.dtpf.bak"
-local REPO_META_PATH = "/home/dtpf/.repo"
-local BIN_PATH = "/usr/bin/dtpf.lua"
-local SHRC_PATH = "/home/.shrc"
+local MANIFEST_PATH = "/home/.oc-gtnh.manifest"
 
-local FILES = {
-    "install.lua",
-    "main.lua",
-    "lib/recipes_db.lua",
-    "lib/hardware.lua",
-    "lib/scheduler.lua",
-    "lib/ui.lua",
-    "lib/web_bridge.lua",
+local MODULES = {
+    { key = "dtpf",      subdir = "gtnh-dtpf-control",      desc = "DTPF Control Center (Passive/OD/Catalyst Scheduler + 160x50 GUI)", detect = "/home/dtpf/main.lua" },
+    { key = "universal", subdir = "gtnh-universal-control", desc = "Universal Automation (Toggle Bus + Bundled Redstone + SRTF Preempt)", detect = "/home/universal/main.lua" },
+    { key = "ae2",       subdir = "gtnh-ae2-control",       desc = "AE2 Control & Hub (Influx Exporter, Craft Requester & Mesh Gateway)", detect = "/home/exporter.lua" },
+    { key = "pump",      subdir = "gtnh-space-pump",        desc = "Space Elevator Pump (Target Fluid Pumping + Optional Mesh)",         detect = "/home/autoPump.lua" },
+    { key = "gorge",     subdir = "gtnh-gorge-control",     desc = "Forge of the Gods & Exoticizer Control [Scaffolded / Design Only]",  detect = "/home/gorge/main.lua" },
 }
 
-local MAX_CHUNKS = 4096
-local MAX_EMPTY_READS = 200
+local BY_KEY = {}
+for i, m in ipairs(MODULES) do
+    BY_KEY[m.key] = m
+    BY_KEY[m.subdir] = m
+    BY_KEY[tostring(i)] = m
+end
 
 local function readWholeFile(path)
     local f = io.open(path, "r")
@@ -48,374 +45,221 @@ local function writeWholeFile(path, content)
         filesystem.makeDirectory(parent)
     end
     local f, err = io.open(path, "w")
-    if not f then
-        return false, err
-    end
+    if not f then return false, err end
     f:write(content)
     f:close()
     return true
 end
 
-local function resolveRepoAndBranch(args)
-    local repo = args[1]
-    local branch = args[2]
-    local saved = readWholeFile(REPO_META_PATH)
-    if type(saved) == "string" and saved ~= "" then
-        local savedRepo, savedBranch = saved:match("^([^\r\n]+)\r?\n?([^\r\n]*)")
-        if (not repo or repo == "") and savedRepo and savedRepo ~= "" then
-            repo = savedRepo
-        end
-        if (not branch or branch == "") and savedBranch and savedBranch ~= "" then
-            branch = savedBranch
-        end
-    end
-    if not repo or repo == "" then repo = DEFAULT_REPO end
-    if not branch or branch == "" then branch = DEFAULT_BRANCH end
-    repo = tostring(repo):gsub("^https?://github%.com/", ""):gsub("/+$", "")
-    return repo, branch
-end
-
 local function fetchUrl(internet, url)
-    local req, reqErr = internet.request(url)
-    if not req then
-        return nil, tostring(reqErr or "request failed")
-    end
-
+    local req, err = internet.request(url)
+    if not req then return nil, tostring(err or "request failed") end
     local osLib = rawget(_G, "os")
     local function briefYield()
-        if type(osLib) == "table" and osLib.sleep then
-            pcall(osLib.sleep, 0.05)
-        end
+        if type(osLib) == "table" and osLib.sleep then pcall(osLib.sleep, 0.05) end
     end
-
     if req.finishConnect then
-        local connected = false
-        for _ = 1, MAX_EMPTY_READS do
-            local ok, err = req.finishConnect()
-            if ok == true then
-                connected = true
-                break
-            elseif ok == nil then
-                pcall(req.close)
-                return nil, tostring(err or "connection error")
+        local conn = false
+        for _ = 1, 200 do
+            local ok, ferr = req.finishConnect()
+            if ok == true then conn = true; break
+            elseif ok == nil then pcall(req.close); return nil, tostring(ferr or "connect failed")
             end
             briefYield()
         end
-        if not connected then
-            pcall(req.close)
-            return nil, "connection timed out"
-        end
+        if not conn then pcall(req.close); return nil, "connect timeout" end
     end
-
-    local chunks = {}
-    local emptyCount = 0
-    for _ = 1, MAX_CHUNKS do
-        local chunk, readErr = req.read()
-        if chunk == nil then
-            if readErr then
-                pcall(req.close)
-                return nil, tostring(readErr)
-            end
+    local chunks, empty = {}, 0
+    for _ = 1, 4096 do
+        local ch, rErr = req.read()
+        if ch == nil then
+            if rErr then pcall(req.close); return nil, tostring(rErr) end
             break
-        elseif chunk == "" then
-            emptyCount = emptyCount + 1
-            if emptyCount >= MAX_EMPTY_READS then
-                pcall(req.close)
-                return nil, "read timed out"
-            end
+        elseif ch == "" then
+            empty = empty + 1
+            if empty >= 200 then pcall(req.close); return nil, "read timeout" end
             briefYield()
         else
-            emptyCount = 0
-            chunks[#chunks + 1] = chunk
+            empty = 0
+            chunks[#chunks + 1] = ch
         end
     end
-
-    local httpCode, httpMsg
-    if req.response then
-        httpCode, httpMsg = req.response()
-    end
+    local code = req.response and req.response() or nil
     pcall(req.close)
-
-    if type(httpCode) == "number" and httpCode >= 400 then
-        return nil, string.format("HTTP %d (%s)", httpCode, tostring(httpMsg or "error"))
-    end
-
+    if type(code) == "number" and code >= 400 then return nil, "HTTP " .. tostring(code) end
     local body = table.concat(chunks)
-    if #body == 0 then
-        return nil, "empty response"
-    end
-    return body, nil
+    if #body == 0 then return nil, "empty response" end
+    return body
 end
 
-local function syncSettingsBackup()
-    local existingCfg = readWholeFile(CONFIG_PATH)
-    if type(existingCfg) == "string" and #existingCfg > 0 then
-        local ok = writeWholeFile(BACKUP_CONFIG_PATH, existingCfg)
-        if ok then
-            print("[KEEP]    Preserved config.cfg (backup -> " .. BACKUP_CONFIG_PATH .. ")")
-        else
-            print("[KEEP]    Preserved existing " .. CONFIG_PATH)
-        end
-        return "preserved"
-    end
-
-    local backupCfg = readWholeFile(BACKUP_CONFIG_PATH)
-    if type(backupCfg) == "string" and #backupCfg > 0 then
-        local ok = writeWholeFile(CONFIG_PATH, backupCfg)
-        if ok then
-            print("[RESTORE] Restored saved config.cfg from " .. BACKUP_CONFIG_PATH)
-            return "restored"
-        end
-    end
-
-    print("[NEW]     No saved config.cfg yet (first boot will start safely in PAUSED mode)")
-    return "fresh"
-end
-
-local function getInternetProxy()
-    local addr = component.list("internet", true)()
-    if addr then
-        return component.proxy(addr)
-    end
-    if component.isAvailable("internet") then
-        return component.internet
-    end
-    return nil
-end
-
-local function hasDtpfInShrc(content)
-    if type(content) ~= "string" or content == "" then
-        return false
-    end
-    for line in content:gmatch("[^\r\n]+") do
-        if not line:match("^%s*#") then
-            if line:find("main.lua", 1, true)
-                or line:find("/usr/bin/dtpf", 1, true)
-                or line:match("^%s*dtpf%s*$")
-                or line:match("^%s*dtpf%s+") then
-                return true
+local function loadManifest()
+    local raw = readWholeFile(MANIFEST_PATH)
+    local m = { repo = DEFAULT_REPO, branch = DEFAULT_BRANCH, modules = {} }
+    if type(raw) == "string" and #raw > 0 then
+        local ok, tbl = pcall(serialization.unserialize, raw)
+        if ok and type(tbl) == "table" then
+            m.repo = (type(tbl.repo) == "string" and tbl.repo ~= "") and tbl.repo or DEFAULT_REPO
+            m.branch = (type(tbl.branch) == "string" and tbl.branch ~= "") and tbl.branch or DEFAULT_BRANCH
+            if type(tbl.modules) == "table" then
+                for k, v in pairs(tbl.modules) do
+                    if v then m.modules[k] = true end
+                end
             end
         end
     end
-    return false
-end
-
-local function hasDisplayHardware()
-    local hasScreen = component.list("screen", true)() ~= nil
-    local hasGpu = component.list("gpu", true)() ~= nil
-    return hasScreen and hasGpu
-end
-
-local function askYesNo(promptText, nonInteractiveDefault, optYes, optNoPrompt)
-    if optYes then
-        return true
-    end
-    if optNoPrompt then
-        return nonInteractiveDefault
-    end
-    if type(io) ~= "table" or type(io.read) ~= "function" then
-        return nonInteractiveDefault
-    end
-    if type(io.write) == "function" then
-        io.write(promptText)
-        if type(io.flush) == "function" then
-            pcall(io.flush)
+    -- Also detect any pre-existing modules installed prior to monorepo manifest
+    for _, spec in ipairs(MODULES) do
+        if spec.detect and filesystem.exists(spec.detect) then
+            m.modules[spec.key] = true
         end
-    else
-        print(promptText)
     end
-    local okR, line = pcall(io.read)
-    if not okR or line == nil or line == false then
-        return false
-    end
-    return (tostring(line) .. "y"):match("^%s*[Yy]") ~= nil
+    return m
 end
 
-local function runInstaller(args)
+local function saveManifest(m)
+    return writeWholeFile(MANIFEST_PATH, serialization.serialize(m))
+end
+
+local function runSubInstaller(spec, manifest, localDir, extraFlags)
+    local subBody, err
+    local passArgs = {}
+    if localDir then
+        local subDir = filesystem.concat(localDir, spec.subdir)
+        local subPath = filesystem.concat(subDir, "install.lua")
+        subBody = readWholeFile(subPath)
+        err = subBody and nil or ("Not found: " .. subPath)
+        passArgs[#passArgs + 1] = "--local"
+        passArgs[#passArgs + 1] = subDir
+    else
+        local addr = component.list("internet", true)()
+        local internet = addr and component.proxy(addr) or (component.isAvailable("internet") and component.internet or nil)
+        if not internet then
+            return false, "Internet Card required (or use --local <dir>)"
+        end
+        local url = string.format("https://raw.githubusercontent.com/%s/%s/%s/install.lua",
+            manifest.repo, manifest.branch, spec.subdir)
+        subBody, err = fetchUrl(internet, url)
+    end
+    if not subBody then
+        io.stderr:write(string.format("ERROR: Could not load %s/install.lua (%s)\n", spec.subdir, tostring(err)))
+        return false, err
+    end
+    local chunk, synErr = load(subBody, "@" .. spec.subdir .. "/install.lua", "t")
+    if not chunk then
+        io.stderr:write(string.format("ERROR: Invalid Lua in %s/install.lua: %s\n", spec.subdir, tostring(synErr)))
+        return false, synErr
+    end
+
+    passArgs[#passArgs + 1] = "--repo"
+    passArgs[#passArgs + 1] = manifest.repo
+    passArgs[#passArgs + 1] = "--branch"
+    passArgs[#passArgs + 1] = manifest.branch
+    for _, f in ipairs(extraFlags) do
+        passArgs[#passArgs + 1] = f
+    end
+
+    local ok = chunk(table.unpack(passArgs))
+    if ok ~= false and spec.key ~= "gorge" then
+        manifest.modules[spec.key] = true
+        saveManifest(manifest)
+    end
+    return ok ~= false
+end
+
+local function main(args)
     args = args or {}
-    local pos = {}
+    local manifest = loadManifest()
     local localDir = nil
-    local isUpdate = false
-    local optYes = false
-    local optNoPrompt = false
-    local optAutostart = nil
+    local isList, isUpdate = false, false
+    local chosen = {}
+    local forwardFlags = {}
     local idx = 1
+
     while idx <= #args do
         local a = tostring(args[idx])
-        if a == "--local" then
+        if a == "--list" or a == "-l" then
+            isList = true
+        elseif a == "--local" then
             idx = idx + 1
             localDir = tostring(args[idx] or ""):gsub("/+$", "")
-            if localDir == "" then
-                io.stderr:write("ERROR: Usage: install --local <sourceDir> [owner/repo] [branch]\n")
-                return false, "missing local source directory"
-            end
+        elseif a == "--repo" then
+            idx = idx + 1
+            if args[idx] then manifest.repo = tostring(args[idx]) end
+        elseif a == "--branch" then
+            idx = idx + 1
+            if args[idx] then manifest.branch = tostring(args[idx]) end
         elseif a == "--update" then
             isUpdate = true
-        elseif a == "--yes" or a == "-y" then
-            optYes = true
-        elseif a == "--no-prompt" then
-            optNoPrompt = true
-        elseif a == "--autostart" then
-            optAutostart = true
-        elseif a == "--no-autostart" then
-            optAutostart = false
+            forwardFlags[#forwardFlags + 1] = "--update"
+        elseif a == "--yes" or a == "-y" or a == "--no-prompt" or a == "--autostart" or a == "--no-autostart" then
+            forwardFlags[#forwardFlags + 1] = a
+        elseif BY_KEY[a] then
+            chosen[#chosen + 1] = BY_KEY[a]
         else
-            pos[#pos + 1] = a
+            io.stderr:write("Unknown option or module: " .. a .. "\n")
+            return false
         end
         idx = idx + 1
     end
-    local repoArgs = { pos[1], pos[2] }
 
-    local internet = (not localDir) and getInternetProxy() or nil
-    if (not localDir) and (not internet) then
-        io.stderr:write("ERROR: Internet Card required for install/update (or use `install --local <dir>`).\n")
-        return false, "no internet card"
+    if isList then
+        print("=== OC-GTNH-CONTROL MODULES ===")
+        for i, m in ipairs(MODULES) do
+            local tag = manifest.modules[m.key] and "[INSTALLED]" or "[         ]"
+            print(string.format("  [%d] %-10s %s %s", i, m.key, tag, m.desc))
+        end
+        return true
     end
-    local repo, branch = resolveRepoAndBranch(repoArgs)
-    local baseUrl = string.format("https://raw.githubusercontent.com/%s/%s/", repo, branch)
 
-    print("=== GTNH DTPF AUTOMATION INSTALLER ===")
-    print(string.format("Source : %s", localDir and ("local:" .. localDir) or string.format("%s (%s)", repo, branch)))
-    print(string.format("Target : %s", INSTALL_DIR))
-    print("")
-
-    filesystem.makeDirectory(INSTALL_DIR)
-    filesystem.makeDirectory(filesystem.concat(INSTALL_DIR, "lib"))
-    filesystem.makeDirectory("/usr/bin")
-
-    local cfgState = syncSettingsBackup()
-    local staged = {}
-
-    local function cleanupTempFiles()
-        for i = 1, #staged do
-            if staged[i].tmpPath then
-                pcall(filesystem.remove, staged[i].tmpPath)
+    if isUpdate then
+        local targets = (#chosen > 0) and chosen or {}
+        if #targets == 0 then
+            for _, m in ipairs(MODULES) do
+                if manifest.modules[m.key] and m.key ~= "gorge" then
+                    targets[#targets + 1] = m
+                end
             end
         end
+        if #targets == 0 then
+            print("No installed OC-gtnh-control modules found on this computer.")
+            return true
+        end
+        local allOk = true
+        for _, m in ipairs(targets) do
+            print("")
+            local ok = runSubInstaller(m, manifest, localDir, forwardFlags)
+            if not ok then allOk = false end
+        end
+        return allOk
     end
 
-    for i = 1, #FILES do
-        local rel = FILES[i]
-        local body, fetchErr
-        if localDir then
-            local srcPath = filesystem.concat(localDir, rel)
-            body = readWholeFile(srcPath)
-            if not body then
-                fetchErr = "file not found: " .. tostring(srcPath)
-            end
+    if #chosen == 0 then
+        print("=== OC-GTNH-CONTROL INSTALLER ===")
+        for i, m in ipairs(MODULES) do
+            local tag = manifest.modules[m.key] and "[INSTALLED]" or "[         ]"
+            print(string.format("  [%d] %-10s %s %s", i, m.key, tag, m.desc))
+        end
+        print("  [u] update     Update all installed modules on this computer")
+        io.write("Select module (1-5 / name / u): ")
+        if io.flush then pcall(io.flush) end
+        local line = io.read and io.read() or ""
+        line = tostring(line or ""):match("^%s*(.-)%s*$")
+        if line == "u" or line == "update" then
+            return main({ "--update" })
+        elseif BY_KEY[line] then
+            chosen[1] = BY_KEY[line]
         else
-            body, fetchErr = fetchUrl(internet, baseUrl .. rel)
-        end
-        if not body then
-            cleanupTempFiles()
-            io.stderr:write(string.format("ERROR: Failed to %s %s (%s)\n", localDir and "read" or "download", rel, tostring(fetchErr)))
-            return false, fetchErr
-        end
-
-        local chunk, synErr = load(body, "@" .. rel, "t")
-        if not chunk then
-            cleanupTempFiles()
-            io.stderr:write(string.format("ERROR: Invalid Lua in %s (%s); existing install untouched.\n", rel, tostring(synErr)))
-            return false, synErr
-        end
-
-        local destPath = filesystem.concat(INSTALL_DIR, rel)
-        local tmpPath = destPath .. ".tmp"
-        local okW, writeErr = writeWholeFile(tmpPath, body)
-        if not okW then
-            cleanupTempFiles()
-            io.stderr:write(string.format("ERROR: Failed writing %s (%s)\n", tmpPath, tostring(writeErr)))
-            return false, writeErr
-        end
-        staged[#staged + 1] = { rel = rel, destPath = destPath, tmpPath = tmpPath, bytes = #body }
-        print(string.format("[OK %d/%d] %-20s (%d bytes)", i, #FILES, rel, #body))
-    end
-
-    for i = 1, #staged do
-        local item = staged[i]
-        pcall(filesystem.remove, item.destPath)
-        local okRen, renErr = filesystem.rename(item.tmpPath, item.destPath)
-        if not okRen then
-            local fallbackBody = readWholeFile(item.tmpPath)
-            pcall(filesystem.remove, item.tmpPath)
-            if fallbackBody then
-                writeWholeFile(item.destPath, fallbackBody)
-            else
-                io.stderr:write(string.format("ERROR: Could not finalize %s (%s)\n", item.destPath, tostring(renErr)))
-                return false, renErr
-            end
+            io.stderr:write("No valid module selected.\n")
+            return false
         end
     end
 
-    writeWholeFile(REPO_META_PATH, repo .. "\n" .. branch .. "\n")
-
-    local binExisted = filesystem.exists(BIN_PATH)
-    local wantAlias
-    if binExisted then
-        wantAlias = true
-        if not isUpdate then
-            print("[KEEP]    Command 'dtpf' (/usr/bin/dtpf.lua)")
-        end
-    elseif isUpdate then
-        wantAlias = false
-    else
-        wantAlias = askYesNo("Add 'dtpf' shell command (/usr/bin/dtpf.lua)? [Y/n]: ", true, optYes, optNoPrompt)
+    local allOk = true
+    for _, spec in ipairs(chosen) do
+        local ok = runSubInstaller(spec, manifest, localDir, forwardFlags)
+        if not ok then allOk = false end
     end
-
-    if wantAlias then
-        writeWholeFile(
-            BIN_PATH,
-            "local args = { ... }\n"
-                .. "local chunk, err = loadfile(\"/home/dtpf/main.lua\")\n"
-                .. "if not chunk then io.stderr:write(tostring(err) .. \"\\n\") return end\n"
-                .. "return chunk(table.unpack(args))\n"
-        )
-        if not binExisted then
-            print("[CMD]     Added 'dtpf' command (/usr/bin/dtpf.lua)")
-        end
-    elseif not isUpdate then
-        print("[SKIP]    Skipped /usr/bin/dtpf.lua (run via /home/dtpf/main.lua)")
-    end
-
-    local existingShrc = readWholeFile(SHRC_PATH)
-    if hasDtpfInShrc(existingShrc) then
-        if not isUpdate then
-            print("[KEEP]    Auto-start already configured in /home/.shrc")
-        end
-    elseif not isUpdate then
-        local baseCmd = wantAlias and "dtpf" or "/home/dtpf/main.lua"
-        local autoCmd = hasDisplayHardware() and baseCmd or (baseCmd .. " --worker")
-        local wantAuto
-        if optAutostart ~= nil then
-            wantAuto = optAutostart
-        else
-            wantAuto = askYesNo(string.format("Auto-start on boot in /home/.shrc (%s)? [Y/n]: ", autoCmd), false, optYes, optNoPrompt)
-        end
-        if wantAuto then
-            local prefix = (type(existingShrc) == "string" and existingShrc ~= "") and existingShrc or ""
-            if prefix ~= "" and prefix:sub(-1) ~= "\n" then
-                prefix = prefix .. "\n"
-            end
-            writeWholeFile(SHRC_PATH, prefix .. autoCmd .. "\n")
-            print(string.format("[AUTO]    Added '%s' to /home/.shrc (press Q anytime for shell)", autoCmd))
-        else
-            print("[SKIP]    Skipped /home/.shrc auto-start")
-        end
-    end
-
-    if filesystem.exists("/home/install.lua") then
-        pcall(filesystem.remove, "/home/install.lua")
-    end
-
-    local runCmd = wantAlias and "dtpf" or "/home/dtpf/main.lua"
-    print("")
-    print(string.format("Done! Installed %d files to %s (config: %s).", #staged, INSTALL_DIR, cfgState))
-    print("Next steps:")
-    print(string.format("  %-15s (disable autoPull on passive ME Stocking Hatches/Buses)", runCmd .. " --lock"))
-    print(string.format("  %-15s (read-only hardware & schedule dry-run check)", runCmd .. " --check"))
-    print(string.format("  %-15s (launch 160x50 Touch Control Center GUI)", runCmd))
-    print(string.format("  %-15s (update scripts safely while preserving config.cfg)", runCmd .. " --update"))
-    return true
+    return allOk
 end
 
-return runInstaller(cliArgs)
+return main(cliArgs)

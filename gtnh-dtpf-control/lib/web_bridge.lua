@@ -830,6 +830,10 @@ function WebBridge:handleCommand(cmd)
 end
 
 function WebBridge:ensureConnected(now)
+    if self.cfg and self.cfg.extLinkMode == "off" then
+        if self.sock then self:close() end
+        return false
+    end
     if self.Hardware and self.Hardware.hasMeshPeer and self.Hardware.hasMeshPeer() then
         if self.sock then self:close() end
         return false

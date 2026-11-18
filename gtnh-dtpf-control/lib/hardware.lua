@@ -2232,6 +2232,9 @@ function Hardware.queryMainnetMaintenance(cfg, itemsReq, compLib)
     if cfg and cfg.mainnetAddr == "none" then
         return { ok = false, link = "none", error = "Mainnet link disabled" }
     end
+    if cfg and cfg.extLinkMode == "off" then
+        return { ok = false, link = "none", error = "Standalone mode (Ext Link OFF)" }
+    end
 
     local modem, _, tunnel, tAddr = getMeshTransports(cl)
     if not modem and not tunnel then
@@ -2312,6 +2315,7 @@ function Hardware.requestMainnetCraft(cfg, rule, amount, compLib)
 end
 
 function Hardware.pushMeshMetrics(cfg, runtimeState, nowSec, compLib, force)
+    if cfg and cfg.extLinkMode == "off" then return false end
     local cl = compLib or component
     local modem, _, tunnel = getMeshTransports(cl)
     if not modem and not tunnel then return false end
@@ -2373,6 +2377,7 @@ function Hardware.pushMeshMetrics(cfg, runtimeState, nowSec, compLib, force)
 end
 
 function Hardware.handleMeshMessage(webBridge, localAddr, sender, port, msgType, reqId, payload, compLib)
+    if webBridge and webBridge.cfg and webBridge.cfg.extLinkMode == "off" then return false end
     local cl = compLib or component
     local modem, _, tunnel, tAddr = getMeshTransports(cl)
     local isMeshPort = (port == Hardware.MESH_PORT) or (port == 0 and tunnel and tAddr and localAddr == tAddr)

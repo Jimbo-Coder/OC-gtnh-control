@@ -19,11 +19,18 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 DTPF_ROOT = SCRIPT_DIR.parent
 
 
+def _find_gtnh_root(start: Path) -> Path:
+    for parent in start.parents:
+        if (parent / "tools/jdks").exists() or list(parent.glob("GT_NH_*/mods/GTNewHorizonsCoreMod-*.jar")):
+            return parent
+    return start.parent.parent
+
+
 def discover_mods_dir() -> Path:
     env_mods = os.environ.get("GTNH_MODS_DIR")
     if env_mods:
         return Path(env_mods)
-    gtnh_root = DTPF_ROOT.parent.parent
+    gtnh_root = _find_gtnh_root(DTPF_ROOT)
     for cand in sorted(gtnh_root.glob("GT_NH_*/mods"), reverse=True):
         if list(cand.glob("GTNewHorizonsCoreMod-*.jar")):
             return cand
@@ -34,7 +41,7 @@ def discover_javap() -> str:
     env_javap = os.environ.get("JAVAP")
     if env_javap:
         return env_javap
-    gtnh_root = DTPF_ROOT.parent.parent
+    gtnh_root = _find_gtnh_root(DTPF_ROOT)
     jdks = sorted(gtnh_root.glob("tools/jdks/**/bin/javap"), reverse=True)
     if jdks:
         return str(jdks[0])
