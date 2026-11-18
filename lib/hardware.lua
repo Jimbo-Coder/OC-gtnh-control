@@ -2189,6 +2189,33 @@ local function resolveMainnetCraftable(proxy, rule)
     return nil
 end
 
+local function meshUptime()
+    return (computer and computer.uptime and computer.uptime()) or 0
+end
+
+local function awaitMeshAck(tunnel, tAddr, reqId, ackType, timeoutSec, maxPulls, stepSec)
+    local t0 = meshUptime()
+    local deadline = t0 + timeoutSec
+    for _ = 1, maxPulls do
+        local rem = deadline - meshUptime()
+        if rem <= 0 then break end
+        local ev, _, sender, port, _, msgType, rId, raw = event.pull(math.min(stepSec, math.max(0.05, rem)), "modem_message")
+        if not ev then
+            -- Exit immediately if host clock does not advance during event.pull (e.g. offline test mocks).
+            if meshUptime() <= t0 then break end
+        elseif (port == Hardware.MESH_PORT or (port == 0 and tunnel and tAddr))
+            and msgType == ackType and tostring(rId) == reqId and type(raw) == "string" then
+            local okU, tbl = pcall(serialization.unserialize, raw)
+            if okU and type(tbl) == "table" then
+                Hardware._mainnetMeshAddr = sender
+                Hardware._mainnetMeshViaTunnel = (port == 0)
+                return tbl, sender, port
+            end
+        end
+    end
+    return nil
+end
+
 function Hardware.queryMainnetMaintenance(cfg, itemsReq, compLib)
     local cl = compLib or component
     local proxy, pAddr = Hardware.findLocalMainnetProxy(cfg, cl)
@@ -2216,20 +2243,11 @@ function Hardware.queryMainnetMaintenance(cfg, itemsReq, compLib)
     local viaTunnel = (Hardware._mainnetMeshViaTunnel == true) or (not modem and tunnel ~= nil)
     sendMeshPacket(cl, Hardware._mainnetMeshAddr, viaTunnel, "MESH_MAINT_SYNC", reqId, payload)
 
-    for _ = 1, 8 do
-        local ev, _, sender, port, _, msgType, rId, raw = event.pull(0.25, "modem_message")
-        if not ev then break end
-        if (port == Hardware.MESH_PORT or (port == 0 and tunnel and tAddr))
-            and msgType == "MESH_MAINT_ACK" and tostring(rId) == reqId and type(raw) == "string" then
-            local okU, tbl = pcall(serialization.unserialize, raw)
-            if okU and type(tbl) == "table" then
-                Hardware._mainnetMeshAddr = sender
-                Hardware._mainnetMeshViaTunnel = (port == 0)
-                tbl.link = (port == 0) and "tunnel" or "modem"
-                tbl.addr = sender
-                return tbl
-            end
-        end
+    local tbl, sender, port = awaitMeshAck(tunnel, tAddr, reqId, "MESH_MAINT_ACK", 2.5, 16, 0.35)
+    if tbl then
+        tbl.link = (port == 0) and "tunnel" or "modem"
+        tbl.addr = sender
+        return tbl
     end
     return { ok = false, link = "none", error = "Awaiting Mainnet OC response on port " .. tostring(Hardware.MESH_PORT) }
 end
@@ -2280,18 +2298,9 @@ function Hardware.requestMainnetCraft(cfg, rule, amount, compLib)
     })
     local viaTunnel = (Hardware._mainnetMeshViaTunnel == true) or (not modem and tunnel ~= nil)
     sendMeshPacket(cl, Hardware._mainnetMeshAddr, viaTunnel, "MESH_CRAFT", reqId, payload)
-    for _ = 1, 8 do
-        local ev, _, sender, port, _, msgType, rId, raw = event.pull(0.45, "modem_message")
-        if not ev then break end
-        if (port == Hardware.MESH_PORT or (port == 0 and tunnel and tAddr))
-            and msgType == "MESH_CRAFT_ACK" and tostring(rId) == reqId and type(raw) == "string" then
-            local okU, tbl = pcall(serialization.unserialize, raw)
-            if okU and type(tbl) == "table" then
-                Hardware._mainnetMeshAddr = sender
-                Hardware._mainnetMeshViaTunnel = (port == 0)
-                return tbl
-            end
-        end
+    local tbl = awaitMeshAck(tunnel, tAddr, reqId, "MESH_CRAFT_ACK", 4.0, 20, 0.45)
+    if tbl then
+        return tbl
     end
     return { ok = false, error = "Mainnet OC craft timeout" }
 end
