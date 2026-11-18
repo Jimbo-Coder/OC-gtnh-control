@@ -4,11 +4,75 @@
 
 local component = require("component")
 local unicode = require("unicode")
+local okComp, computer = pcall(require, "computer")
+if not okComp then computer = nil end
 local Hardware = require("lib.hardware")
 local Policy = require("lib.policy")
 local Scheduler = require("lib.scheduler")
 
 local UI = {}
+
+local function playBeep(freq, dur)
+    if computer and type(computer.beep) == "function" then
+        pcall(computer.beep, freq, dur)
+    end
+end
+
+local function isDefaultSliceLabel(slice, ncIdx)
+    local ci = Hardware.COLORS[ncIdx % 16]
+    local defLabel = ((ncIdx >= 16) and "B:" or "") .. (ci and ci.name or ("Color " .. (ncIdx % 16)))
+    return (not slice.label) or slice.label == "" or slice.label == defLabel
+end
+
+local function nextUnboundSlice(pool, preferredNc)
+    if not pool or not pool.slices then return nil end
+    local maxNc = (tonumber(pool.numSlices) or 16) - 1
+    if preferredNc ~= nil and preferredNc >= 0 and preferredNc <= maxNc then
+        local ps = pool.slices[preferredNc]
+        if ps and (not ps.ifaceAddr or ps.ifaceAddr == "") then
+            return preferredNc
+        end
+    end
+    for c = 0, maxNc do
+        local s = pool.slices[c]
+        if s and (not s.ifaceAddr or s.ifaceAddr == "") then
+            return c
+        end
+    end
+    return nil
+end
+
+local function unboundNonMainnetAddrs(pool, discInterfaces)
+    local boundMap = {}
+    if pool and pool.slices then
+        local maxNc = (tonumber(pool.numSlices) or 16) - 1
+        for c = 0, maxNc do
+            local a = pool.slices[c] and pool.slices[c].ifaceAddr
+            if a and a ~= "" then boundMap[a] = true end
+        end
+    end
+    local unbound = {}
+    for _, it in ipairs(discInterfaces or {}) do
+        if (not it.isMainnet) and not boundMap[it.address] then
+            unbound[#unbound + 1] = it.address
+        end
+    end
+    return unbound
+end
+
+local function countTotalBoundSlices(pools)
+    local total = 0
+    for _, pl in ipairs(pools or {}) do
+        local maxNc = (tonumber(pl.numSlices) or 16) - 1
+        for c = 0, maxNc do
+            local s = pl.slices and pl.slices[c]
+            if s and s.ifaceAddr and s.ifaceAddr ~= "" then
+                total = total + 1
+            end
+        end
+    end
+    return total
+end
 
 local TAB_OVERVIEW = 1
 local TAB_SLICES   = 2
@@ -45,7 +109,21 @@ local FRAME_STYLES = {
     double = { tl = "╔", tr = "╗", bl = "╚", br = "╝", h = "═", v = "║" },
 }
 
-local COL_MUL = 0x1000000
+local _widthCache = {}
+local function cpWidth(cp)
+    if cp >= 32 and cp <= 126 then return 1 end
+    local w = _widthCache[cp]
+    if w == nil then
+        w = unicode.charWidth(utf8.char(cp))
+        _widthCache[cp] = w
+    end
+    return w
+end
+
+local function packColorMask(fg, bg)
+    return ((math.floor(fg or COLORS.fg) & 0xFFFFFF) << 40)
+        | ((math.floor(bg or COLORS.bg) & 0xFFFFFF) << 16)
+end
 
 local function padOrTrunc(str, width)
     str = tostring(str or "")
@@ -123,15 +201,14 @@ function UI.new(cfg, state, onSave, compLib)
         guidedDropSnap = nil,
         statusMsg = "Ready. Press [PAUSED] or Space to arm.",
         hitboxes = {},
-        curCh = {},
-        curCol = {},
-        nxtCh = {},
-        nxtCol = {},
+        curBuf = {},
+        nxtBuf = {},
     }, { __index = UI })
 
-    for ry = 1, self.h do
-        self.curCh[ry], self.curCol[ry] = {}, {}
-        self.nxtCh[ry], self.nxtCol[ry] = {}, {}
+    local curBuf, nxtBuf = self.curBuf, self.nxtBuf
+    for i = 1, self.w * self.h do
+        curBuf[i] = -1
+        nxtBuf[i] = 0
     end
     return self
 end
@@ -142,20 +219,17 @@ function UI:save(msg)
 end
 
 function UI:invalidateScreen()
-    for ry = 1, self.h do
-        self.curCh[ry], self.curCol[ry] = {}, {}
+    local curBuf = self.curBuf
+    for i = 1, self.w * self.h do
+        curBuf[i] = -1
     end
 end
 
 function UI:clearNextBuffer(bgCol, fgCol)
-    local packed = (fgCol or COLORS.fg) * COL_MUL + (bgCol or COLORS.bg)
-    local w = self.w
-    for ry = 1, self.h do
-        local rCh, rCol = self.nxtCh[ry], self.nxtCol[ry]
-        for rx = 1, w do
-            rCh[rx] = " "
-            rCol[rx] = packed
-        end
+    local emptyCell = packColorMask(fgCol, bgCol) | 32
+    local nxtBuf = self.nxtBuf
+    for i = 1, self.w * self.h do
+        nxtBuf[i] = emptyCell
     end
 end
 
@@ -173,15 +247,14 @@ end
 function UI:drawText(x, y, text, fg, bg)
     if y < 1 or y > self.h then return end
     text = tostring(text or "")
-    local packed = (fg or COLORS.fg) * COL_MUL + (bg or COLORS.bg)
-    local rCh, rCol = self.nxtCh[y], self.nxtCol[y]
+    local mask = packColorMask(fg, bg)
+    local rowBase = (y - 1) * self.w
+    local nxtBuf = self.nxtBuf
     local col = x
     for _, cp in utf8.codes(text) do
-        local ch = utf8.char(cp)
-        local cw = unicode.charWidth(ch)
         if col >= 1 and col <= self.w then
-            rCh[col] = (cw > 1) and "?" or ch
-            rCol[col] = packed
+            local safeCp = (cpWidth(cp) > 1 or cp > 0xFFFF) and 63 or cp
+            nxtBuf[rowBase + col] = mask | safeCp
         end
         col = col + 1
         if col > self.w then break end
@@ -189,15 +262,17 @@ function UI:drawText(x, y, text, fg, bg)
 end
 
 function UI:fillRect(x, y, w, h, ch, bg, fg)
-    local fill = (ch and ch ~= "") and ch or " "
-    local packed = (fg or COLORS.fg) * COL_MUL + (bg or COLORS.bg)
-    local x1, x2 = math.max(1, x), math.min(self.w, x + w - 1)
+    local fillCp = (ch and ch ~= "") and utf8.codepoint(ch, 1) or 32
+    if cpWidth(fillCp) > 1 or fillCp > 0xFFFF then fillCp = 63 end
+    local cell = packColorMask(fg, bg) | (fillCp & 0xFFFF)
+    local sw = self.w
+    local nxtBuf = self.nxtBuf
+    local x1, x2 = math.max(1, x), math.min(sw, x + w - 1)
     local y1, y2 = math.max(1, y), math.min(self.h, y + h - 1)
     for ry = y1, y2 do
-        local rCh, rCol = self.nxtCh[ry], self.nxtCol[ry]
+        local rowBase = (ry - 1) * sw
         for rx = x1, x2 do
-            rCh[rx] = fill
-            rCol[rx] = packed
+            nxtBuf[rowBase + rx] = cell
         end
     end
 end
@@ -228,23 +303,29 @@ function UI:flush()
     if not gpu then return end
     local lastFg, lastBg = -1, -1
     local w = self.w
+    local nxt, cur = self.nxtBuf, self.curBuf
     for ry = 1, self.h do
-        local nCh, nCol = self.nxtCh[ry], self.nxtCol[ry]
-        local cCh, cCol = self.curCh[ry], self.curCol[ry]
+        local rowBase = (ry - 1) * w
         local rx = 1
         while rx <= w do
-            local ch, col = nCh[rx], nCol[rx]
-            if cCh[rx] ~= ch or cCol[rx] ~= col then
+            local idx = rowBase + rx
+            local cell = nxt[idx]
+            if cur[idx] ~= cell then
                 local startX = rx
-                local run = {}
-                while rx <= w and nCol[rx] == col and (cCh[rx] ~= nCh[rx] or cCol[rx] ~= col) do
-                    cCh[rx] = nCh[rx]
-                    cCol[rx] = col
-                    run[#run + 1] = nCh[rx]
+                local colBits = cell >> 16
+                local runCps = {}
+                while rx <= w do
+                    local nIdx = rowBase + rx
+                    local nCell = nxt[nIdx]
+                    if (nCell >> 16) ~= colBits or cur[nIdx] == nCell then
+                        break
+                    end
+                    cur[nIdx] = nCell
+                    runCps[#runCps + 1] = nCell & 0xFFFF
                     rx = rx + 1
                 end
-                local fg = math.floor(col / COL_MUL)
-                local bg = col - fg * COL_MUL
+                local fg = (colBits >> 24) & 0xFFFFFF
+                local bg = colBits & 0xFFFFFF
                 if bg ~= lastBg then
                     gpu.setBackground(bg)
                     lastBg = bg
@@ -253,7 +334,7 @@ function UI:flush()
                     gpu.setForeground(fg)
                     lastFg = fg
                 end
-                gpu.set(startX, ry, table.concat(run))
+                gpu.set(startX, ry, utf8.char(table.unpack(runCps)))
             else
                 rx = rx + 1
             end
@@ -287,62 +368,94 @@ function UI:selectedPool()
     return pool, self.selectedPoolIdx
 end
 
+function UI:startGuidedDrop()
+    local pool = self:selectedPool()
+    if not pool then return false end
+    local unbound = unboundNonMainnetAddrs(pool, self.state.discovery and self.state.discovery.interfaces)
+    local targetNc = nextUnboundSlice(pool, self.selectedColor)
+    if #unbound == 0 or targetNc == nil then
+        self.guidedDropActive = false
+        self.guidedDropSnap = nil
+        self.statusMsg = "Guided Drop: all slices or non-mainnet interfaces are already bound."
+        return false
+    end
+    self.selectedColor = targetNc
+    self.sliceBank = math.floor(targetNc / 16)
+    self.guidedDropActive = true
+    Hardware.setGuidedSubscriptions(unbound, true, self.comp, self.state)
+    self.guidedDropSnap = Hardware.snapshotInterfaces(unbound, self.comp)
+    local ci = Hardware.COLORS[targetNc % 16]
+    self.statusMsg = string.format("Guided Drop -> NC %02d (%s): Drop 1 item into an unbound Waiting Room!",
+        targetNc, ci and ci.name or targetNc)
+    return true
+end
+
+function UI:stopGuidedDrop(reasonMsg)
+    self.guidedDropActive = false
+    self.guidedDropSnap = nil
+    Hardware.setGuidedSubscriptions(nil, false, self.comp, self.state)
+    if reasonMsg then
+        self.statusMsg = reasonMsg
+    end
+end
+
 function UI:stepGuidedDrop()
     if not self.guidedDropActive then return false end
     local pool = self:selectedPool()
     if not pool then
-        self.guidedDropActive = false
+        self:stopGuidedDrop()
         return false
     end
-    local maxNc = (tonumber(pool.numSlices) or 16) - 1
-    local boundMap = {}
-    for c = 0, maxNc do
-        local a = pool.slices[c] and pool.slices[c].ifaceAddr
-        if a and a ~= "" then boundMap[a] = true end
-    end
-    local unbound = {}
-    for _, it in ipairs((self.state.discovery and self.state.discovery.interfaces) or {}) do
-        if not boundMap[it.address] then
-            unbound[#unbound + 1] = it.address
-        end
-    end
+    local unbound = unboundNonMainnetAddrs(pool, self.state.discovery and self.state.discovery.interfaces)
     if #unbound == 0 then
-        self.guidedDropActive = false
-        self.guidedDropSnap = nil
-        self.statusMsg = "Guided Drop done: no unbound interfaces left."
+        self:stopGuidedDrop("Guided Drop done: no unbound interfaces left.")
+        playBeep(1320, 0.12)
         return true
     end
     if not self.guidedDropSnap then
         self.guidedDropSnap = Hardware.snapshotInterfaces(unbound, self.comp)
         return false
     end
-    local hitAddr = Hardware.detectChangedInterface(unbound, self.guidedDropSnap, self.comp)
+    local hitAddr, _, hitMeta = Hardware.detectChangedInterface(unbound, self.guidedDropSnap, self.comp)
     if hitAddr then
-        local targetNc = nil
-        for c = 0, maxNc do
-            if not pool.slices[c].ifaceAddr or pool.slices[c].ifaceAddr == "" then
-                targetNc = c
-                break
-            end
-        end
+        local targetNc = nextUnboundSlice(pool, self.selectedColor)
         if targetNc ~= nil then
-            pool.slices[targetNc].ifaceAddr = hitAddr
-            self.selectedColor = targetNc
-            self.sliceBank = math.floor(targetNc / 16)
+            local slice = pool.slices[targetNc]
+            slice.ifaceAddr = hitAddr
+            if isDefaultSliceLabel(slice, targetNc) then
+                local suggested = Hardware.suggestNcLabel(hitMeta)
+                if suggested and suggested ~= "" then
+                    slice.label = suggested
+                end
+            end
             Scheduler.refreshSubscriptions(self.cfg, self.state, self.comp)
-            local cInfo = Hardware.COLORS[targetNc % 16]
-            self:save(string.format("Guided Drop bound NC %02d (%s) -> %s",
-                targetNc, cInfo and cInfo.name or targetNc, Hardware.shortAddr(hitAddr)))
+
             local rem = {}
             for _, a in ipairs(unbound) do
                 if a ~= hitAddr then rem[#rem + 1] = a end
             end
-            self.guidedDropSnap = (#rem > 0) and Hardware.snapshotInterfaces(rem, self.comp) or nil
-            if #rem == 0 then self.guidedDropActive = false end
+            local nextNc = nextUnboundSlice(pool, targetNc)
+            if #rem == 0 or nextNc == nil then
+                self.selectedColor = targetNc
+                self.sliceBank = math.floor(targetNc / 16)
+                self:stopGuidedDrop(string.format("Guided Drop complete! Bound NC %02d (%s) -> %s",
+                    targetNc, slice.label, Hardware.shortAddr(hitAddr)))
+                self:save()
+                playBeep(1320, 0.12)
+            else
+                self.selectedColor = nextNc
+                self.sliceBank = math.floor(nextNc / 16)
+                self.guidedDropSnap = Hardware.snapshotInterfaces(rem, self.comp)
+                local nextCi = Hardware.COLORS[nextNc % 16]
+                self:save(string.format("Bound NC %02d (%s) -> %s | Next: NC %02d (%s)",
+                    targetNc, slice.label, Hardware.shortAddr(hitAddr), nextNc, nextCi and nextCi.name or nextNc))
+                playBeep(880, 0.08)
+            end
             return true
         else
-            self.guidedDropActive = false
-            self.guidedDropSnap = nil
+            self:stopGuidedDrop("Guided Drop done: all NC slots bound.")
+            playBeep(1320, 0.12)
+            return true
         end
     end
     return false
@@ -389,6 +502,7 @@ function UI:renderHeader()
         self.logModalScroll = 0
     end) + 1
     self:drawButton(rx, 1, "[Quit]", COLORS.red, COLORS.btnBg, function()
+        if self.guidedDropActive then self:stopGuidedDrop() end
         Scheduler.allOff(self.cfg, self.state, nil, self.comp)
         self:save("Saved and turned outputs OFF.")
         self.running = false
@@ -410,11 +524,14 @@ function UI:renderHeader()
     end
 
     if self.guidedDropActive then
-        local gTxt = "[GUIDED DROP: Waiting for item in unbound subnet... Stop]"
+        local poolG = self:selectedPool()
+        local nxtNc = poolG and nextUnboundSlice(poolG, self.selectedColor)
+        local ciG = (nxtNc ~= nil) and Hardware.COLORS[nxtNc % 16] or nil
+        local gTxt = (nxtNc ~= nil)
+            and string.format("[GUIDED DROP -> NC %02d (%s): Drop item... Stop]", nxtNc, ciG and ciG.name or nxtNc)
+            or "[GUIDED DROP: Waiting for item in unbound subnet... Stop]"
         self:drawButton(self.w - unicode.wlen(gTxt) - 1, 2, gTxt, COLORS.yellow, COLORS.amberBg, function()
-            self.guidedDropActive = false
-            self.guidedDropSnap = nil
-            self.statusMsg = "Guided Drop Pairing stopped."
+            self:stopGuidedDrop("Guided Drop Pairing stopped.")
         end)
     else
         local warnCnt = #((self.state.discovery and self.state.discovery.partWarnings) or {})
@@ -538,7 +655,75 @@ function UI:renderOverviewTab()
     local maxShow = 22
     self.queueScroll = math.max(0, math.min(math.max(0, #q - maxShow), self.queueScroll or 0))
     if #q == 0 then
-        self:drawText(4, 25, "All bound NC subnets are empty (Idle - 0 tick scan overhead).", COLORS.muted, COLORS.panelBg)
+        local totalBound = countTotalBoundSlices(pools)
+        if totalBound == 0 then
+            local p1 = pools[1]
+            local ch1 = p1 and p1.channels and p1.channels[1]
+            local b1 = ch1 and ch1.banks and ch1.banks[1]
+            local roomCount = 0
+            for _, inf in ipairs(disc.interfaces or {}) do
+                if not inf.isMainnet then roomCount = roomCount + 1 end
+            end
+
+            self:drawText(4, 24, "◈ QUICK-START WIZARD (0 BOUND WAITING ROOMS YET)", COLORS.cyan, COLORS.panelBg)
+            self:drawText(4, 25, "Follow these 3 quick steps to start universal craft dispatching:", COLORS.muted, COLORS.panelBg)
+
+            local rsShort = Hardware.shortAddr(b1 and b1.rsAddr or (p1 and p1.rsAddr))
+            local sSide = (b1 and b1.side) or (p1 and p1.side) or 2
+            self:drawText(4, 27, string.format("1. Bundled Redstone Wire : Pool 1 Ch1 -> RS %s (%s)", rsShort, Hardware.SIDE_NAMES[sSide] or "?"),
+                COLORS.fg, COLORS.panelBg)
+            local xStep1 = self:drawButton(68, 27, "[Side: " .. (Hardware.SIDE_NAMES[sSide] or "?") .. "]", COLORS.cyan, COLORS.btnBg, function(step)
+                if p1 and b1 then
+                    Hardware.zeroAllManagedPools(self.cfg, self.comp, self.state)
+                    b1.side = (b1.side + (step or 1) + 6) % 6
+                    p1.side = b1.side
+                    self:save("Pool 1 Ch1 Side -> " .. (Hardware.SIDE_NAMES[b1.side] or b1.side))
+                end
+            end) + 2
+            xStep1 = self:drawButton(xStep1, 27, "[Pulse NC 00 (2s)]", COLORS.yellow, COLORS.amberBg, function()
+                if p1 then
+                    local okP, errP = Scheduler.triggerPulseTest(self.cfg, self.state, p1.id, 0, 2.0, self.state.lastStepSec or 0, self.comp, 1)
+                    if not okP then self.statusMsg = tostring(errP) end
+                end
+            end) + 2
+            self:drawButton(xStep1, 27, "[Pools Tab]", COLORS.fg, COLORS.btnBg, function() self.tab = TAB_POOLS end)
+
+            self:drawText(4, 30, string.format("2. Pair Waiting Rooms    : %d non-mainnet full-block Dual IF(s) ready", roomCount),
+                roomCount > 0 and COLORS.green or COLORS.yellow, COLORS.panelBg)
+            local xStep2 = self:drawButton(68, 30, self.guidedDropActive and "[Stop Guided Drop]" or "[▶ Guided Drop Pair]",
+                self.guidedDropActive and COLORS.yellow or COLORS.purple, COLORS.btnBg, function()
+                    if self.guidedDropActive then
+                        self:stopGuidedDrop("Guided Drop stopped.")
+                    else
+                        self:startGuidedDrop()
+                    end
+                end) + 2
+            xStep2 = self:drawButton(xStep2, 30, "[Auto-Bind Discovered]", COLORS.cyan, COLORS.btnBg, function()
+                if not p1 then return end
+                local bound = 0
+                local maxS = tonumber(p1.numSlices) or 16
+                for _, inf in ipairs(disc.interfaces or {}) do
+                    if not inf.isMainnet then
+                        p1.slices[bound].ifaceAddr = inf.address
+                        bound = bound + 1
+                        if bound >= maxS then break end
+                    end
+                end
+                Scheduler.refreshSubscriptions(self.cfg, self.state, self.comp)
+                self:save(string.format("Auto-bound %d Waiting Room(s) -> NC 00..%02d.", bound, math.max(0, bound - 1)))
+            end) + 2
+            self:drawButton(xStep2, 30, "[Open Setup Tab]", COLORS.fg, COLORS.btnBg, function() self.tab = TAB_SETUP end)
+
+            self:drawText(4, 33, "3. Arm Automation        : Safely start once wires & interfaces are bound", COLORS.fg, COLORS.panelBg)
+            self:drawButton(68, 33, self.cfg.armed and "[Scheduler Armed ✓]" or "[Arm Scheduler]",
+                self.cfg.armed and COLORS.green or COLORS.fg, self.cfg.armed and COLORS.darkGreen or COLORS.btnActiveBg, function()
+                    self.cfg.armed = true
+                    self.state._forcePollNow = true
+                    self:save("Armed: universal toggle scheduler active.")
+                end)
+        else
+            self:drawText(4, 25, "All bound NC subnets are empty (Idle - 0 tick scan overhead).", COLORS.muted, COLORS.panelBg)
+        end
     else
         for r = 1, math.min(maxShow, #q - self.queueScroll) do
             local item = q[r + self.queueScroll]
@@ -781,12 +966,14 @@ function UI:renderSlicesTab()
             local byIf = 33 + rowIdx
             local isBoundHere = (sel.ifaceAddr == inf.address)
             local tag = usedElsewhere[inf.address]
+            local suffix = tag and (" (" .. tag .. ")")
+                or (inf.isMainnet and " [MAINNET]" or (" (" .. tostring(inf.ctype or "free") .. ")"))
             local lbl = string.format("[%s %s%s]",
                 isBoundHere and "✓" or " ",
                 inf.shortAddr,
-                tag and (" (" .. tag .. ")") or (inf.x and string.format(" @%d,%d,%d", inf.x, inf.y, inf.z) or " (free)"))
+                suffix)
             self:drawButton(bxIf, byIf, padOrTrunc(lbl, 48),
-                isBoundHere and COLORS.green or (tag and COLORS.muted or COLORS.fg),
+                isBoundHere and COLORS.green or (inf.isMainnet and COLORS.yellow or (tag and COLORS.muted or COLORS.fg)),
                 isBoundHere and COLORS.darkGreen or COLORS.btnBg,
                 function()
                     sel.ifaceAddr = inf.address
@@ -844,9 +1031,11 @@ function UI:renderPoolsTab()
         self:drawButton(39, 9, "[+Ch]", COLORS.green, COLORS.btnBg, function()
             local nC = #(pool.channels or {})
             if nC < 4 then
-                pool.channels[nC + 1] = Scheduler.newChannel(nC + 1, pool.rsAddr, ((pool.side or 2) + nC) % 6)
+                local sugDye, sugSide = Policy.suggestNextChannelDyeAndSide(pool)
+                pool.channels[nC + 1] = Scheduler.newChannel(nC + 1, pool.rsAddr, sugSide, sugDye)
                 self.selectedChIdx = nC + 1
-                self:save(string.format("Added Input Channel %d on %s.", nC + 1, pool.name))
+                self:save(string.format("Added Input Channel %d (%s, Side %s) on %s.",
+                    nC + 1, Policy.dyeInfo(sugDye).name, Hardware.SIDE_NAMES[sugSide] or sugSide, pool.name))
             end
         end)
         self:drawButton(46, 9, "[-Ch]", COLORS.red, COLORS.btnBg, function()
@@ -1079,7 +1268,15 @@ function UI:renderSetupTab()
         if not pool then return end
         self.cfg.armed = false
         local addrs = {}
-        for _, it in ipairs(disc.interfaces or {}) do addrs[#addrs + 1] = it.address end
+        for _, it in ipairs(disc.interfaces or {}) do
+            if not it.isMainnet then
+                addrs[#addrs + 1] = it.address
+            end
+        end
+        if #addrs == 0 then
+            self.statusMsg = "Auto-Scan skipped: no non-mainnet full-block interfaces found."
+            return
+        end
         local res = Hardware.autoScanTrunkPool(pool, addrs, { pulseSec = 0.25, channelIdx = scanCh }, self.comp)
         if res.ok then
             Scheduler.refreshSubscriptions(self.cfg, self.state, self.comp)
@@ -1092,11 +1289,11 @@ function UI:renderSetupTab()
         self.guidedDropActive and COLORS.yellow or COLORS.purple,
         self.guidedDropActive and COLORS.yellow or COLORS.purple, COLORS.btnBg,
         function()
-            self.guidedDropActive = not self.guidedDropActive
-            self.guidedDropSnap = nil
-            self.statusMsg = self.guidedDropActive
-                and "Guided Drop ON: drop 1 item into an unbound subnet!"
-                or "Guided Drop stopped."
+            if self.guidedDropActive then
+                self:stopGuidedDrop("Guided Drop stopped.")
+            else
+                self:startGuidedDrop()
+            end
         end)
     drawBigAction(121, 5, 34, "⊕  CALIBRATE IDLE NCs", COLORS.cyan, COLORS.cyan, COLORS.btnBg, function()
         if not pool then return end
@@ -1124,17 +1321,25 @@ function UI:renderSetupTab()
         end)
 
     self:drawText(4, 11, string.format("Bundled Redstone I/O : %d found (96 wires/block)", #(disc.redstones or {})), COLORS.fg, COLORS.panelBg)
-    self:drawText(4, 13, string.format("Full-Block Dual IFs  : %d valid", #(disc.interfaces or {})), COLORS.green, COLORS.panelBg)
+    local roomIfs, mainIfs = 0, 0
+    for _, inf in ipairs(disc.interfaces or {}) do
+        if inf.isMainnet then mainIfs = mainIfs + 1 else roomIfs = roomIfs + 1 end
+    end
+    self:drawText(4, 13, string.format("Full-Block Dual IFs  : %d room / %d net", roomIfs, mainIfs), COLORS.green, COLORS.panelBg)
     self:drawButton(44, 13, "[Auto-Bind Sequential]", COLORS.cyan, COLORS.btnBg, function()
         if not pool then return end
         local list = disc.interfaces or {}
         local bound = 0
-        for i = 1, math.min(pool.numSlices or 16, #list) do
-            pool.slices[i - 1].ifaceAddr = list[i].address
-            bound = bound + 1
+        local maxS = tonumber(pool.numSlices) or 16
+        for i = 1, #list do
+            if not list[i].isMainnet then
+                pool.slices[bound].ifaceAddr = list[i].address
+                bound = bound + 1
+                if bound >= maxS then break end
+            end
         end
         Scheduler.refreshSubscriptions(self.cfg, self.state, self.comp)
-        self:save(string.format("Sequentially bound %d interface(s) -> NC 00..%02d.", bound, math.max(0, bound - 1)))
+        self:save(string.format("Sequentially bound %d room interface(s) -> NC 00..%02d.", bound, math.max(0, bound - 1)))
     end)
 
     local subStatus = self.state._allSubscribed and "ACTIVE (GTNH 2.9 Push Events -> 0-tick Idle!)" or "Polling Fallback (bind event-capable IFs)"
@@ -1161,13 +1366,13 @@ function UI:renderSetupTab()
     end
 
     self:drawFrame(82, 9, 78, 16, COLORS.border, COLORS.panelBg, "round")
-    self:drawText(84, 9, " ◈ TRUNK AUTO-PAIRING & SAME-COLOR RULE ", COLORS.accent, COLORS.panelBg)
-    self:drawText(84, 11, "1. Put 1 Marker item (Cobblestone in Chest+StorageBus) on Ch# Cable.", COLORS.fg, COLORS.panelBg)
-    self:drawText(84, 13, "2. Click [AUTO-SCAN CH# TRUNK]. OC sweeps NC 00..15/31 & binds matches.", COLORS.fg, COLORS.panelBg)
-    self:drawText(84, 15, "3. Multi-Channel: Use SAME Bundled Color #k for NC #k on every Channel!", COLORS.cyan, COLORS.panelBg)
-    self:drawText(84, 17, "   e.g. Ch1=North (Black Bus), Ch2=South (Blue Bus). Never cross-wire!", COLORS.fg, COLORS.panelBg)
-    self:drawText(84, 19, "4. Click [CALIBRATE IDLE NCs] only if any idle NC lives in a subnet drive.", COLORS.fg, COLORS.panelBg)
-    self:drawText(84, 21, "   Recommended: put NCs behind the Toggle Bus on Extract-Only buses!", COLORS.muted, COLORS.panelBg)
+    self:drawText(84, 9, " ◈ FAST PAIRING (GUIDED DROP & TRUNK SCAN) ", COLORS.accent, COLORS.panelBg)
+    self:drawText(84, 11, "A) [GUIDED DROP PAIR]: Best for 1-way Extract-Only Waiting Rooms!", COLORS.purple, COLORS.panelBg)
+    self:drawText(84, 13, "   Click Guided Drop -> walk down your row & drop 1 item/circuit.", COLORS.fg, COLORS.panelBg)
+    self:drawText(84, 15, "   Binds in 0ms via push event, auto-labels circuits & plays beep!", COLORS.fg, COLORS.panelBg)
+    self:drawText(84, 17, "B) [AUTO-SCAN CH# TRUNK]: Sweeps NC 00..15/31 and detects either", COLORS.green, COLORS.panelBg)
+    self:drawText(84, 19, "   bi-directional Marker arrival OR Extract-Only chest item drain.", COLORS.fg, COLORS.panelBg)
+    self:drawText(84, 21, "C) Multi-Channel Rule: Same Color #k = Same NC #k on every channel!", COLORS.cyan, COLORS.panelBg)
 
     -- Wiring Topology (bottom)
     self:drawFrame(2, 26, 158, 22, COLORS.border, COLORS.panelBg, "round")
@@ -1323,6 +1528,7 @@ function UI:handleKeyDown(char, code)
         self.state._forceFullScan = true
         self:save("Rescanned hardware.")
     elseif char == string.byte("q") or char == string.byte("Q") then
+        if self.guidedDropActive then self:stopGuidedDrop() end
         Scheduler.allOff(self.cfg, self.state, nil, self.comp)
         self:save("Saved and turned outputs OFF.")
         self.running = false

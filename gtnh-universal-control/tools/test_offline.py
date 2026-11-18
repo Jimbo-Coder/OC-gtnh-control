@@ -1043,8 +1043,194 @@ dyeCfg.pools[1].channels[2].gtDye = -1
 assert(Scheduler.validateChannelColors(dyeCfg.pools[1]) ~= nil, "Unpainted (-1) on 2-channel pool triggers warning")
 dyeCfg.pools[1].channels[2].gtDye = origD
 
--- Keep objects alive so Python checks true live heap usage
-rawset(_G, "__HELD_OBJECTS", { cfg, state, ui, scanPool, evState, mSt2, mcSt, st32, dyeSt })
+-- =========================================================================
+-- TEST 16a: fluid_interface Discovery, Part Warnings & Mainnet Exclusion
+-- =========================================================================
+ui = nil -- release earlier TEST 9 UI screen buffer before allocating TEST 16 UI
+component._reset()
+component.gpu = component._newMockGPU(160, 50)
+component._register("scr-16", "screen", {})
+local rs16, sides16, writes16 = makeBundledRS()
+component._register("rs-16", "redstone", rs16)
+
+local dualItems16, dualFluids16 = {}, {}
+local subCalls16 = { setI = 0, setF = 0 }
+local subState16 = { i = false, f = false }
+local dualProxy16 = {
+    getItemsInNetwork = function() return dualItems16 end,
+    getFluidsInNetwork = function() return dualFluids16 end,
+    isItemEventSubscription = function() return subState16.i end,
+    isFluidEventSubscription = function() return subState16.f end,
+    setItemEventSubscription = function(v)
+        subCalls16.setI = subCalls16.setI + 1
+        subState16.i = (v == true)
+    end,
+    setFluidEventSubscription = function(v)
+        subCalls16.setF = subCalls16.setF + 1
+        subState16.f = (v == true)
+    end,
+}
+component._register("dual-full-01", "fluid_interface", dualProxy16)
+component._register("dual-flat-part", "fluid_interface", {})
+component._register("main-ctrl-99", "me_controller", makeSubnetIF({ { name = "minecraft:stone", damage = 0, size = 64, label = "Stone" } }))
+
+local cfg16 = Scheduler.defaultConfig()
+local st16 = Scheduler.newState()
+local disc16 = Scheduler.syncHardware(cfg16, st16)
+assertEq(#disc16.partWarnings, 1, "Flat PartFluidInterface triggers 1 partWarning")
+
+local foundDualFull, foundMainCtrl = nil, nil
+for _, inf in ipairs(disc16.interfaces) do
+    if inf.address == "dual-full-01" then foundDualFull = inf
+    elseif inf.address == "main-ctrl-99" then foundMainCtrl = inf
+    end
+end
+assert(foundDualFull ~= nil and foundDualFull.ctype == "fluid_interface", "Full-block fluid_interface discovered")
+assertEq(foundDualFull.isMainnet, false, "Full-block fluid_interface is not flagged Mainnet")
+assert(foundMainCtrl ~= nil and foundMainCtrl.isMainnet == true, "me_controller tagged isMainnet=true")
+
+-- Render Quick-Start Overview (0 bound slices) & invoke [Auto-Bind Discovered] button
+local ui16 = UI.new(cfg16, st16, function() end)
+ui16.tab = 1
+ui16:render()
+-- Also test smart [+Ch] helper never duplicates dye/side
+local sugD, sugS = Policy.suggestNextChannelDyeAndSide(cfg16.pools[1])
+assert(sugD ~= cfg16.pools[1].channels[1].gtDye, "Suggested next dye differs from Ch1")
+assert(sugS ~= cfg16.pools[1].channels[1].banks[1].side, "Suggested next side differs from Ch1")
+
+-- Touch [Auto-Bind Discovered] on Quick-Start row y=30 (x~95..112)
+ui16:handleTouch(96, 30, 0)
+assertEq(cfg16.pools[1].slices[0].ifaceAddr, "dual-full-01", "Auto-Bind binds full-block fluid_interface to NC0")
+assertEq(cfg16.pools[1].slices[1].ifaceAddr, nil, "Auto-Bind never binds me_controller Mainnet as Waiting Room")
+
+-- =========================================================================
+-- TEST 16b: 0-Call Idempotent Subscriptions & Already-OFF Bundled Pre-Check
+-- =========================================================================
+assertEq(subCalls16.setI, 1, "Initial bind performed 1 setItemEventSubscription")
+assertEq(subCalls16.setF, 1, "Initial bind performed 1 setFluidEventSubscription")
+Hardware.syncSubscriptions(cfg16, st16)
+assertEq(subCalls16.setI, 1, "Idempotent syncSubscriptions performs 0 extra item setter calls")
+assertEq(subCalls16.setF, 1, "Idempotent syncSubscriptions performs 0 extra fluid setter calls")
+
+local wBeforeZero = #writes16
+Hardware.zeroAllManagedPools(cfg16, component, st16)
+Hardware.zeroAllBundledSides(component, st16)
+assertEq(#writes16, wBeforeZero, "Zeroing already-OFF bundled sides performs 0 setBundledOutput writes")
+
+-- Unbinding triggers clean unsubscribe
+cfg16.pools[1].slices[0].ifaceAddr = nil
+Hardware.syncSubscriptions(cfg16, st16)
+assertEq(subCalls16.setI, 2, "Unbind cleanly unsubscribes unused interface")
+assertEq(subState16.i, false, "Subscription flag toggled false on unbind")
+
+-- =========================================================================
+-- TEST 16c: Guided Drop Push Bind + Auto-Label + Extract-Only Drain Auto-Scan
+-- =========================================================================
+local beepLog = {}
+local origBeep = computer.beep
+computer.beep = function(freq, dur) beepLog[#beepLog + 1] = { freq, dur } end
+
+ui16.selectedColor = 0
+assert(ui16:startGuidedDrop(), "startGuidedDrop succeeds with unbound fluid_interface")
+assertEq(subState16.i, true, "startGuidedDrop temporarily subscribes unbound interface")
+dualItems16[1] = { name = "gregtech:gt.integrated_circuit", damage = 7, size = 1, label = "Programmed Circuit" }
+assert(ui16:stepGuidedDrop(), "Guided Drop binds immediately when Circuit 7 dropped")
+assertEq(cfg16.pools[1].slices[0].ifaceAddr, "dual-full-01", "Guided Drop bound dual-full-01 -> NC 00")
+assertEq(cfg16.pools[1].slices[0].label, "Circuit #7", "Guided Drop auto-labeled Programmed Circuit damage 7")
+assertEq(ui16.guidedDropActive, false, "Guided Drop auto-stopped after binding last unbound room")
+assert(#beepLog == 1 and beepLog[1][1] == 1320, "Guided Drop played completion beep")
+computer.beep = origBeep
+
+-- Verify Extract-Only Drain detection in autoScanTrunkPool (1 -> 0 drain when Toggle Bus pulses)
+component._reset()
+local rsEx, sidesEx = makeBundledRS()
+local drainItemsA = { { name = "minecraft:cobblestone", damage = 0, size = 1, label = "Cobble" } }
+local drainItemsB = { { name = "minecraft:cobblestone", damage = 0, size = 1, label = "Cobble" } }
+local exSetB = rsEx.setBundledOutput
+rsEx.setBundledOutput = function(side, a, b)
+    exSetB(side, a, b)
+    if sidesEx[side][2] > 0 then drainItemsA[1] = nil end
+    if sidesEx[side][5] > 0 then drainItemsB[1] = nil end
+end
+component._register("rs-ex", "redstone", rsEx)
+component._register("if-ex-2", "fluid_interface", makeSubnetIF(drainItemsA))
+component._register("if-ex-5", "fluid_interface", makeSubnetIF(drainItemsB))
+local exPool = Scheduler.newPool(1, "ExtractOnlyScan", "rs-ex", 2)
+local exRes = Hardware.autoScanTrunkPool(exPool, { "if-ex-2", "if-ex-5" }, { pulseSec = 0.05 })
+assertEq(exRes.ok, true, "autoScanTrunkPool Extract-Only drain mode ok")
+assertEq(exRes.boundCount, 2, "Bound both Extract-Only rooms via item drain (1 -> 0)")
+assertEq(exPool.slices[2].ifaceAddr, "if-ex-2", "Bound NC 02 via drain")
+assertEq(exPool.slices[5].ifaceAddr, "if-ex-5", "Bound NC 05 via drain")
+
+-- =========================================================================
+-- TEST 16d: MLFQ Anti-Starvation + Persisted Cache + Idle renderDigest Stability
+-- =========================================================================
+component._reset()
+local rsS, sidesS = makeBundledRS()
+local ifSlowS, itSlowS = makeSubnetIF({ { name = "gt:slow_starve", damage = 0, size = 10000, label = "Slow Craft" } })
+local ifFastS, itFastS = makeSubnetIF({})
+component._register("rs-starve", "redstone", rsS)
+component._register("if-s0", "fluid_interface", ifSlowS)
+component._register("if-s1", "fluid_interface", ifFastS)
+
+local sCfg = Scheduler.defaultConfig()
+sCfg.armed = true
+sCfg.minHoldSec = 15.0
+sCfg.probeWindowSec = 1.5
+sCfg.probePreemptHoldSec = 1.5
+sCfg.starvePromoteSec = 180.0
+sCfg.settleSec = 0.0
+sCfg.emptyConfirmPolls = 1
+sCfg.pools[1].mode = "mlfq"
+sCfg.pools[1].rsAddr = "rs-starve"
+sCfg.pools[1].side = 2
+sCfg.pools[1].slices[0].ifaceAddr = "if-s0"
+sCfg.pools[1].slices[1].ifaceAddr = "if-s1"
+
+local sSt = Scheduler.newState()
+Scheduler.syncHardware(sCfg, sSt)
+
+-- t=0..1.5: NC 0 drains slowly -> graduates to BULK & learns slow rate
+Scheduler.step(sCfg, sSt, 0.0)
+itSlowS[1].size = 9998.5
+Scheduler.step(sCfg, sSt, 1.5)
+assertEq(sSt.sliceStates["1:0"].tier, "BULK", "NC 0 graduates to BULK")
+
+-- Verify recipe rate persistence across simulated reboot (fresh state loaded from cfg)
+Scheduler.exportPersistedRates(sCfg, sSt)
+assert(sCfg.recipeRates ~= nil and next(sCfg.recipeRates) ~= nil, "exportPersistedRates populates cfg.recipeRates")
+local rebootSt = Scheduler.newState()
+Scheduler.loadPersistedRates(sCfg, rebootSt)
+assert(next(rebootSt.recipeRates) ~= nil, "loadPersistedRates restores recipeRates on fresh boot")
+
+-- t=2.0: Continuous PROBE arrives -> preempts BULK NC 0, keeping NC 0 queued until t=182s!
+itFastS[1] = { name = "gt:fast_probe_a", damage = 0, size = 4, label = "Fast Probe" }
+Scheduler.step(sCfg, sSt, 2.0)
+assertEq(sSt.poolStates[1].activeColor, 1, "Probe NC 1 preempts fresh BULK NC 0")
+
+-- Finish NC 1 at t=182.0 while a brand-new PROBE arrives on NC 1 simultaneously -> NC 0 (wait=182 >= 180) promotes!
+itFastS[1] = { name = "gt:fast_probe_b", damage = 1, size = 4, label = "Fast Probe B" }
+sSt.poolStates[1].channels[1].phase = "IDLE"
+sSt.poolStates[1].channels[1].activeNc = nil
+Scheduler.step(sCfg, sSt, 182.0)
+assertEq(sSt.poolStates[1].activeColor, 0, "Starved BULK NC 0 (>=180s) promotes ahead of new PROBE!")
+
+-- At t=183.5 (held 1.5s == probePreemptHoldSec < minHoldSec=15s), another PROBE cannot preempt starved NC 0!
+Scheduler.step(sCfg, sSt, 183.5)
+assertEq(sSt.poolStates[1].activeColor, 0, "Starved NC 0 holds against PROBE past 1.5s during minHoldSec")
+
+-- Once minHoldSec (15s) elapses at t=197.0, NC 0 yields cleanly back to waiting PROBE NC 1
+Scheduler.step(sCfg, sSt, 197.0)
+assertEq(sSt.poolStates[1].activeColor, 1, "Starved NC 0 yields cleanly to fast PROBE after minHoldSec quantum")
+
+-- Idle renderDigest stability across consecutive subscribed idle steps (0 extra scans & 0 redundant redraws)
+local evIdleD1 = Scheduler.renderDigest(evCfg, evState)
+Scheduler.step(evCfg, evState, 15.0)
+Scheduler.step(evCfg, evState, 25.0)
+local evIdleD2 = Scheduler.renderDigest(evCfg, evState)
+assertEq(evIdleD1, evIdleD2, "renderDigest remains identical across idle steps (0 redundant redraws)")
+
+rawset(_G, "__HELD_OBJECTS", { cfg, state, scanPool, evState, mSt2, mcSt, st32, dyeSt, cfg16, st16, ui16, sCfg, sSt })
 """
             host.exec_lua(lua_suite, "universal_test_suite")
 
@@ -1074,13 +1260,49 @@ rawset(_G, "__HELD_OBJECTS", { cfg, state, ui, scanPool, evState, mSt2, mcSt, st
                         bad_glyphs.append((chr(cp), hex(cp), w))
             assert not bad_glyphs, f"Non-width-1 glyphs found in universal UI: {bad_glyphs}"
 
-            # Check live JNLua memory footprint (< 3072 KB)
+            # Check live JNLua memory footprint across suite (< 2600 KB) & single-instance production footprint (< 900 KB)
             L = host.lib
             L.lua_gc.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
             L.lua_gc.restype = ctypes.c_int
             L.lua_gc(host.L, 2, 0)
             live_kb = L.lua_gc(host.L, 3, 0)
-            assert live_kb < 3072, f"Live JNLua heap exceeded budget: {live_kb} KB"
+            assert live_kb < 2600, f"Live JNLua heap exceeded suite budget: {live_kb} KB"
+
+            prod_host = LuaHost(Path(td), font_widths)
+            try:
+                prod_host.exec_lua(
+                    """
+                    local component = require("component")
+                    local Scheduler = require("lib.scheduler")
+                    local UI = require("lib.ui")
+                    component._reset()
+                    component.gpu = {
+                        maxResolution = function() return 160, 50 end,
+                        setResolution = function() return true end,
+                        setForeground = function() end,
+                        setBackground = function() end,
+                        set = function() end,
+                    }
+                    component._register("scr-p", "screen", {})
+                    component._register("rs-p", "redstone", { setBundledOutput = function() return true end })
+                    local c = Scheduler.defaultConfig()
+                    local st = Scheduler.newState()
+                    Scheduler.syncHardware(c, st)
+                    Scheduler.step(c, st, 0.0)
+                    local u = UI.new(c, st, function() end)
+                    for t = 1, 4 do u.tab = t; u:render() end
+                    rawset(_G, "__PROD_HOLD", { c, st, u })
+                    """,
+                    "prod_footprint_test",
+                )
+                Lp = prod_host.lib
+                Lp.lua_gc.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+                Lp.lua_gc.restype = ctypes.c_int
+                Lp.lua_gc(prod_host.L, 2, 0)
+                prod_kb = Lp.lua_gc(prod_host.L, 3, 0)
+                assert prod_kb < 800, f"Single-instance JNLua production footprint exceeded 800 KB: {prod_kb} KB"
+            finally:
+                prod_host.close()
 
             # Verify --check & --off output
             cli_out = "\n".join(host.stdout)
@@ -1148,7 +1370,7 @@ rawset(_G, "__HELD_OBJECTS", { cfg, state, ui, scanPool, evState, mSt2, mcSt, st
 
             print(
                 f"ALL UNIVERSAL CONTROL OFFLINE SUITES PASSED "
-                f"(0 bad-width glyphs, {live_kb} KB live JNLua heap, Lua 5.3 + OpenOS verified)."
+                f"(0 bad-width glyphs, {prod_kb} KB single-instance / {live_kb} KB suite live JNLua heap, Lua 5.3 + OpenOS verified)."
             )
         finally:
             host.close()

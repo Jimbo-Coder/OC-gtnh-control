@@ -166,6 +166,8 @@ function Policy.classifyCandidate(poolId, ncIdx, slice, sState, state, cfg, nowS
 
     local probeWin = tonumber(cfg.probeWindowSec) or 1.5
     local fastThresh = tonumber(cfg.fastThresholdSec) or 3.0
+    local starveSec = (cfg.starvePromoteSec ~= nil) and tonumber(cfg.starvePromoteSec) or 180.0
+    local minHold = tonumber(cfg.minHoldSec) or 15.0
     local activeRun = tonumber(sState.activeRunSec) or 0
 
     local tier = "BULK"
@@ -177,6 +179,18 @@ function Policy.classifyCandidate(poolId, ncIdx, slice, sState, state, cfg, nowS
             tier = "PROBE"
         end
     end
+
+    local activeCh = sState._activeCh
+    local heldNow = (activeCh and activeCh.phase == "ACTIVE" and activeCh.activeNc == ncIdx)
+        and math.max(0, (nowSec or 0) - (activeCh.activeSince or nowSec or 0)) or 0
+    local readyForStarve = (starveSec > 0) and (waitSec >= starveSec)
+        and ((sState._starveCooldownUntil or 0) <= (nowSec or 0))
+    local starveBoost = (tier == "BULK") and readyForStarve
+    if starveBoost and heldNow >= minHold then
+        starveBoost = false
+        sState._starveCooldownUntil = (nowSec or 0) + starveSec
+    end
+    local tierRank = starveBoost and 2 or ((tier == "PROBE") and 1 or 0)
 
     sState.etaSec = rawEta
     sState.effectiveEtaSec = effEta
@@ -190,7 +204,8 @@ function Policy.classifyCandidate(poolId, ncIdx, slice, sState, state, cfg, nowS
         priWeight = Policy.PRIORITY_WEIGHTS[slice.priority] or 2,
         forced = (forced == true),
         tier = tier,
-        tierRank = (tier == "PROBE") and 1 or 0,
+        starveBoost = starveBoost,
+        tierRank = tierRank,
         rate = rate,
         rawEta = rawEta,
         effectiveEta = effEta,
@@ -298,7 +313,7 @@ local function canPreempt(curChState, curCand, newcomer, heldSec, cfg, mode)
         if newcomer.priWeight > curCand.priWeight and heldSec >= probeHold then
             return true, "higher priority"
         elseif newcomer.priWeight == curCand.priWeight then
-            if newcomer.tier == "PROBE" and curCand.tier == "BULK" and heldSec >= probeHold then
+            if newcomer.tier == "PROBE" and curCand.tier == "BULK" and (not curCand.starveBoost) and heldSec >= probeHold then
                 return true, string.format("MLFQ fast probe (ETA %.1fs) vs BULK", newcomer.effectiveEta)
             elseif newcomer.tier == "PROBE" and curCand.tier == "PROBE" then
                 return false, "probe window active"
@@ -340,6 +355,29 @@ function Policy.orderedEnabledChannels(pool)
         return a < b
     end)
     return enCh
+end
+
+local CHANNEL_DYE_PREF = { 0, 4, 14, 15, 1, 2, 6, 11 }
+local SIDE_PREF = { 2, 3, 4, 5, 1, 0 }
+
+-- Pick the first unused GT hatch dye and Bank A bundled side for [+Ch].
+function Policy.suggestNextChannelDyeAndSide(pool)
+    local usedDyes, usedSides = {}, {}
+    for _, ch in ipairs((pool and pool.channels) or {}) do
+        local d = tonumber(ch.gtDye)
+        if d ~= nil and d >= 0 then usedDyes[math.floor(d)] = true end
+        local b1 = ch.banks and ch.banks[1]
+        if b1 and b1.side ~= nil then usedSides[math.floor(b1.side)] = true end
+    end
+    local chosenDye = CHANNEL_DYE_PREF[1]
+    for _, d in ipairs(CHANNEL_DYE_PREF) do
+        if not usedDyes[d] then chosenDye = d; break end
+    end
+    local chosenSide = SIDE_PREF[1]
+    for _, s in ipairs(SIDE_PREF) do
+        if not usedSides[s] then chosenSide = s; break end
+    end
+    return chosenDye, chosenSide
 end
 
 -- Decide desired NC index (0..numSlices-1) or nil for every enabled channel in `pool`.

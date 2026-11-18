@@ -71,7 +71,10 @@ local function loadConfig()
     return Scheduler.defaultConfig(), "defaults"
 end
 
-local function saveConfig(cfg)
+local function saveConfig(cfg, state)
+    if state then
+        Scheduler.exportPersistedRates(cfg, state)
+    end
     local raw = serialization.serialize(cfg)
     local ok = writeWholeFile(CONFIG_PATH, raw)
     if ok then
@@ -104,6 +107,10 @@ local function dispatchEvent(cfg, state, evTbl, nowSec, ui)
             end
         end
         local changed = Scheduler.handleNetworkEvent(cfg, state, evName, evTbl[2], deltas, nowSec)
+        if ui and ui.guidedDropActive then
+            state._forcePollNow = true
+            changed = true
+        end
         return changed, false
     elseif evName == "modem_message" then
         local handled = Hardware.handleMeshMessage(cfg, state, evTbl[2], evTbl[3], evTbl[4], evTbl[6], evTbl[7], evTbl[8])
@@ -180,7 +187,7 @@ local function runWorker()
             Hardware.pushMeshMetrics(cfg, state, now)
             if (now - lastRateSave) >= 60.0 then
                 lastRateSave = now
-                saveConfig(cfg)
+                saveConfig(cfg, state)
             end
 
             local deadline = computer.uptime() + Scheduler.nextWakeupDelay(cfg, state, computer.uptime())
@@ -200,8 +207,9 @@ local function runWorker()
         end
     end, debug.traceback)
 
+    pcall(Hardware.setGuidedSubscriptions, nil, false, nil, state)
     pcall(Hardware.zeroAllManagedPools, cfg, nil, state)
-    pcall(saveConfig, cfg)
+    pcall(saveConfig, cfg, state)
     if not okLoop then
         io.stderr:write("Universal Control worker error:\n" .. tostring(errLoop) .. "\n")
     else
@@ -233,15 +241,21 @@ local function runGUI()
     local function flushSave()
         if savePending then
             savePending = false
-            saveConfig(cfg)
+            saveConfig(cfg, state)
         end
     end
 
     local ui = UI.new(cfg, state, scheduleSave)
 
     local okLoop, errLoop = xpcall(function()
-        Scheduler.step(cfg, state, computer.uptime())
         ui:render()
+        local lastDigest = Scheduler.renderDigest(cfg, state)
+        Scheduler.step(cfg, state, computer.uptime())
+        local bootDigest = Scheduler.renderDigest(cfg, state)
+        if bootDigest ~= lastDigest then
+            ui:render()
+            lastDigest = bootDigest
+        end
         local nextPoll = computer.uptime() + Scheduler.nextWakeupDelay(cfg, state, computer.uptime())
 
         while ui.running do
@@ -249,6 +263,9 @@ local function runGUI()
             local now = computer.uptime()
             local wakeDelay = Scheduler.nextWakeupDelay(cfg, state, now)
             local waitSec = math.max(0.05, math.min(nextPoll - now, wakeDelay))
+            if ui.guidedDropActive then
+                waitSec = math.min(waitSec, 0.25)
+            end
             if state._forcePollNow then
                 waitSec = 0.01
             end
@@ -273,15 +290,15 @@ local function runGUI()
                 if ui.guidedDropActive and ui:stepGuidedDrop() then
                     dirty = true
                 end
-                local prevStepQueue = #(state.queue or {})
                 Scheduler.step(cfg, state, curTime)
                 Hardware.pushMeshMetrics(cfg, state, curTime)
                 if (curTime - lastPeriodicSave) >= 60.0 then
                     lastPeriodicSave = curTime
-                    saveConfig(cfg)
+                    saveConfig(cfg, state)
                 end
                 nextPoll = computer.uptime() + Scheduler.nextWakeupDelay(cfg, state, computer.uptime())
-                if prevStepQueue > 0 or #(state.queue or {}) > 0 or state.poolStates then
+                local curDigest = Scheduler.renderDigest(cfg, state)
+                if curDigest ~= lastDigest then
                     dirty = true
                 end
             end
@@ -291,14 +308,16 @@ local function runGUI()
             end
             if dirty and ui.running then
                 ui:render()
+                lastDigest = Scheduler.renderDigest(cfg, state)
             end
         end
     end, debug.traceback)
 
-    -- Always force all bundled outputs OFF before exiting or crashing!
+    -- Always force all bundled outputs OFF and clear temporary Guided Drop subscriptions!
+    pcall(Hardware.setGuidedSubscriptions, nil, false, nil, state)
     pcall(Hardware.zeroAllManagedPools, cfg, nil, state)
     flushSave()
-    pcall(saveConfig, cfg)
+    pcall(saveConfig, cfg, state)
     if component.isAvailable("gpu") then
         pcall(component.gpu.setBackground, 0x000000)
         pcall(component.gpu.setForeground, 0xFFFFFF)

@@ -95,6 +95,7 @@ function Scheduler.defaultConfig()
         emptyConfirmPolls = 2,
         preemptRatio = 0.35,
         agingPerMin = 0.15,
+        starvePromoteSec = 180.0,
         stallTimeoutSec = 120.0,
         retryStalledSec = 60.0,
         defaultProbeRate = 8.0,
@@ -190,6 +191,7 @@ function Scheduler.normalizeConfig(cfg)
     cfg.emptyConfirmPolls = math.max(1, math.min(10, math.floor(tonumber(cfg.emptyConfirmPolls) or def.emptyConfirmPolls)))
     cfg.preemptRatio = math.max(0.05, math.min(0.95, tonumber(cfg.preemptRatio) or def.preemptRatio))
     cfg.agingPerMin = math.max(0.0, math.min(0.75, tonumber(cfg.agingPerMin) or def.agingPerMin))
+    cfg.starvePromoteSec = math.max(0.0, math.min(3600.0, (cfg.starvePromoteSec ~= nil) and tonumber(cfg.starvePromoteSec) or def.starvePromoteSec))
     cfg.stallTimeoutSec = math.max(5.0, math.min(3600.0, tonumber(cfg.stallTimeoutSec) or def.stallTimeoutSec))
     cfg.retryStalledSec = math.max(5.0, math.min(3600.0, tonumber(cfg.retryStalledSec) or def.retryStalledSec))
     cfg.defaultProbeRate = math.max(0.1, math.min(1000.0, tonumber(cfg.defaultProbeRate) or def.defaultProbeRate))
@@ -248,6 +250,44 @@ function Scheduler.normalizeConfig(cfg)
                 if type(s.baselineFluids) ~= "table" then s.baselineFluids = {} end
             end
         end
+    end
+
+    if type(cfg.recipeRates) == "table" then
+        local cleanRates = {}
+        local cleanOrder = {}
+        local seenK = {}
+        if type(cfg.recipeRateOrder) == "table" then
+            for _, k in ipairs(cfg.recipeRateOrder) do
+                local v = tonumber(cfg.recipeRates[k])
+                if type(k) == "string" and k ~= "" and v and v > 0 and not seenK[k] then
+                    seenK[k] = true
+                    cleanRates[k] = v
+                    cleanOrder[#cleanOrder + 1] = k
+                    if #cleanOrder >= 128 then break end
+                end
+            end
+        end
+        if #cleanOrder < 128 then
+            for k, rawV in pairs(cfg.recipeRates) do
+                local v = tonumber(rawV)
+                if type(k) == "string" and k ~= "" and v and v > 0 and not seenK[k] then
+                    seenK[k] = true
+                    cleanRates[k] = v
+                    cleanOrder[#cleanOrder + 1] = k
+                    if #cleanOrder >= 128 then break end
+                end
+            end
+        end
+        if #cleanOrder > 0 then
+            cfg.recipeRates = cleanRates
+            cfg.recipeRateOrder = cleanOrder
+        else
+            cfg.recipeRates = nil
+            cfg.recipeRateOrder = nil
+        end
+    else
+        cfg.recipeRates = nil
+        cfg.recipeRateOrder = nil
     end
 
     return cfg
@@ -424,6 +464,66 @@ local function resetSliceBatchState(sState)
     sState._batchRate = nil
     sState._batchSamples = 0
     sState._activeTickAt = nil
+    sState._starveCooldownUntil = nil
+end
+
+function Scheduler.loadPersistedRates(cfg, state)
+    if not cfg or not state or type(cfg.recipeRates) ~= "table" then return 0 end
+    state.recipeRates = {}
+    state.recipeRateOrder = {}
+    local loaded = 0
+    local order = type(cfg.recipeRateOrder) == "table" and cfg.recipeRateOrder or {}
+    local seen = {}
+    local function addEntry(k, rawV)
+        local v = tonumber(rawV)
+        if type(k) == "string" and k ~= "" and v and v > 0 and not seen[k] and #state.recipeRateOrder < 128 then
+            seen[k] = true
+            state.recipeRates[k] = v
+            state.recipeRateOrder[#state.recipeRateOrder + 1] = k
+            loaded = loaded + 1
+        end
+    end
+    for _, k in ipairs(order) do
+        addEntry(k, cfg.recipeRates[k])
+    end
+    for k, v in pairs(cfg.recipeRates) do
+        addEntry(k, v)
+    end
+    return loaded
+end
+
+function Scheduler.exportPersistedRates(cfg, state)
+    if not cfg or not state then return 0 end
+    if type(state.recipeRates) ~= "table" or next(state.recipeRates) == nil then
+        cfg.recipeRates = nil
+        cfg.recipeRateOrder = nil
+        return 0
+    end
+    local outRates = {}
+    local outOrder = {}
+    local seen = {}
+    local function pushEntry(k, rawV)
+        local v = tonumber(rawV)
+        if type(k) == "string" and k ~= "" and v and v > 0 and not seen[k] and #outOrder < 128 then
+            seen[k] = true
+            outRates[k] = math.floor(v * 1000 + 0.5) / 1000
+            outOrder[#outOrder + 1] = k
+        end
+    end
+    for _, k in ipairs(state.recipeRateOrder or {}) do
+        pushEntry(k, state.recipeRates[k])
+    end
+    for k, v in pairs(state.recipeRates) do
+        pushEntry(k, v)
+    end
+    if #outOrder == 0 then
+        cfg.recipeRates = nil
+        cfg.recipeRateOrder = nil
+        return 0
+    end
+    cfg.recipeRates = outRates
+    cfg.recipeRateOrder = outOrder
+    return #outOrder
 end
 
 local function applyScanToSliceState(sState, scan, nowSec)
@@ -474,6 +574,9 @@ function Scheduler.syncHardware(cfg, state, compLib)
     end
 
     if state then
+        if next(state.recipeRates or {}) == nil then
+            Scheduler.loadPersistedRates(cfg, state)
+        end
         for _, pool in ipairs(cfg.pools) do
             ensurePoolState(state, pool.id, #(pool.channels or {}))
             for c = 0, (pool.numSlices or 16) - 1 do
@@ -787,6 +890,8 @@ function Scheduler.step(cfg, state, nowSec, opts, compLib)
         -- 1. Selectively scan bound subnets (0 indirect calls for already-seeded idle subscribed slices!)
         if not opts.cachedOnly then
             pState.lastScanAt = nowSec
+            local idleVerifiesThisStep = 0
+            local idleSecCfg = tonumber(cfg.idleVerifySec) or 300
             for c = 0, numSlices - 1 do
                 local slice = pool.slices[c]
                 local sState = ensureSliceState(state, pool.id, c)
@@ -800,14 +905,21 @@ function Scheduler.step(cfg, state, nowSec, opts, compLib)
                     end
                     local ageIdle = math.max(0, nowSec - (sState.lastScanAt or -1000))
                     local ageActive = math.max(0, nowSec - math.max(sState.lastScanAt or -1000, sState.lastEventAt or -1000))
+                    local idleVerifyLimit = idleSecCfg + (c * 2.0)
+                    local isIdleVerifyDue = (not forceFullScan) and sState._seeded and (not isActiveSlice)
+                        and (not sState._needsVerify) and (idleSecCfg > 0)
+                        and (ageIdle >= idleVerifyLimit) and (idleVerifiesThisStep < 2)
                     local needScan = forceFullScan
                         or (not sState._seeded)
                         or (not sState._hasEventSub)
                         or (sState._needsVerify == true)
                         or (isActiveSlice and ageActive >= (cfg.activeVerifySec or 5.0))
-                        or ((cfg.idleVerifySec or 300) > 0 and ageIdle >= (cfg.idleVerifySec or 300))
+                        or isIdleVerifyDue
 
                     if needScan then
+                        if isIdleVerifyDue then
+                            idleVerifiesThisStep = idleVerifiesThisStep + 1
+                        end
                         state.kpis.scanCalls = (state.kpis.scanCalls or 0) + 1
                         local scan = Hardware.scanSubnet(slice.ifaceAddr, slice, {
                             ignoreBuiltinNC = cfg.ignoreBuiltinNC,
@@ -1225,6 +1337,42 @@ function Scheduler.step(cfg, state, nowSec, opts, compLib)
     state.kpis.queuedSlices = queuedSlices
     state.kpis.stalledCount = stalledCount
     return state
+end
+
+-- Compact deterministic UI digest so idle ticks skip redundant screen buffer rebuilds.
+function Scheduler.renderDigest(cfg, state)
+    if not state then return "" end
+    local k = state.kpis or {}
+    local parts = {
+        (cfg and cfg.armed) and "1" or "0",
+        tostring(k.activePools or 0),
+        tostring(k.queuedSlices or 0),
+        tostring(k.stalledCount or 0),
+        tostring(k.completedBatches or 0),
+        tostring(k.preemptions or 0),
+        tostring(k.scanCalls or 0),
+        tostring(#(state.queue or {})),
+        tostring(#(state.logs or {})),
+        state._allSubscribed and "S" or "P",
+    }
+    for _, pool in ipairs((cfg and cfg.pools) or {}) do
+        local pst = state.poolStates and state.poolStates[pool.id]
+        parts[#parts + 1] = tostring(pool.id) .. ":" .. tostring(pst and pst.phase or "-")
+        if pst and pst.channels then
+            for ci, cs in ipairs(pst.channels) do
+                parts[#parts + 1] = tostring(ci) .. "=" .. tostring(cs.phase or "-")
+                    .. ":" .. tostring(cs.activeNc or "-")
+                    .. ":" .. tostring(cs.pendingNc or "-")
+            end
+        end
+    end
+    for _, q in ipairs(state.queue or {}) do
+        parts[#parts + 1] = string.format("%d/%d:%s:%s%s%s:%d/%d",
+            q.poolId or 0, q.color or 0, tostring(q.tier or "B"),
+            q.isActive and "A" or "", q.isPending and "P" or "", q.isStalled and "S" or "",
+            math.floor(tonumber(q.workScore) or 0), math.floor(tonumber(q.etaSec) or 0))
+    end
+    return table.concat(parts, ";")
 end
 
 -- Adaptive zero-overhead event.pull delay:

@@ -243,7 +243,7 @@ function Hardware.discover(compLib, state)
         table.sort(redstones, function(a, b) return a.address < b.address end)
 
         local seenIface = {}
-        for _, ctype in ipairs({ "me_interface", "me_controller" }) do
+        for _, ctype in ipairs({ "me_interface", "fluid_interface", "me_controller" }) do
             for addr in cl.list(ctype, true) do
                 if not seenIface[addr] then
                     seenIface[addr] = true
@@ -251,21 +251,12 @@ function Hardware.discover(compLib, state)
                     local hasNet = (p ~= nil) and (type(p.getItemsInNetwork) == "function")
                     if hasNet then
                         local hasSub = (type(p.setItemEventSubscription) == "function")
-                        local x, y, z
-                        if p.getCoordinates then
-                            local okC, cx, cy, cz = pcall(p.getCoordinates)
-                            if okC and type(cx) == "number" then
-                                x, y, z = math.floor(cx), math.floor(cy), math.floor(cz)
-                            end
-                        end
                         interfaces[#interfaces + 1] = {
                             address = addr,
                             shortAddr = Hardware.shortAddr(addr),
                             ctype = ctype,
+                            isMainnet = (ctype == "me_controller"),
                             hasEventSub = hasSub,
-                            x = x,
-                            y = y,
-                            z = z,
                         }
                     else
                         partWarnings[#partWarnings + 1] = {
@@ -315,7 +306,23 @@ function Hardware.discover(compLib, state)
     }
 end
 
+local function isSideAlreadyOff(proxy, side)
+    if not proxy or type(proxy.getBundledOutput) ~= "function" then return false end
+    local ok, tbl = pcall(proxy.getBundledOutput, side)
+    if not ok or type(tbl) ~= "table" then return false end
+    if tbl[0] == nil and tbl[15] == nil then return false end
+    for c = 0, 15 do
+        if (tonumber(tbl[c]) or 0) ~= 0 then
+            return false
+        end
+    end
+    return true
+end
+
 local function writeSingleSideOutput(proxy, side, activeColorOrNil)
+    if activeColorOrNil == nil and isSideAlreadyOff(proxy, side) then
+        return true, nil
+    end
     local tbl = {}
     for c = 0, 15 do
         tbl[c] = (activeColorOrNil == c) and 255 or 0
@@ -646,11 +653,68 @@ function Hardware.applyDeltas(sState, isFluid, deltas)
     return applied
 end
 
--- Subscribe bound me_interface blocks to GTNH 2.9 AE2 storage push events and rebuild lookup index.
+local function ensureAddrSubscribed(proxy, addr, subCache)
+    if not proxy or type(proxy.setItemEventSubscription) ~= "function" then
+        return false
+    end
+    local alreadyItem = false
+    if type(proxy.isItemEventSubscription) == "function" then
+        local okC, curI = pcall(proxy.isItemEventSubscription)
+        alreadyItem = okC and (curI == true)
+    elseif subCache and subCache[addr] then
+        alreadyItem = true
+    end
+    local hasSub = alreadyItem
+    if not alreadyItem then
+        local okI = pcall(proxy.setItemEventSubscription, true)
+        if okI then
+            hasSub = true
+        end
+    end
+    if type(proxy.setFluidEventSubscription) == "function" then
+        local alreadyFluid = false
+        if type(proxy.isFluidEventSubscription) == "function" then
+            local okF, curF = pcall(proxy.isFluidEventSubscription)
+            alreadyFluid = okF and (curF == true)
+        elseif subCache and subCache[addr] then
+            alreadyFluid = true
+        end
+        if not alreadyFluid then
+            pcall(proxy.setFluidEventSubscription, true)
+        end
+    end
+    return hasSub
+end
+
+local function unsubscribeAddr(proxy)
+    if not proxy then return end
+    if type(proxy.setItemEventSubscription) == "function" then
+        local needOff = true
+        if type(proxy.isItemEventSubscription) == "function" then
+            local okC, curI = pcall(proxy.isItemEventSubscription)
+            if okC and curI == false then needOff = false end
+        end
+        if needOff then pcall(proxy.setItemEventSubscription, false) end
+    end
+    if type(proxy.setFluidEventSubscription) == "function" then
+        local needOff = true
+        if type(proxy.isFluidEventSubscription) == "function" then
+            local okF, curF = pcall(proxy.isFluidEventSubscription)
+            if okF and curF == false then needOff = false end
+        end
+        if needOff then pcall(proxy.setFluidEventSubscription, false) end
+    end
+end
+
+-- Subscribe bound me_interface/fluid_interface blocks to GTNH 2.9 push events and rebuild lookup index.
 function Hardware.syncSubscriptions(cfg, state, compLib)
     if not state then return false end
     local addrToSlices = {}
     local proxyCache = state._proxies
+    local subCache = state._subbedAddrs or {}
+    state._subbedAddrs = subCache
+    local guidedCache = state._guidedSubAddrs or {}
+    local boundSet = {}
     local allSub = true
     local anyBound = false
 
@@ -663,19 +727,14 @@ function Hardware.syncSubscriptions(cfg, state, compLib)
             if slice and slice.ifaceAddr and slice.ifaceAddr ~= "" then
                 anyBound = true
                 local addr = slice.ifaceAddr
+                boundSet[addr] = true
                 addrToSlices[addr] = addrToSlices[addr] or {}
                 addrToSlices[addr][#addrToSlices[addr] + 1] = { poolId = pool.id, ncIdx = ncIdx, slice = slice }
 
                 local proxy = getProxy(addr, compLib, proxyCache)
-                local hasSub = false
-                if proxy and type(proxy.setItemEventSubscription) == "function" then
-                    local okI = pcall(proxy.setItemEventSubscription, true)
-                    if okI then
-                        hasSub = true
-                    end
-                    if type(proxy.setFluidEventSubscription) == "function" then
-                        pcall(proxy.setFluidEventSubscription, true)
-                    end
+                local hasSub = ensureAddrSubscribed(proxy, addr, subCache)
+                if hasSub then
+                    subCache[addr] = true
                 end
                 if sState then
                     sState._hasEventSub = hasSub
@@ -689,9 +748,51 @@ function Hardware.syncSubscriptions(cfg, state, compLib)
         end
     end
 
+    for addr in pairs(subCache) do
+        if not boundSet[addr] then
+            if not guidedCache[addr] then
+                local proxy = getProxy(addr, compLib, proxyCache)
+                unsubscribeAddr(proxy)
+            end
+            subCache[addr] = nil
+        end
+    end
+
     state._addrToSlices = addrToSlices
     state._allSubscribed = anyBound and allSub
     return state._allSubscribed
+end
+
+function Hardware.setGuidedSubscriptions(addrs, enable, compLib, state)
+    if not state then return 0 end
+    local proxyCache = state._proxies
+    local subCache = state._subbedAddrs or {}
+    local guidedCache = state._guidedSubAddrs or {}
+    state._guidedSubAddrs = guidedCache
+    local changed = 0
+
+    if enable then
+        for i = 1, #(addrs or {}) do
+            local addr = addrs[i]
+            if type(addr) == "string" and addr ~= "" then
+                local proxy = getProxy(addr, compLib, proxyCache)
+                if ensureAddrSubscribed(proxy, addr, guidedCache) then
+                    guidedCache[addr] = true
+                    changed = changed + 1
+                end
+            end
+        end
+    else
+        for addr in pairs(guidedCache) do
+            if not subCache[addr] then
+                local proxy = getProxy(addr, compLib, proxyCache)
+                unsubscribeAddr(proxy)
+                changed = changed + 1
+            end
+            guidedCache[addr] = nil
+        end
+    end
+    return changed
 end
 
 -- Snapshots all current items (excluding built-in NCs) & fluids on a slice as its permanent idle NC baseline.
@@ -723,25 +824,53 @@ function Hardware.calibrateBaseline(slice, opts, compLib)
     return true, nI, nF
 end
 
+function Hardware.suggestNcLabel(meta)
+    if type(meta) ~= "table" then return nil end
+    local name = tostring(meta.name or "")
+    local label = tostring(meta.label or "")
+    if name == "gregtech:gt.integrated_circuit"
+        or name:find("integrated_circuit", 1, true)
+        or label:find("Programmed Circuit", 1, true) then
+        return "Circuit #" .. tostring(math.floor(tonumber(meta.damage) or 0))
+    end
+    local lowerLbl = label:lower()
+    if label ~= "" and (Hardware.isBuiltinIgnoredNC(meta)
+        or lowerLbl:find("catalyst", 1, true)
+        or lowerLbl:find("shape", 1, true)
+        or lowerLbl:find("mold", 1, true)) then
+        return label
+    end
+    return nil
+end
+
 function Hardware.snapshotInterfaces(addrs, compLib)
     local snaps = {}
     for i = 1, #(addrs or {}) do
         local addr = addrs[i]
         local res = Hardware.scanSubnet(addr, nil, { ignoreBuiltinNC = false }, compLib)
         if res.ok then
-            snaps[addr] = { items = res.itemsMap or {}, fluids = res.fluidsMap or {} }
+            snaps[addr] = {
+                items = res.itemsMap or {},
+                itemsMeta = res.itemsMeta or {},
+                fluids = res.fluidsMap or {},
+            }
         end
     end
     return snaps
 end
 
-local function hasIncreasedStock(beforeMap, afterMap)
+local function hasChangedStock(beforeMap, afterMap, metaMap, beforeMetaMap)
     for k, afterQty in pairs(afterMap) do
         if afterQty > (beforeMap[k] or 0) then
-            return true, k
+            return true, k, (metaMap and metaMap[k]) or (beforeMetaMap and beforeMetaMap[k])
         end
     end
-    return false, nil
+    for k, beforeQty in pairs(beforeMap) do
+        if beforeQty > (afterMap[k] or 0) then
+            return true, k, (beforeMetaMap and beforeMetaMap[k]) or (metaMap and metaMap[k])
+        end
+    end
+    return false, nil, nil
 end
 
 function Hardware.detectChangedInterface(addrs, prevSnaps, compLib)
@@ -751,11 +880,11 @@ function Hardware.detectChangedInterface(addrs, prevSnaps, compLib)
         if prev then
             local res = Hardware.scanSubnet(addr, nil, { ignoreBuiltinNC = false }, compLib)
             if res.ok then
-                local it, fl = res.itemsMap or {}, res.fluidsMap or {}
-                local okI, keyI = hasIncreasedStock(prev.items, it)
-                if okI then return addr, keyI, it, fl end
-                local okF, keyF = hasIncreasedStock(prev.fluids, fl)
-                if okF then return addr, keyF, it, fl end
+                local it, itMeta, fl = res.itemsMap or {}, res.itemsMeta or {}, res.fluidsMap or {}
+                local okI, keyI, hitMeta = hasChangedStock(prev.items, it, itMeta, prev.itemsMeta)
+                if okI then return addr, keyI, hitMeta, it, fl end
+                local okF, keyF = hasChangedStock(prev.fluids, fl)
+                if okF then return addr, keyF, nil, it, fl end
             end
         end
     end
