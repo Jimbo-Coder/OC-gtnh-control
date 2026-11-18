@@ -1,9 +1,9 @@
 -- /home/universal/main.lua
--- GTNH Universal Automation Controller (Toggle Bus + Bundled Redstone + SRTF Preemption)
+-- GTNH Universal Automation Controller (Multi-Channel Toggle Bus + Bundled Redstone + MLFQ Probe/Cache)
 -- Usage:
 --   universal            (160x50 Touch GUI, or --worker fallback if headless)
 --   universal --worker   (headless daemon)
---   universal --check    (read-only hardware, subnet, & SRTF dry-run)
+--   universal --check    (read-only hardware, subnet, & MLFQ schedule dry-run)
 --   universal --off      (immediately force all bundled redstone outputs OFF)
 --   universal --update   (update code while preserving config.cfg)
 
@@ -29,7 +29,7 @@ local BACKUP_CONFIG_PATH = "/home/config.universal.bak"
 do
     local prevPath = package.path
     package.path = string.format("%s/?.lua;%s/?/init.lua;%s", scriptDir, scriptDir, prevPath)
-    for _, modName in ipairs({ "lib.hardware", "lib.scheduler", "lib.ui" }) do
+    for _, modName in ipairs({ "lib.hardware", "lib.policy", "lib.scheduler", "lib.ui" }) do
         package.loaded[modName] = nil
     end
 end
@@ -81,25 +81,58 @@ local function saveConfig(cfg)
 end
 
 local function printHelp()
-    print("GTNH Universal Control — Bundled Redstone + Toggle-Bus Scheduler")
+    print("GTNH Universal Control - Multi-Channel Bundled Toggle-Bus + MLFQ Scheduler")
     print("Usage:")
     print("  universal            Launch 160x50 Touch Control Center (or --worker if headless)")
     print("  universal --worker   Run headless scheduler daemon")
-    print("  universal --check    Read-only hardware, subnet, & SRTF dry-run check")
+    print("  universal --check    Read-only hardware, subnet, & MLFQ dry-run check")
     print("  universal --off      Immediately turn OFF all bundled redstone outputs")
     print("  universal --update   Update scripts cleanly while preserving config.cfg")
+end
+
+local function dispatchEvent(cfg, state, evTbl, nowSec, ui)
+    local evName = evTbl[1]
+    if not evName then return false, false end
+
+    if evName == "interrupted" then
+        return false, true
+    elseif evName == "network_item_changed" or evName == "network_fluid_changed" then
+        local deltas = {}
+        for i = 3, #evTbl do
+            if type(evTbl[i]) == "table" then
+                deltas[#deltas + 1] = evTbl[i]
+            end
+        end
+        local changed = Scheduler.handleNetworkEvent(cfg, state, evName, evTbl[2], deltas, nowSec)
+        return changed, false
+    elseif evName == "modem_message" then
+        local handled = Hardware.handleMeshMessage(cfg, state, evTbl[2], evTbl[3], evTbl[4], evTbl[6], evTbl[7], evTbl[8])
+        return handled, false
+    elseif ui then
+        if evName == "touch" then
+            return ui:handleTouch(math.floor(tonumber(evTbl[3]) or 0), math.floor(tonumber(evTbl[4]) or 0), evTbl[5]), false
+        elseif evName == "scroll" then
+            ui:handleScroll(tonumber(evTbl[5]) or 0)
+            return true, false
+        elseif evName == "key_down" then
+            ui:handleKeyDown(tonumber(evTbl[3]) or 0, tonumber(evTbl[4]) or 0)
+            return true, false
+        end
+    end
+    return false, false
 end
 
 local function runCheck()
     local cfg, cfgSource = loadConfig()
     local state = Scheduler.newState()
     local disc = Scheduler.syncHardware(cfg, state)
-    Scheduler.step(cfg, state, computer.uptime(), { dryRun = true })
+    Scheduler.step(cfg, state, computer.uptime(), { dryRun = true, forceFullScan = true })
 
     print("=== GTNH UNIVERSAL CONTROL READ-ONLY CHECK ===")
     print(string.format("Config File   : %s (%s)", CONFIG_PATH, cfgSource))
-    print(string.format("Saved State   : %s | ExtLink: %s | IgnoreBuiltinNC: %s",
-        cfg.armed and "ARMED" or "PAUSED (Safe)", cfg.extLinkMode or "auto", tostring(cfg.ignoreBuiltinNC ~= false)))
+    print(string.format("Saved State   : %s | ExtLink: %s | Subscribed: %s | IgnoreBuiltinNC: %s",
+        cfg.armed and "ARMED" or "PAUSED (Safe)", cfg.extLinkMode or "auto",
+        tostring(state._allSubscribed == true), tostring(cfg.ignoreBuiltinNC ~= false)))
     print("")
     print(string.format("Redstone I/O  : %d discovered", #(disc.redstones or {})))
     for i, rs in ipairs(disc.redstones or {}) do
@@ -107,7 +140,7 @@ local function runCheck()
     end
     print(string.format("Valid ME IFs  : %d full-block Dual/ME Interfaces", #(disc.interfaces or {})))
     for i, inf in ipairs(disc.interfaces or {}) do
-        print(string.format("  [%d] %s (%s)", i, inf.shortAddr, inf.ctype))
+        print(string.format("  [%d] %s (%s, eventSub=%s)", i, inf.shortAddr, inf.ctype, tostring(inf.hasEventSub == true)))
     end
     if #(disc.partWarnings or {}) > 0 then
         print("Flat Part Interface Warnings:")
@@ -117,9 +150,13 @@ local function runCheck()
     end
     print("")
     print(string.format("Pools (%d) & Active Queue (%d busy):", #cfg.pools, #(state.queue or {})))
+    for _, p in ipairs(cfg.pools) do
+        print(string.format("  Pool %d (%s): mode=%s slices=%d channels=%d",
+            p.id, p.name, tostring(p.mode or "mlfq"), tonumber(p.numSlices) or 16, #(p.channels or {})))
+    end
     for _, q in ipairs(state.queue or {}) do
-        print(string.format("  %s Color %02d (%s): %dI / %dL | ETA=%.1fs | Pri=%s",
-            q.poolName, q.color, q.label, q.itemUnits, q.fluidUnits, q.etaSec or 0, tostring(q.priority)))
+        print(string.format("  %s NC %02d (%s) [%s]: %dI / %dL | ETA=%.1fs | Pri=%s",
+            q.poolName, q.color, q.label, tostring(q.tier or "BULK"), q.itemUnits, q.fluidUnits, q.etaSec or 0, tostring(q.priority)))
     end
     print("=== CHECK COMPLETE (NO REDSTONE MODIFIED) ===")
 end
@@ -128,7 +165,7 @@ local function runWorker()
     local cfg = loadConfig()
     local state = Scheduler.newState()
     Scheduler.syncHardware(cfg, state)
-    Hardware.zeroAllManagedPools(cfg)
+    Hardware.zeroAllManagedPools(cfg, nil, state)
     Hardware.openMeshPort(cfg)
 
     print("GTNH Universal Control worker started (" .. (cfg.armed and "ARMED" or "PAUSED") .. "). Ctrl+C to stop.")
@@ -138,6 +175,7 @@ local function runWorker()
     local okLoop, errLoop = xpcall(function()
         while running do
             local now = computer.uptime()
+            state._forcePollNow = false
             Scheduler.step(cfg, state, now)
             Hardware.pushMeshMetrics(cfg, state, now)
             if (now - lastRateSave) >= 60.0 then
@@ -145,25 +183,24 @@ local function runWorker()
                 saveConfig(cfg)
             end
 
-            local deadline = computer.uptime() + (tonumber(cfg.pollIntervalSec) or 0.5)
+            local deadline = computer.uptime() + Scheduler.nextWakeupDelay(cfg, state, computer.uptime())
             while running and computer.uptime() < deadline do
-                local timeout = math.max(0.05, deadline - computer.uptime())
-                local ev, a0, a1, a2, a3, a4, a5, a6 = event.pull(timeout)
-                if ev == "interrupted" then
+                local cur = computer.uptime()
+                local timeout = math.max(0.05, math.min(deadline - cur, Scheduler.nextWakeupDelay(cfg, state, cur)))
+                local evTbl = { event.pull(timeout) }
+                local _, stopReq = dispatchEvent(cfg, state, evTbl, computer.uptime(), nil)
+                if stopReq then
                     running = false
                     break
-                elseif ev == "modem_message" then
-                    Hardware.handleMeshMessage(cfg, state, a0, a1, a2, a4, a5, a6)
                 end
                 if state._forcePollNow then
-                    state._forcePollNow = false
                     break
                 end
             end
         end
     end, debug.traceback)
 
-    pcall(Hardware.zeroAllManagedPools, cfg)
+    pcall(Hardware.zeroAllManagedPools, cfg, nil, state)
     pcall(saveConfig, cfg)
     if not okLoop then
         io.stderr:write("Universal Control worker error:\n" .. tostring(errLoop) .. "\n")
@@ -176,7 +213,7 @@ local function runGUI()
     local cfg = loadConfig()
     local state = Scheduler.newState()
     Scheduler.syncHardware(cfg, state)
-    Hardware.zeroAllManagedPools(cfg)
+    Hardware.zeroAllManagedPools(cfg, nil, state)
     Hardware.openMeshPort(cfg)
 
     local disc = state.discovery or {}
@@ -205,36 +242,29 @@ local function runGUI()
     local okLoop, errLoop = xpcall(function()
         Scheduler.step(cfg, state, computer.uptime())
         ui:render()
-        local nextPoll = computer.uptime() + (tonumber(cfg.pollIntervalSec) or 0.5)
+        local nextPoll = computer.uptime() + Scheduler.nextWakeupDelay(cfg, state, computer.uptime())
 
         while ui.running do
             local dirty = false
             local now = computer.uptime()
-            local forcePoll = (state._forcePollNow == true)
-            local waitSec = forcePoll and 0.01 or math.max(0.05, nextPoll - now)
+            local wakeDelay = Scheduler.nextWakeupDelay(cfg, state, now)
+            local waitSec = math.max(0.05, math.min(nextPoll - now, wakeDelay))
+            if state._forcePollNow then
+                waitSec = 0.01
+            end
             if savePending then
                 waitSec = math.min(waitSec, math.max(0.02, saveDeadline - now))
             end
 
-            local ev, a0, a1, a2, a3, a4, a5, a6 = event.pull(waitSec)
-            if ev == "interrupted" then
+            local evTbl = { event.pull(waitSec) }
+            local evDirty, stopReq = dispatchEvent(cfg, state, evTbl, computer.uptime(), ui)
+            if stopReq then
                 savePending = true
                 ui.running = false
                 break
-            elseif ev == "touch" then
-                if ui:handleTouch(math.floor(tonumber(a1) or 0), math.floor(tonumber(a2) or 0), a3) then
-                    dirty = true
-                end
-            elseif ev == "scroll" then
-                ui:handleScroll(tonumber(a3) or 0)
+            end
+            if evDirty then
                 dirty = true
-            elseif ev == "key_down" then
-                ui:handleKeyDown(tonumber(a1) or 0, tonumber(a2) or 0)
-                dirty = true
-            elseif ev == "modem_message" then
-                if Hardware.handleMeshMessage(cfg, state, a0, a1, a2, a4, a5, a6) then
-                    dirty = true
-                end
             end
 
             local curTime = computer.uptime()
@@ -243,14 +273,17 @@ local function runGUI()
                 if ui.guidedDropActive and ui:stepGuidedDrop() then
                     dirty = true
                 end
+                local prevStepQueue = #(state.queue or {})
                 Scheduler.step(cfg, state, curTime)
                 Hardware.pushMeshMetrics(cfg, state, curTime)
                 if (curTime - lastPeriodicSave) >= 60.0 then
                     lastPeriodicSave = curTime
                     saveConfig(cfg)
                 end
-                nextPoll = computer.uptime() + (tonumber(cfg.pollIntervalSec) or 0.5)
-                dirty = true
+                nextPoll = computer.uptime() + Scheduler.nextWakeupDelay(cfg, state, computer.uptime())
+                if prevStepQueue > 0 or #(state.queue or {}) > 0 or state.poolStates then
+                    dirty = true
+                end
             end
 
             if savePending and computer.uptime() >= saveDeadline then
@@ -263,7 +296,7 @@ local function runGUI()
     end, debug.traceback)
 
     -- Always force all bundled outputs OFF before exiting or crashing!
-    pcall(Hardware.zeroAllManagedPools, cfg)
+    pcall(Hardware.zeroAllManagedPools, cfg, nil, state)
     flushSave()
     pcall(saveConfig, cfg)
     if component.isAvailable("gpu") then

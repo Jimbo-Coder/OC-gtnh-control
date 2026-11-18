@@ -18,7 +18,7 @@ local MANIFEST_PATH = "/home/.oc-gtnh.manifest"
 
 local MODULES = {
     { key = "dtpf",      subdir = "gtnh-dtpf-control",      desc = "DTPF Control Center (Passive/OD/Catalyst Scheduler + 160x50 GUI)", detect = "/home/dtpf/main.lua" },
-    { key = "universal", subdir = "gtnh-universal-control", desc = "Universal Automation (Toggle Bus + Bundled Redstone + SRTF Preempt)", detect = "/home/universal/main.lua" },
+    { key = "universal", subdir = "gtnh-universal-control", desc = "Universal Automation (Multi-Ch Toggle Bus + Push Events + MLFQ)", detect = "/home/universal/main.lua" },
     { key = "ae2",       subdir = "gtnh-ae2-control",       desc = "AE2 Control & Hub (Influx Exporter, Craft Requester & Mesh Gateway)", detect = "/home/exporter.lua" },
     { key = "pump",      subdir = "gtnh-space-pump",        desc = "Space Elevator Pump (Target Fluid Pumping + Optional Mesh)",         detect = "/home/autoPump.lua" },
     { key = "gorge",     subdir = "gtnh-gorge-control",     desc = "Forge of the Gods & Exoticizer Control [Scaffolded / Design Only]",  detect = "/home/gorge/main.lua" },

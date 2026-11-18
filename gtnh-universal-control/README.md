@@ -1,12 +1,12 @@
 # GTNH Universal Control
 
-**OpenComputers Bundled-Redstone + AE2 `ME Toggle Bus` Universal Automation Controller for GTNH 2.9.0+.**
+**Multi-Channel `ME Toggle Bus` + ProjectRed Bundled Redstone + GTNH 2.9 Push-Event Universal Automation Controller.**
 
-- **Zero Machine MFUs / Transposers**: OpenComputers touches **only** `1x Redstone I/O` block (`ProjectRed Bundled Cable`, up to 16 toggle slices per cable face, 96 per Redstone I/O) and each slice's **full-block `ME Dual Interface`** (`me_interface`).
-- **Works with 100% Arbitrary NCs**: Supports both **Dual-Trunk Arbitrary-NC** (GT++ Extruder Shapes/Molds, chemical catalysts, petri dishes, research/data sticks, fluid NCs — zero `Advanced Blocking Card` interference!) and **Single-Trunk Circuit/Mold** (with built-in GTNH 2.9 ignore filters + 1-click `[Calibrate Idle NCs]`).
-- **4-Second Automatic Setup**: Place 1 cobble marker on the Machine Trunk and click **`[AUTO-SCAN TRUNK]`** — OC automatically maps `Bundled Color 0..15 <-> me_interface`.
-- **SRTF Priority Preemption**: Estimates remaining job duration from live subnet contents + EMA drain rates, so quick crafts automatically preempt multi-hour backlog jobs (e.g., 15h Universium Screws) cleanly through an all-OFF **Anti-Contamination Settle Guard**.
-- **Standalone First**: Wireless port `4205` telemetry (`Ext:Mesh/Auto`) is 100% optional and can be toggled to `Ext:Standalone` in Tab 4 (`[4] SETUP & WIRING`).
+- **Zero Machine MFUs (`O(1)` 1-Tick Switching)**: Machines use native `Adv. Stocking Input Bus/Hatch` (`Auto-Pull = ON`, `Input Separation = ON`). Switching 4 or 64 machines takes **1 Bundled Redstone tick (`50 ms`)** with zero slot-by-slot wiping.
+- **100% Arbitrary NCs (`Adv Blocking Card` Safe)**: Keep `NC #k` behind each channel's Toggle Bus on one-way `Extract-Only` Storage Buses (`2`-channel ad-hoc Waiting Rooms stay 100% empty when idle -> GT++ Extruder Shapes, Catalysts, Petri Dishes, and Circuits all work identically).
+- **Start with 1 Cable, Expand In-Place to Multi-Channel Colored Hatches**: Wire `Ch1` (`Black` hatches = GT Prio 1) on one Bundled Cable (`Same Color = Same NC #k`). Add `Ch2` (`Blue` hatches = GT Prio 5) onto another face anytime to run multiple NCs concurrently and auto-demote long `BULK` jobs off `Ch1`.
+- **Near-Zero Idle Cost (`0 ms` Push Wakeup)**: Uses GTNH 2.9 `setItemEventSubscription` / `setFluidEventSubscription` on full-block `ME Dual Interface` adapters — `0` polling calls while idle, waking instantly on `network_item_changed` / `network_fluid_changed`.
+- **Smart `MLFQ` Scheduling (`lib/policy.lua`)**: Short `PROBE` pass (`1.5s`) + 128-entry recipe-fingerprint speed cache prevents large fast fluid batches (`250,000 L` Hydrogen) from being misclassified behind slow low-count recipes (`10` Xenoxene). Selectable policies: `mlfq`, `srtf`, `round_robin`, `fifo`, `priority`.
 
 ---
 
@@ -29,13 +29,11 @@ universal --update
 
 ---
 
-## Hardware Requirements & Critical AE2 Note
+## Hardware Notes (GTNH 2.9.0)
 
-1. **1x OpenComputers Server / Tier 3 Case** (`Redstone I/O` block adjacent to OC Cable + `Adapter` touching each slice's full-block Dual Interface, or `p2p`/OC cable to Adapters).
-2. **IMPORTANT — Full-Block `ME Dual Interface` vs Flat Cable Part**:
-   - Connect the OC Adapter to a **full-block `ME Dual Interface`** (`TileFluidInterface`) or full-block `ME Interface` (`TileInterface`).
-   - Do **not** attach the OC Adapter to a flat cable-part interface (`PartFluidInterface`): in GTNH 2.9.0 / OpenComputers `1.12.68`, cable-part interfaces do not implement `NetworkControl` (`getItemsInNetwork()`). Discovery flags them automatically with a yellow warning!
-3. **Topologies**: See [`DESIGN.md`](DESIGN.md) for **Topology A (Dual-Trunk Arbitrary-NC)** and **Topology B (Single-Trunk Circuit/Mold)** ASCII diagrams.
+1. Attach an OC `Adapter` to each Waiting Room's **full-block `ME Dual Interface`** (`TileFluidInterface`), **not** a flat cable-part interface (`PartFluidInterface` does not implement OC `NetworkControl`).
+2. `1x Redstone I/O` drives **6 Bundled Sides × 16 Colors = 96 Toggle Buses** (e.g., `Ch1 Bank A (00-15)` on North + `Ch2 Bank A (00-15)` on South, using the same color `0..15` for `NC #0..15` on every channel).
+3. See [`DESIGN.md`](DESIGN.md) for full ASCII wiring, GTNH 2.9 hatch dye priority table (`Black(0) -> White(15)`), and scheduler details.
 
 ---
 
@@ -43,8 +41,8 @@ universal --update
 
 ```sh
 universal            # Launch 160x50 Tier 3 Touch Control Center (or --worker if headless)
-universal --worker   # Run headless background scheduler (Ctrl+C safely forces all OFF)
-universal --check    # Read-only hardware, subnet, & SRTF dry-run check
+universal --worker   # Run headless background daemon (Ctrl+C safely forces all OFF)
+universal --check    # Read-only hardware, event subscription, & queue dry-run check
 universal --off      # Immediately zero all bundled redstone outputs
 universal --update   # Atomic syntax-checked updater (preserves config.cfg)
 ```

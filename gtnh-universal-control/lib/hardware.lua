@@ -1,6 +1,6 @@
 -- /home/universal/lib/hardware.lua
--- Bundled Redstone (Toggle Bus), AE2 Subnet Scanning, Built-in GTNH 2.9 NC Filtering,
--- 1-Click Auto-Scan Trunk Pairing, and Optional Wireless OC Mesh (port 4205) for GTNH Universal Control.
+-- Multi-Channel Bundled Redstone (16/32 NCs), GTNH 2.9 Push Event Subscriptions,
+-- Raw Delta Accounting, Built-in NC Filtering, Trunk Auto-Pairing, and Optional OC Mesh (port 4205).
 
 local component = require("component")
 local computer = require("computer")
@@ -60,6 +60,7 @@ Hardware._lastMeshQueued = -1
 Hardware._lastMeshArmed = nil
 Hardware._mainnetMeshAddr = nil
 Hardware._mainnetMeshViaTunnel = false
+Hardware._globalLastBundled = {}
 
 local function safeCall(proxy, method, ...)
     if not proxy or type(proxy[method]) ~= "function" then
@@ -72,14 +73,34 @@ local function safeCall(proxy, method, ...)
     return a, b, c
 end
 
+local function getProxy(addr, compLib, proxyCache)
+    if not addr or addr == "" then return nil end
+    if proxyCache and proxyCache[addr] ~= nil then
+        return proxyCache[addr]
+    end
+    local cl = compLib or component
+    if not cl.proxy then return nil end
+    local p = cl.proxy(addr)
+    if p and proxyCache then
+        proxyCache[addr] = p
+    end
+    return p
+end
+
 function Hardware.shortAddr(addr)
     if type(addr) ~= "string" or addr == "" then return "None" end
     return addr:sub(1, 8)
 end
 
+function Hardware.clearProxyCache(state)
+    if state then
+        state._proxies = {}
+    end
+end
+
 -- Matches items natively registered in GTNH 2.9.0 AE2Compat BlockingModeIgnoreItemRegistry.
 -- Non-registered NCs (GT++ shapes/molds, catalysts, petri dishes, data sticks) return false here
--- and are handled via Dual-Trunk NC isolation or [Calibrate Idle NCs] baselines.
+-- and are handled via Always-On NC Buffer + Toggle Bus / [Calibrate Idle NCs] baselines.
 function Hardware.isBuiltinIgnoredNC(stack)
     if type(stack) ~= "table" then return false end
     local name = tostring(stack.name or "")
@@ -118,8 +139,93 @@ function Hardware.stackKey(stack, isFluid)
     return name .. ":" .. tostring(dmg)
 end
 
-function Hardware.discover(compLib)
+function Hardware.buildIngredientSig(activeItems, activeFluids)
+    local parts = {}
+    if type(activeItems) == "table" then
+        for i = 1, math.min(6, #activeItems) do
+            parts[#parts + 1] = "i:" .. tostring(activeItems[i].key or "")
+        end
+    end
+    if type(activeFluids) == "table" then
+        for i = 1, math.min(6, #activeFluids) do
+            parts[#parts + 1] = "f:" .. tostring(activeFluids[i].key or "")
+        end
+    end
+    if #parts == 0 then return "" end
+    table.sort(parts)
+    if #parts > 8 then
+        local trimmed = {}
+        for i = 1, 8 do trimmed[i] = parts[i] end
+        return table.concat(trimmed, "|")
+    end
+    return table.concat(parts, "|")
+end
+
+-- Resolve exact (rsAddr, side, color) signal wire for a given (pool, chIdx, ncIdx).
+-- Follows: 1 Bundled Cable per Channel per 16-NC Bank (Same Color = Same NC Everywhere),
+-- with optional sparse per-(chIdx, ncIdx) override.
+function Hardware.resolveSignal(pool, chIdx, ncIdx)
+    if type(pool) ~= "table" or ncIdx == nil or ncIdx < 0 then return nil end
+    local ch = pool.channels and pool.channels[chIdx or 1]
+    if ch and type(ch.overrides) == "table" then
+        local ov = ch.overrides[ncIdx]
+        if type(ov) == "table" and ov.rsAddr and ov.rsAddr ~= "" and ov.side ~= nil and ov.color ~= nil then
+            return ov.rsAddr, math.floor(tonumber(ov.side)), math.floor(tonumber(ov.color)) % 16
+        end
+    end
+
+    local bankIdx = math.floor(ncIdx / 16) + 1
+    local color = ncIdx % 16
+    local bank = ch and ch.banks and ch.banks[bankIdx]
+    local rsAddr = bank and bank.rsAddr
+    local side = bank and bank.side
+
+    if (not rsAddr or rsAddr == "") and (chIdx == nil or chIdx == 1) and bankIdx == 1 then
+        rsAddr = pool.rsAddr
+        if side == nil then side = pool.side end
+    end
+    if not rsAddr or rsAddr == "" or side == nil then
+        return nil
+    end
+    return rsAddr, math.floor(tonumber(side)), color
+end
+
+-- Enumerate all managed (rsAddr, side) wires across every channel, bank, and override in cfg.
+function Hardware.listManagedWires(cfg)
+    local wires = {}
+    local seen = {}
+    local function addWire(rsAddr, side)
+        if type(rsAddr) == "string" and rsAddr ~= "" and side ~= nil then
+            local s = math.floor(tonumber(side))
+            local k = rsAddr .. ":" .. tostring(s)
+            if not seen[k] then
+                seen[k] = true
+                wires[#wires + 1] = { rsAddr = rsAddr, side = s, key = k }
+            end
+        end
+    end
+
+    for _, pool in ipairs((cfg and cfg.pools) or {}) do
+        addWire(pool.rsAddr, pool.side)
+        for _, ch in ipairs(pool.channels or {}) do
+            for _, bank in ipairs(ch.banks or {}) do
+                addWire(bank.rsAddr, bank.side)
+            end
+            if type(ch.overrides) == "table" then
+                for _, ov in pairs(ch.overrides) do
+                    if type(ov) == "table" then
+                        addWire(ov.rsAddr, ov.side)
+                    end
+                end
+            end
+        end
+    end
+    return wires
+end
+
+function Hardware.discover(compLib, state)
     local cl = compLib or component
+    Hardware.clearProxyCache(state)
     local redstones = {}
     local interfaces = {}
     local partWarnings = {}
@@ -144,6 +250,7 @@ function Hardware.discover(compLib)
                     local p = cl.proxy(addr)
                     local hasNet = (p ~= nil) and (type(p.getItemsInNetwork) == "function")
                     if hasNet then
+                        local hasSub = (type(p.setItemEventSubscription) == "function")
                         local x, y, z
                         if p.getCoordinates then
                             local okC, cx, cy, cz = pcall(p.getCoordinates)
@@ -155,6 +262,7 @@ function Hardware.discover(compLib)
                             address = addr,
                             shortAddr = Hardware.shortAddr(addr),
                             ctype = ctype,
+                            hasEventSub = hasSub,
                             x = x,
                             y = y,
                             z = z,
@@ -207,28 +315,17 @@ function Hardware.discover(compLib)
     }
 end
 
--- Drive a single active color (0..15) or nil (ALL OFF) on a Redstone I/O bundled side.
-function Hardware.setPoolOutputs(rsAddr, side, activeColorOrNil, compLib)
-    if not rsAddr or rsAddr == "" or side == nil then
-        return false, "unconfigured redstone/side"
-    end
-    local cl = compLib or component
-    local proxy = cl.proxy(rsAddr)
-    if not proxy or type(proxy.setBundledOutput) ~= "function" then
-        return false, "no bundled redstone proxy"
-    end
-
+local function writeSingleSideOutput(proxy, side, activeColorOrNil)
     local tbl = {}
     for c = 0, 15 do
         tbl[c] = (activeColorOrNil == c) and 255 or 0
     end
-
     local ok = pcall(proxy.setBundledOutput, side, tbl)
     if ok then
         return true, nil
     end
 
-    -- Fallback for mocks/drivers supporting (side, color, value) only: turn OFF before ON.
+    -- Fallback for drivers supporting (side, color, value) only: turn OFF before ON.
     for c = 0, 15 do
         if activeColorOrNil ~= c then
             pcall(proxy.setBundledOutput, side, c, 0)
@@ -243,28 +340,95 @@ function Hardware.setPoolOutputs(rsAddr, side, activeColorOrNil, compLib)
     return true, nil
 end
 
-function Hardware.zeroAllManagedPools(cfg, compLib)
-    local cl = compLib or component
-    local seen = {}
-    local cleared = 0
-    if cfg and type(cfg.pools) == "table" then
-        for i = 1, #cfg.pools do
-            local p = cfg.pools[i]
-            if type(p) == "table" and p.rsAddr and p.side ~= nil then
-                local k = tostring(p.rsAddr) .. ":" .. tostring(p.side)
-                if not seen[k] then
-                    seen[k] = true
-                    if Hardware.setPoolOutputs(p.rsAddr, p.side, nil, cl) then
-                        cleared = cleared + 1
-                    end
-                end
+-- Drive a single active color (0..15) or nil (ALL OFF) on a Redstone I/O bundled side.
+function Hardware.setPoolOutputs(rsAddr, side, activeColorOrNil, compLib, state)
+    if not rsAddr or rsAddr == "" or side == nil then
+        return false, "unconfigured redstone/side"
+    end
+    local proxy = getProxy(rsAddr, compLib, state and state._proxies)
+    if not proxy or type(proxy.setBundledOutput) ~= "function" then
+        return false, "no bundled redstone proxy"
+    end
+    side = math.floor(tonumber(side))
+    local ok, err = writeSingleSideOutput(proxy, side, activeColorOrNil)
+    if ok then
+        local cache = (state and state._lastBundled) or Hardware._globalLastBundled
+        cache[rsAddr] = cache[rsAddr] or {}
+        cache[rsAddr][side] = (activeColorOrNil == nil) and -1 or activeColorOrNil
+    end
+    return ok, err
+end
+
+-- Atomically flush only dirty (rsAddr, side) wires in `wireTargets` ({ [rsAddr] = { [side] = colorOrNil } }).
+-- Returns ok, err, numWrites.
+function Hardware.flushWireTargets(wireTargets, compLib, state, forceWrite)
+    local cache = (state and state._lastBundled) or Hardware._globalLastBundled
+    local pCache = state and state._proxies
+    local writes = 0
+
+    for rsAddr, sidesMap in pairs(wireTargets) do
+        local proxy = getProxy(rsAddr, compLib, pCache)
+        if not proxy or type(proxy.setBundledOutput) ~= "function" then
+            return false, "no bundled redstone proxy (" .. Hardware.shortAddr(rsAddr) .. ")", writes
+        end
+        cache[rsAddr] = cache[rsAddr] or {}
+        local rsCache = cache[rsAddr]
+
+        local dirtySides = {}
+        for side, targetVal in pairs(sidesMap) do
+            local norm = (type(targetVal) == "number") and targetVal or -1
+            if forceWrite or rsCache[side] ~= norm then
+                dirtySides[#dirtySides + 1] = { side = side, norm = norm, colorOrNil = (norm >= 0) and norm or nil }
             end
         end
+
+        if #dirtySides > 0 then
+            -- Always turn OFF leaving sides (norm == -1) before turning ON entering sides (norm >= 0).
+            -- Uses world-relative (side, colorTbl) calls so wrenched/rotated Redstone I/O blocks match SIDE_NAMES.
+            table.sort(dirtySides, function(a, b)
+                if a.norm ~= b.norm then return a.norm < b.norm end
+                return a.side < b.side
+            end)
+            for _, ds in ipairs(dirtySides) do
+                local okOne, errOne = writeSingleSideOutput(proxy, ds.side, ds.colorOrNil)
+                if not okOne then
+                    return false, errOne, writes
+                end
+                rsCache[ds.side] = ds.norm
+                writes = writes + 1
+            end
+        end
+    end
+    return true, nil, writes
+end
+
+function Hardware.invalidateRedstoneCache(state)
+    if state then
+        state._lastBundled = {}
+    end
+    Hardware._globalLastBundled = {}
+end
+
+function Hardware.zeroAllManagedPools(cfg, compLib, state)
+    local wires = Hardware.listManagedWires(cfg)
+    local seen = {}
+    local cleared = 0
+    local targets = {}
+    for _, w in ipairs(wires) do
+        targets[w.rsAddr] = targets[w.rsAddr] or {}
+        targets[w.rsAddr][w.side] = false
+        if not seen[w.key] then
+            seen[w.key] = true
+            cleared = cleared + 1
+        end
+    end
+    if next(targets) ~= nil then
+        Hardware.flushWireTargets(targets, compLib, state, true)
     end
     return cleared
 end
 
-function Hardware.zeroAllBundledSides(compLib)
+function Hardware.zeroAllBundledSides(compLib, state)
     local cl = compLib or component
     if not cl.list then return 0 end
     local cleared = 0
@@ -272,7 +436,7 @@ function Hardware.zeroAllBundledSides(compLib)
         local p = cl.proxy(addr)
         if p and type(p.setBundledOutput) == "function" then
             for s = 0, 5 do
-                Hardware.setPoolOutputs(addr, s, nil, cl)
+                Hardware.setPoolOutputs(addr, s, nil, cl, state)
             end
             cleared = cleared + 1
         end
@@ -280,63 +444,33 @@ function Hardware.zeroAllBundledSides(compLib)
     return cleared
 end
 
-local function aggregateStacks(rawItems, rawFluids, slice, opts)
+-- Aggregate stats directly from raw maps ({ [itemKey] = qty }, meta, fluids).
+-- Used identically by both full scans and incremental GTNH 2.9 event deltas.
+function Hardware.computeStatsFromMaps(rawItemsMap, rawItemsMeta, rawFluidsMap, rawFluidLabels, slice, opts)
     opts = opts or {}
     local ignoreBuiltin = (opts.ignoreBuiltinNC ~= false)
     local baseItems = (slice and slice.baselineItems) or {}
     local baseFluids = (slice and slice.baselineFluids) or {}
 
-    local itemTotals = {}
-    local itemLabels = {}
-    if type(rawItems) == "table" then
-        for i = 1, #rawItems do
-            local st = rawItems[i]
-            if type(st) == "table" and st.name then
-                local qty = math.floor(tonumber(st.size or st.amount) or 0)
-                if qty > 0 and (not (ignoreBuiltin and Hardware.isBuiltinIgnoredNC(st))) then
-                    local key = Hardware.stackKey(st, false)
-                    itemTotals[key] = (itemTotals[key] or 0) + qty
-                    if st.label and st.label ~= "" then
-                        itemLabels[key] = st.label
-                    end
-                end
-            end
-        end
-    end
-
-    local fluidTotals = {}
-    local fluidLabels = {}
-    if type(rawFluids) == "table" then
-        for i = 1, #rawFluids do
-            local fl = rawFluids[i]
-            if type(fl) == "table" and fl.name then
-                local qty = math.floor(tonumber(fl.amount or fl.size) or 0)
-                if qty > 0 then
-                    local key = Hardware.stackKey(fl, true)
-                    fluidTotals[key] = (fluidTotals[key] or 0) + qty
-                    if fl.label and fl.label ~= "" then
-                        fluidLabels[key] = fl.label
-                    end
-                end
-            end
-        end
-    end
-
     local itemUnits = 0
     local activeItemTypes = 0
     local topLabel, topScore = nil, 0
     local activeItems = {}
-    for key, total in pairs(itemTotals) do
-        local base = math.max(0, math.floor(tonumber(baseItems[key]) or 0))
-        local rem = total - base
-        if rem > 0 then
-            activeItemTypes = activeItemTypes + 1
-            itemUnits = itemUnits + rem
-            local lbl = itemLabels[key] or key
-            activeItems[#activeItems + 1] = { key = key, label = lbl, qty = rem }
-            if rem > topScore then
-                topScore = rem
-                topLabel = lbl
+    for key, total in pairs(rawItemsMap or {}) do
+        local meta = rawItemsMeta and rawItemsMeta[key]
+        local skipped = ignoreBuiltin and meta and Hardware.isBuiltinIgnoredNC(meta)
+        if total > 0 and not skipped then
+            local base = math.max(0, math.floor(tonumber(baseItems[key]) or 0))
+            local rem = total - base
+            if rem > 0 then
+                activeItemTypes = activeItemTypes + 1
+                itemUnits = itemUnits + rem
+                local lbl = (meta and meta.label and meta.label ~= "") and meta.label or key
+                activeItems[#activeItems + 1] = { key = key, label = lbl, qty = rem }
+                if rem > topScore then
+                    topScore = rem
+                    topLabel = lbl
+                end
             end
         end
     end
@@ -344,18 +478,20 @@ local function aggregateStacks(rawItems, rawFluids, slice, opts)
     local fluidUnits = 0
     local activeFluidTypes = 0
     local activeFluids = {}
-    for key, total in pairs(fluidTotals) do
-        local base = math.max(0, math.floor(tonumber(baseFluids[key]) or 0))
-        local rem = total - base
-        if rem > 0 then
-            activeFluidTypes = activeFluidTypes + 1
-            fluidUnits = fluidUnits + rem
-            local lbl = fluidLabels[key] or key
-            local eqUnits = rem / 1000.0
-            activeFluids[#activeFluids + 1] = { key = key, label = lbl, qty = rem }
-            if eqUnits > topScore then
-                topScore = eqUnits
-                topLabel = lbl
+    for key, total in pairs(rawFluidsMap or {}) do
+        if total > 0 then
+            local base = math.max(0, math.floor(tonumber(baseFluids[key]) or 0))
+            local rem = total - base
+            if rem > 0 then
+                activeFluidTypes = activeFluidTypes + 1
+                fluidUnits = fluidUnits + rem
+                local lbl = (rawFluidLabels and rawFluidLabels[key] and rawFluidLabels[key] ~= "") and rawFluidLabels[key] or key
+                local eqUnits = rem / 1000.0
+                activeFluids[#activeFluids + 1] = { key = key, label = lbl, qty = rem }
+                if eqUnits > topScore then
+                    topScore = eqUnits
+                    topLabel = lbl
+                end
             end
         end
     end
@@ -372,25 +508,67 @@ local function aggregateStacks(rawItems, rawFluids, slice, opts)
         topLabel = topLabel or "",
         activeItems = activeItems,
         activeFluids = activeFluids,
+        ingredientSig = Hardware.buildIngredientSig(activeItems, activeFluids),
     }
 end
 
-function Hardware.scanSubnet(addr, slice, opts, compLib)
-    if not addr or addr == "" then
-        return { ok = false, itemUnits = 0, fluidUnits = 0, workScore = 0, activeItemTypes = 0, activeFluidTypes = 0, topLabel = "", err = "Unbound" }
+local function populateMapsFromLists(rawItems, rawFluids)
+    local itemsMap, itemsMeta = {}, {}
+    if type(rawItems) == "table" then
+        for i = 1, #rawItems do
+            local st = rawItems[i]
+            if type(st) == "table" and st.name then
+                local qty = math.floor(tonumber(st.size or st.amount) or 0)
+                if qty > 0 then
+                    local key = Hardware.stackKey(st, false)
+                    itemsMap[key] = (itemsMap[key] or 0) + qty
+                    local prev = itemsMeta[key]
+                    itemsMeta[key] = {
+                        name = st.name,
+                        damage = st.damage,
+                        label = (st.label and st.label ~= "") and st.label or (prev and prev.label) or "",
+                    }
+                end
+            end
+        end
     end
-    local cl = compLib or component
-    local proxy = cl.proxy(addr)
+
+    local fluidsMap, fluidLabels = {}, {}
+    if type(rawFluids) == "table" then
+        for i = 1, #rawFluids do
+            local fl = rawFluids[i]
+            if type(fl) == "table" and fl.name then
+                local qty = math.floor(tonumber(fl.amount or fl.size) or 0)
+                if qty > 0 then
+                    local key = Hardware.stackKey(fl, true)
+                    fluidsMap[key] = (fluidsMap[key] or 0) + qty
+                    if fl.label and fl.label ~= "" then
+                        fluidLabels[key] = fl.label
+                    end
+                end
+            end
+        end
+    end
+
+    return itemsMap, itemsMeta, fluidsMap, fluidLabels
+end
+
+function Hardware.scanSubnet(addr, slice, opts, compLib)
+    opts = opts or {}
+    if not addr or addr == "" then
+        return { ok = false, itemUnits = 0, fluidUnits = 0, workScore = 0, activeItemTypes = 0, activeFluidTypes = 0, topLabel = "", ingredientSig = "", err = "Unbound" }
+    end
+    local proxy = getProxy(addr, compLib, opts.proxyCache)
     if not proxy then
-        return { ok = false, itemUnits = 0, fluidUnits = 0, workScore = 0, activeItemTypes = 0, activeFluidTypes = 0, topLabel = "", err = "Component offline" }
+        return { ok = false, itemUnits = 0, fluidUnits = 0, workScore = 0, activeItemTypes = 0, activeFluidTypes = 0, topLabel = "", ingredientSig = "", err = "Component offline" }
     end
     if type(proxy.getItemsInNetwork) ~= "function" then
-        return { ok = false, itemUnits = 0, fluidUnits = 0, workScore = 0, activeItemTypes = 0, activeFluidTypes = 0, topLabel = "", err = "Flat part interface (no NetworkControl)" }
+        return { ok = false, itemUnits = 0, fluidUnits = 0, workScore = 0, activeItemTypes = 0, activeFluidTypes = 0, topLabel = "", ingredientSig = "", err = "Flat part interface (no NetworkControl)" }
     end
 
     local rawItems, errI = safeCall(proxy, "getItemsInNetwork")
     if rawItems == nil then
-        return { ok = false, itemUnits = 0, fluidUnits = 0, workScore = 0, activeItemTypes = 0, activeFluidTypes = 0, topLabel = "", err = errI or "getItemsInNetwork failed" }
+        return { ok = false, itemUnits = 0, fluidUnits = 0, workScore = 0, activeItemTypes = 0, activeFluidTypes = 0, topLabel = "", ingredientSig = "", err = errI or "getItemsInNetwork failed" }
     end
     local rawFluids = {}
     if type(proxy.getFluidsInNetwork) == "function" then
@@ -400,13 +578,120 @@ function Hardware.scanSubnet(addr, slice, opts, compLib)
         end
     end
 
-    local agg = aggregateStacks(rawItems, rawFluids, slice, opts)
+    local itemsMap, itemsMeta, fluidsMap, fluidLabels = populateMapsFromLists(rawItems, rawFluids)
+    local agg = Hardware.computeStatsFromMaps(itemsMap, itemsMeta, fluidsMap, fluidLabels, slice, opts)
     agg.ok = true
     agg.rawItemCount = #rawItems
     agg.rawFluidCount = #rawFluids
     agg.rawItems = rawItems
     agg.rawFluids = rawFluids
+    agg.itemsMap = itemsMap
+    agg.itemsMeta = itemsMeta
+    agg.fluidsMap = fluidsMap
+    agg.fluidLabels = fluidLabels
     return agg
+end
+
+-- Apply incremental GTNH 2.9 storage event deltas (`network_item_changed` / `network_fluid_changed`)
+-- directly into `sState._rawItems` / `_rawFluids` in O(k) pure Lua with 0 server-thread calls.
+function Hardware.applyDeltas(sState, isFluid, deltas)
+    if type(sState) ~= "table" or type(deltas) ~= "table" then return 0 end
+    sState._rawItems = sState._rawItems or {}
+    sState._rawItemsMeta = sState._rawItemsMeta or {}
+    sState._rawFluids = sState._rawFluids or {}
+    sState._rawFluidLabels = sState._rawFluidLabels or {}
+
+    local applied = 0
+    for i = 1, #deltas do
+        local d = deltas[i]
+        if type(d) == "table" and d.name then
+            if isFluid then
+                local delta = tonumber(d.amount or d.size) or 0
+                if delta ~= 0 then
+                    local key = Hardware.stackKey(d, true)
+                    local newQty = math.max(0, (sState._rawFluids[key] or 0) + delta)
+                    if newQty <= 0 then
+                        sState._rawFluids[key] = nil
+                        sState._rawFluidLabels[key] = nil
+                    else
+                        sState._rawFluids[key] = newQty
+                        if d.label and d.label ~= "" then
+                            sState._rawFluidLabels[key] = d.label
+                        end
+                    end
+                    applied = applied + 1
+                end
+            else
+                local delta = tonumber(d.size or d.amount) or 0
+                if delta ~= 0 then
+                    local key = Hardware.stackKey(d, false)
+                    local newQty = math.max(0, (sState._rawItems[key] or 0) + delta)
+                    if newQty <= 0 then
+                        sState._rawItems[key] = nil
+                        sState._rawItemsMeta[key] = nil
+                    else
+                        local prev = sState._rawItemsMeta[key]
+                        sState._rawItems[key] = newQty
+                        sState._rawItemsMeta[key] = {
+                            name = d.name,
+                            damage = d.damage,
+                            label = (d.label and d.label ~= "") and d.label or (prev and prev.label) or "",
+                        }
+                    end
+                    applied = applied + 1
+                end
+            end
+        end
+    end
+    return applied
+end
+
+-- Subscribe bound me_interface blocks to GTNH 2.9 AE2 storage push events and rebuild lookup index.
+function Hardware.syncSubscriptions(cfg, state, compLib)
+    if not state then return false end
+    local addrToSlices = {}
+    local proxyCache = state._proxies
+    local allSub = true
+    local anyBound = false
+
+    for _, pool in ipairs((cfg and cfg.pools) or {}) do
+        local numSlices = tonumber(pool.numSlices) or 16
+        for ncIdx = 0, numSlices - 1 do
+            local slice = pool.slices and pool.slices[ncIdx]
+            local sKey = tostring(pool.id) .. ":" .. tostring(ncIdx)
+            local sState = state.sliceStates and state.sliceStates[sKey]
+            if slice and slice.ifaceAddr and slice.ifaceAddr ~= "" then
+                anyBound = true
+                local addr = slice.ifaceAddr
+                addrToSlices[addr] = addrToSlices[addr] or {}
+                addrToSlices[addr][#addrToSlices[addr] + 1] = { poolId = pool.id, ncIdx = ncIdx, slice = slice }
+
+                local proxy = getProxy(addr, compLib, proxyCache)
+                local hasSub = false
+                if proxy and type(proxy.setItemEventSubscription) == "function" then
+                    local okI = pcall(proxy.setItemEventSubscription, true)
+                    if okI then
+                        hasSub = true
+                    end
+                    if type(proxy.setFluidEventSubscription) == "function" then
+                        pcall(proxy.setFluidEventSubscription, true)
+                    end
+                end
+                if sState then
+                    sState._hasEventSub = hasSub
+                end
+                if not hasSub and pool.enabled ~= false and slice.enabled ~= false and slice.priority ~= "off" then
+                    allSub = false
+                end
+            elseif sState then
+                sState._hasEventSub = false
+            end
+        end
+    end
+
+    state._addrToSlices = addrToSlices
+    state._allSubscribed = anyBound and allSub
+    return state._allSubscribed
 end
 
 -- Snapshots all current items (excluding built-in NCs) & fluids on a slice as its permanent idle NC baseline.
@@ -438,27 +723,16 @@ function Hardware.calibrateBaseline(slice, opts, compLib)
     return true, nI, nF
 end
 
-local function buildCountMaps(scanRes)
-    local items, fluids = {}, {}
-    if scanRes and scanRes.rawItems then
-        for i = 1, #scanRes.rawItems do
-            local st = scanRes.rawItems[i]
-            if type(st) == "table" and st.name then
-                local k = Hardware.stackKey(st, false)
-                items[k] = (items[k] or 0) + math.floor(tonumber(st.size or st.amount) or 0)
-            end
+function Hardware.snapshotInterfaces(addrs, compLib)
+    local snaps = {}
+    for i = 1, #(addrs or {}) do
+        local addr = addrs[i]
+        local res = Hardware.scanSubnet(addr, nil, { ignoreBuiltinNC = false }, compLib)
+        if res.ok then
+            snaps[addr] = { items = res.itemsMap or {}, fluids = res.fluidsMap or {} }
         end
     end
-    if scanRes and scanRes.rawFluids then
-        for i = 1, #scanRes.rawFluids do
-            local fl = scanRes.rawFluids[i]
-            if type(fl) == "table" and fl.name then
-                local k = Hardware.stackKey(fl, true)
-                fluids[k] = (fluids[k] or 0) + math.floor(tonumber(fl.amount or fl.size) or 0)
-            end
-        end
-    end
-    return items, fluids
+    return snaps
 end
 
 local function hasIncreasedStock(beforeMap, afterMap)
@@ -470,19 +744,6 @@ local function hasIncreasedStock(beforeMap, afterMap)
     return false, nil
 end
 
-function Hardware.snapshotInterfaces(addrs, compLib)
-    local snaps = {}
-    for i = 1, #(addrs or {}) do
-        local addr = addrs[i]
-        local res = Hardware.scanSubnet(addr, nil, { ignoreBuiltinNC = false }, compLib)
-        if res.ok then
-            local it, fl = buildCountMaps(res)
-            snaps[addr] = { items = it, fluids = fl }
-        end
-    end
-    return snaps
-end
-
 function Hardware.detectChangedInterface(addrs, prevSnaps, compLib)
     for i = 1, #(addrs or {}) do
         local addr = addrs[i]
@@ -490,7 +751,7 @@ function Hardware.detectChangedInterface(addrs, prevSnaps, compLib)
         if prev then
             local res = Hardware.scanSubnet(addr, nil, { ignoreBuiltinNC = false }, compLib)
             if res.ok then
-                local it, fl = buildCountMaps(res)
+                local it, fl = res.itemsMap or {}, res.fluidsMap or {}
                 local okI, keyI = hasIncreasedStock(prev.items, it)
                 if okI then return addr, keyI, it, fl end
                 local okF, keyF = hasIncreasedStock(prev.fluids, fl)
@@ -502,35 +763,48 @@ function Hardware.detectChangedInterface(addrs, prevSnaps, compLib)
 end
 
 -- 1-Click Trunk Auto-Pair:
--- Place 1 marker item (or marker Storage Bus on a chest with cobblestone) on the shared Machine Trunk.
--- Sweeps Bundled Colors 0..15 one by one; whichever subnet suddenly sees the marker is bound to that Color!
+-- Place 1 marker item (e.g. Cobblestone in Chest + Storage Bus) on the Machine Trunk for Channel `chIdx`.
+-- Sweeps NC indices 0..numSlices-1 on that channel; whichever subnet suddenly sees the marker is bound!
 function Hardware.autoScanTrunkPool(pool, candidateAddrs, opts, compLib)
     opts = opts or {}
     local cl = compLib or component
-    if not pool or not pool.rsAddr or pool.side == nil then
-        return { ok = false, boundCount = 0, bindings = {}, error = "Configure Redstone I/O and Bundled Side first." }
+    local chIdx = math.max(1, math.floor(tonumber(opts.channelIdx) or 1))
+    local maxNc = (tonumber(pool and pool.numSlices) or 16) - 1
+
+    if not pool or not Hardware.resolveSignal(pool, chIdx, 0) then
+        return { ok = false, boundCount = 0, bindings = {}, error = "Configure Channel " .. tostring(chIdx) .. " Redstone I/O & Side first." }
     end
     local sleepFn = opts.sleepFn or (os and os.sleep) or function() end
     local pulseSec = tonumber(opts.pulseSec) or 0.25
 
-    Hardware.setPoolOutputs(pool.rsAddr, pool.side, nil, cl)
+    -- Force all wires of this pool OFF first
+    local clearWires = {}
+    for nc = 0, maxNc do
+        local rsA, s = Hardware.resolveSignal(pool, chIdx, nc)
+        if rsA and s ~= nil then
+            clearWires[rsA] = clearWires[rsA] or {}
+            clearWires[rsA][s] = false
+        end
+    end
+    Hardware.flushWireTargets(clearWires, cl, nil, true)
     pcall(sleepFn, pulseSec)
 
     local baseline = Hardware.snapshotInterfaces(candidateAddrs, cl)
     local bindings = {}
     local alreadyUsed = {}
-    for c = 0, 15 do
-        local s = pool.slices and pool.slices[c]
+    for nc = 0, maxNc do
+        local s = pool.slices and pool.slices[nc]
         if s and s.ifaceAddr and s.ifaceAddr ~= "" and opts.overwriteExisting ~= true then
-            alreadyUsed[s.ifaceAddr] = c
+            alreadyUsed[s.ifaceAddr] = nc
         end
     end
 
     local okSweep, sweepErr = pcall(function()
-        for color = 0, 15 do
-            local slice = pool.slices and pool.slices[color]
-            if slice and (opts.overwriteExisting == true or not slice.ifaceAddr or slice.ifaceAddr == "") then
-                Hardware.setPoolOutputs(pool.rsAddr, pool.side, color, cl)
+        for nc = 0, maxNc do
+            local slice = pool.slices and pool.slices[nc]
+            local rsAddr, side, color = Hardware.resolveSignal(pool, chIdx, nc)
+            if slice and rsAddr and side ~= nil and (opts.overwriteExisting == true or not slice.ifaceAddr or slice.ifaceAddr == "") then
+                Hardware.setPoolOutputs(rsAddr, side, color, cl)
                 sleepFn(pulseSec)
                 local remaining = {}
                 for i = 1, #candidateAddrs do
@@ -540,17 +814,17 @@ function Hardware.autoScanTrunkPool(pool, candidateAddrs, opts, compLib)
                     end
                 end
                 local hitAddr, hitKey = Hardware.detectChangedInterface(remaining, baseline, cl)
-                Hardware.setPoolOutputs(pool.rsAddr, pool.side, nil, cl)
+                Hardware.setPoolOutputs(rsAddr, side, nil, cl)
                 if hitAddr then
                     slice.ifaceAddr = hitAddr
-                    alreadyUsed[hitAddr] = color
-                    bindings[#bindings + 1] = { color = color, address = hitAddr, marker = hitKey }
+                    alreadyUsed[hitAddr] = nc
+                    bindings[#bindings + 1] = { color = nc, ncIdx = nc, channelIdx = chIdx, address = hitAddr, marker = hitKey }
                 end
             end
         end
     end)
 
-    Hardware.setPoolOutputs(pool.rsAddr, pool.side, nil, cl)
+    Hardware.flushWireTargets(clearWires, cl, nil, true)
     if not okSweep then
         return { ok = false, boundCount = #bindings, bindings = bindings, error = tostring(sweepErr) }
     end
@@ -636,13 +910,27 @@ function Hardware.pushMeshMetrics(cfg, state, nowSec, compLib, force)
     for pi = 1, #((cfg and cfg.pools) or {}) do
         local p = cfg.pools[pi]
         local pst = state and state.poolStates and state.poolStates[p.id] or {}
+        local chOut = {}
+        for chIdx, ch in ipairs(p.channels or {}) do
+            local cs = pst.channels and pst.channels[chIdx] or {}
+            chOut[#chOut + 1] = {
+                id = chIdx,
+                name = ch.name,
+                phase = cs.phase or "IDLE",
+                activeNc = cs.activeNc,
+                activeLabel = cs.activeLabel or "",
+                etaSec = cs.activeEtaSec,
+            }
+        end
         poolsOut[pi] = {
             id = p.id,
             name = p.name,
+            mode = p.mode or "mlfq",
             phase = pst.phase or "IDLE",
             activeColor = pst.activeColor,
             activeLabel = pst.activeLabel or "",
             etaSec = pst.activeEtaSec,
+            channels = chOut,
         }
     end
 
@@ -690,18 +978,22 @@ function Hardware.handleMeshMessage(cfg, state, localAddr, sender, port, msgType
         if type(cmd) == "table" then
             if cmd.action == "pause" then
                 cfg.armed = false
-                Hardware.zeroAllManagedPools(cfg, cl)
+                Hardware.zeroAllManagedPools(cfg, cl, state)
                 reply = { ok = true, armed = false }
             elseif cmd.action == "resume" then
                 cfg.armed = true
+                if state then state._forcePollNow = true end
                 reply = { ok = true, armed = true }
             elseif cmd.action == "poll_now" then
-                if state then state._forcePollNow = true end
+                if state then
+                    state._forcePollNow = true
+                    state._forceFullScan = true
+                end
                 reply = { ok = true }
             elseif cmd.action == "force_slice" then
                 local pId = tonumber(cmd.poolId) or 1
                 local col = tonumber(cmd.color)
-                if col ~= nil and col >= 0 and col <= 15 and state then
+                if col ~= nil and col >= 0 and col <= 31 and state then
                     state.forceColorByPool = state.forceColorByPool or {}
                     state.forceColorByPool[pId] = math.floor(col)
                     state._forcePollNow = true

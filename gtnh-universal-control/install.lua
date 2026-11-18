@@ -26,6 +26,7 @@ local FILES = {
     "install.lua",
     "main.lua",
     "lib/hardware.lua",
+    "lib/policy.lua",
     "lib/scheduler.lua",
     "lib/ui.lua",
 }

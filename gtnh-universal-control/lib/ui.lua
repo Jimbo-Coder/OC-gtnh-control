@@ -1,10 +1,11 @@
 -- /home/universal/lib/ui.lua
 -- Visual Touch Control Center for GTNH Universal Automation (160x50 Tier 3 GPU).
--- Uses a 48-bit packed diff framebuffer and strictly width-1 font.hex glyphs.
+-- Multi-Channel Colored-Hatch View, 16/32 NC Banks, MLFQ Tiers, and Strictly Width-1 Glyphs.
 
 local component = require("component")
 local unicode = require("unicode")
 local Hardware = require("lib.hardware")
+local Policy = require("lib.policy")
 local Scheduler = require("lib.scheduler")
 
 local UI = {}
@@ -106,6 +107,10 @@ function UI.new(cfg, state, onSave, compLib)
         running = true,
         selectedPoolIdx = 1,
         selectedColor = 0,
+        selectedChIdx = 1,
+        setupChIdx = 1,
+        sliceBank = 0,
+        ifacePage = 0,
         queueScroll = 0,
         logModalActive = false,
         logModalTab = 1,
@@ -267,7 +272,19 @@ function UI:selectedPool()
     local n = #(self.cfg.pools or {})
     if n == 0 then return nil, 0 end
     self.selectedPoolIdx = math.max(1, math.min(n, self.selectedPoolIdx or 1))
-    return self.cfg.pools[self.selectedPoolIdx], self.selectedPoolIdx
+    local pool = self.cfg.pools[self.selectedPoolIdx]
+    if pool then
+        local maxNc = (tonumber(pool.numSlices) or 16) - 1
+        if (self.selectedColor or 0) > maxNc then
+            self.selectedColor = 0
+        end
+        if maxNc < 16 then
+            self.sliceBank = 0
+        end
+        self.selectedChIdx = math.max(1, math.min(#(pool.channels or {}), self.selectedChIdx or 1))
+        self.setupChIdx = math.max(1, math.min(#(pool.channels or {}), self.setupChIdx or 1))
+    end
+    return pool, self.selectedPoolIdx
 end
 
 function UI:stepGuidedDrop()
@@ -277,8 +294,9 @@ function UI:stepGuidedDrop()
         self.guidedDropActive = false
         return false
     end
+    local maxNc = (tonumber(pool.numSlices) or 16) - 1
     local boundMap = {}
-    for c = 0, 15 do
+    for c = 0, maxNc do
         local a = pool.slices[c] and pool.slices[c].ifaceAddr
         if a and a ~= "" then boundMap[a] = true end
     end
@@ -300,19 +318,21 @@ function UI:stepGuidedDrop()
     end
     local hitAddr = Hardware.detectChangedInterface(unbound, self.guidedDropSnap, self.comp)
     if hitAddr then
-        local targetColor = nil
-        for c = 0, 15 do
+        local targetNc = nil
+        for c = 0, maxNc do
             if not pool.slices[c].ifaceAddr or pool.slices[c].ifaceAddr == "" then
-                targetColor = c
+                targetNc = c
                 break
             end
         end
-        if targetColor ~= nil then
-            pool.slices[targetColor].ifaceAddr = hitAddr
-            self.selectedColor = targetColor
-            self:save(string.format("Guided Drop bound Color %d (%s) -> %s",
-                targetColor, Hardware.COLORS[targetColor].name, Hardware.shortAddr(hitAddr)))
-            -- Refresh snapshot for next unbound drop
+        if targetNc ~= nil then
+            pool.slices[targetNc].ifaceAddr = hitAddr
+            self.selectedColor = targetNc
+            self.sliceBank = math.floor(targetNc / 16)
+            Scheduler.refreshSubscriptions(self.cfg, self.state, self.comp)
+            local cInfo = Hardware.COLORS[targetNc % 16]
+            self:save(string.format("Guided Drop bound NC %02d (%s) -> %s",
+                targetNc, cInfo and cInfo.name or targetNc, Hardware.shortAddr(hitAddr)))
             local rem = {}
             for _, a in ipairs(unbound) do
                 if a ~= hitAddr then rem[#rem + 1] = a end
@@ -342,20 +362,23 @@ function UI:renderHeader()
                 Scheduler.allOff(self.cfg, self.state, nil, self.comp)
                 self:save("Paused: all bundled redstone forced OFF.")
             else
+                self.state._forcePollNow = true
                 self:save("Armed: universal toggle scheduler active.")
             end
         end) + 2
 
     local kpis = self.state.kpis or {}
-    local summary = string.format("Pools:%d/%d  Queued:%d  Stalled:%d  Done:%d  Preempt:%d",
+    local evTag = (self.state._allSubscribed and "EvSub" or "Poll")
+    local summary = string.format("Pools:%d/%d  Queued:%d  Stalled:%d  Done:%d  Preempt:%d  [%s]",
         kpis.activePools or 0, #(self.cfg.pools or {}), kpis.queuedSlices or 0,
-        kpis.stalledCount or 0, kpis.completedBatches or 0, kpis.preemptions or 0)
-    self:drawText(nx, 1, summary, COLORS.muted, COLORS.headerBg)
+        kpis.stalledCount or 0, kpis.completedBatches or 0, kpis.preemptions or 0, evTag)
+    self:drawText(nx, 1, padOrTrunc(summary, self.w - nx - 33), COLORS.muted, COLORS.headerBg)
 
     local rx = self.w - 31
     rx = self:drawButton(rx, 1, "[Poll]", COLORS.cyan, COLORS.btnBg, function()
         self.state._forcePollNow = true
-        self.statusMsg = "Manual poll requested."
+        self.state._forceFullScan = true
+        self.statusMsg = "Manual full-scan poll requested."
     end) + 1
     rx = self:drawButton(rx, 1, "[All OFF]", COLORS.red, COLORS.darkRed, function()
         Scheduler.allOff(self.cfg, self.state, nil, self.comp)
@@ -410,16 +433,17 @@ function UI:renderOverviewTab()
     local kpis = self.state.kpis or {}
     local disc = self.state.discovery or {}
     local pools = self.cfg.pools or {}
+    local p1Mode = (pools[1] and tostring(pools[1].mode or "mlfq"):upper()) or "MLFQ"
 
     local cards = {
         { title = " ACTIVE POOLS ", val = string.format("%d / %d", kpis.activePools or 0, #pools), sub = self.cfg.armed and "Scheduler Armed" or "Safely Paused", col = self.cfg.armed and COLORS.green or COLORS.yellow },
-        { title = " QUEUED SLICES ", val = tostring(kpis.queuedSlices or 0), sub = string.format("Mode: SRTF + Preempt (%.2fx)", self.cfg.preemptRatio), col = COLORS.cyan },
+        { title = " QUEUED SLICES ", val = tostring(kpis.queuedSlices or 0), sub = string.format("Mode:%s | Probe:%.1fs | Pre:%.2fx", p1Mode, self.cfg.probeWindowSec or 1.5, self.cfg.preemptRatio or 0.35), col = COLORS.cyan },
         { title = " COMPLETED ", val = tostring(kpis.completedBatches or 0), sub = string.format("Preemptions: %d | Stalled: %d", kpis.preemptions or 0, kpis.stalledCount or 0), col = (kpis.stalledCount or 0) > 0 and COLORS.red or COLORS.green },
-        { title = " HARDWARE & LINK ", val = string.format("RS:%d IF:%d", #(disc.redstones or {}), #(disc.interfaces or {})), sub = string.format("Ext:%s | PartWarn:%d", self.cfg.extLinkMode == "off" and "Standalone" or "Mesh", #(disc.partWarnings or {})), col = (#(disc.partWarnings or {}) > 0) and COLORS.yellow or COLORS.accent },
+        { title = " HARDWARE & EVENTS ", val = string.format("RS:%d IF:%d Scans:%d", #(disc.redstones or {}), #(disc.interfaces or {}), kpis.scanCalls or 0), sub = string.format("%s | Ext:%s", self.state._allSubscribed and "Push EvSub (0-idle)" or "Polling", self.cfg.extLinkMode == "off" and "Standalone" or "Mesh"), col = (#(disc.partWarnings or {}) > 0) and COLORS.yellow or COLORS.accent },
     }
     for i = 1, 4 do
         local cx = 2 + (i - 1) * 40
-        local cw = (i == 4) and 38 or 38
+        local cw = 38
         local c = cards[i]
         self:drawFrame(cx, 5, cw, 4, COLORS.border, COLORS.panelBg, "round")
         self:drawText(cx + 2, 5, c.title, COLORS.accent, COLORS.panelBg)
@@ -428,7 +452,7 @@ function UI:renderOverviewTab()
     end
 
     -- Pool Cards (up to 2 wide, y=10..18)
-    self:drawText(2, 10, "◈ BUNDLED POOLS", COLORS.accent, COLORS.bg)
+    self:drawText(2, 10, "◈ MULTI-CHANNEL BUNDLED POOLS", COLORS.accent, COLORS.bg)
     local showPools = math.min(2, #pools)
     local pW = (showPools == 1) and 158 or 78
     for i = 1, showPools do
@@ -441,75 +465,108 @@ function UI:renderOverviewTab()
         local phCol = (ph == "ACTIVE") and COLORS.green or ((ph == "SETTLING" or ph == "PULSE_TEST") and COLORS.yellow or ((ph == "PAUSED" or ph == "NO_RS") and COLORS.red or COLORS.muted))
         self:drawText(px + pW - 12, 11, " " .. padOrTrunc(ph, 8) .. " ", phCol, COLORS.panelBg)
 
-        local rsTxt = string.format("RS: %s (%s)  Mode: %s",
-            Hardware.shortAddr(pool.rsAddr), Hardware.SIDE_NAMES[pool.side] or "?", tostring(pool.mode):upper())
+        local nCh = #(pool.channels or {})
+        local rsTxt = string.format("Policy:%s  Slices:%d  Ch:%d  RS:%s (%s)",
+            tostring(pool.mode):upper(), tonumber(pool.numSlices) or 16, nCh,
+            Hardware.shortAddr(pool.rsAddr), Hardware.SIDE_NAMES[pool.side] or "?")
         self:drawText(px + 3, 13, padOrTrunc(rsTxt, pW - 6), COLORS.muted, COLORS.panelBg)
 
-        if pst.activeColor ~= nil then
-            local ci = Hardware.COLORS[pst.activeColor]
-            self:drawText(px + 3, 15, string.format("Color %02d [%-9s]", pst.activeColor, ci and ci.name or "?"), COLORS.fg, COLORS.panelBg)
-            self:drawText(px + 23, 15, "■", ci and ci.hex or COLORS.fg, COLORS.panelBg)
-            self:drawText(px + 26, 15, padOrTrunc("Slice: " .. tostring(pst.activeLabel or ""), pW - 29), COLORS.cyan, COLORS.panelBg)
-            local held = (self.state.lastStepSec or 0) - (pst.activeSince or 0)
-            local rTxt = string.format("ETA: %-8s  Rate: %.1f/s  Hold: %ds",
-                UI.formatEta(pst.activeEtaSec), tonumber(pst.activeRate) or 0, math.max(0, math.floor(held)))
-            self:drawText(px + 3, 17, padOrTrunc(rTxt, pW - 6), COLORS.green, COLORS.panelBg)
-        elseif ph == "SETTLING" then
-            self:drawText(px + 3, 15, string.format("ALL OFF Settle Guard -> Color %d (%s)",
-                tonumber(pst.pendingColor) or 0,
-                (Hardware.COLORS[pst.pendingColor] and Hardware.COLORS[pst.pendingColor].name or "?")),
-                COLORS.yellow, COLORS.panelBg)
+        if nCh <= 1 then
+            local cs1 = pst.channels and pst.channels[1]
+            local actNc = (cs1 and cs1.activeNc) or pst.activeColor
+            if actNc ~= nil then
+                local ci = Hardware.COLORS[actNc % 16]
+                self:drawText(px + 3, 15, string.format("Ch1 NC %02d [%-9s]", actNc, ci and ci.name or "?"), COLORS.fg, COLORS.panelBg)
+                self:drawText(px + 24, 15, "■", ci and ci.hex or COLORS.fg, COLORS.panelBg)
+                local ss = self.state.sliceStates and self.state.sliceStates[Scheduler.sliceKey(pool.id, actNc)]
+                local tStr = ss and tostring(ss.tier or "BULK") or "BULK"
+                self:drawText(px + 27, 15, padOrTrunc(string.format("[%s] %s", tStr, tostring(pst.activeLabel or "")), pW - 30), COLORS.cyan, COLORS.panelBg)
+                local held = (self.state.lastStepSec or 0) - ((cs1 and cs1.activeSince) or pst.activeSince or 0)
+                local rTxt = string.format("ETA: %-8s  Rate: %.1f/s  Hold: %ds",
+                    UI.formatEta(pst.activeEtaSec), tonumber(pst.activeRate) or 0, math.max(0, math.floor(held)))
+                self:drawText(px + 3, 17, padOrTrunc(rTxt, pW - 6), COLORS.green, COLORS.panelBg)
+            elseif ph == "SETTLING" then
+                local pNc = tonumber(pst.pendingColor) or 0
+                self:drawText(px + 3, 15, string.format("ALL OFF Settle Guard -> NC %02d (%s)",
+                    pNc, (Hardware.COLORS[pNc % 16] and Hardware.COLORS[pNc % 16].name or "?")),
+                    COLORS.yellow, COLORS.panelBg)
+            else
+                self:drawText(px + 3, 15, "No active craft slice.", COLORS.muted, COLORS.panelBg)
+            end
         else
-            self:drawText(px + 3, 15, "No active craft slice.", COLORS.muted, COLORS.panelBg)
+            for ciIdx = 1, math.min(4, nCh) do
+                local ch = pool.channels[ciIdx]
+                local cs = pst.channels and pst.channels[ciIdx] or {}
+                local ryCh = 14 + ciIdx
+                if cs.phase == "ACTIVE" and cs.activeNc ~= nil then
+                    local ss = self.state.sliceStates and self.state.sliceStates[Scheduler.sliceKey(pool.id, cs.activeNc)]
+                    local tier = ss and tostring(ss.tier or "BULK") or "BULK"
+                    local cLine = string.format("Ch%d [%s]: NC%02d %s (%s | ETA %s)",
+                        ciIdx, padOrTrunc(ch.name, 8), cs.activeNc, padOrTrunc(cs.activeLabel, 14),
+                        tier, UI.formatEta(cs.activeEtaSec))
+                    self:drawText(px + 3, ryCh, padOrTrunc(cLine, pW - 6), COLORS.green, COLORS.panelBg)
+                elseif cs.phase == "SETTLING" then
+                    self:drawText(px + 3, ryCh, padOrTrunc(string.format("Ch%d [%s]: SETTLING -> NC%02d",
+                        ciIdx, padOrTrunc(ch.name, 8), tonumber(cs.pendingNc) or 0), pW - 6), COLORS.yellow, COLORS.panelBg)
+                else
+                    self:drawText(px + 3, ryCh, padOrTrunc(string.format("Ch%d [%s]: %s (Pre-settled free)",
+                        ciIdx, padOrTrunc(ch.name, 8), tostring(cs.phase or "IDLE")), pW - 6), COLORS.muted, COLORS.panelBg)
+                end
+            end
         end
     end
 
     -- Priority Queue (y = 20..48)
-    self:drawText(2, 20, "◈ SRTF PRIORITY QUEUE (SHORTEST REMAINING TIME FIRST)", COLORS.accent, COLORS.bg)
+    self:drawText(2, 20, "◈ SCHEDULER QUEUE (TIER / PRIORITY / ETA)", COLORS.accent, COLORS.bg)
     self:drawFrame(2, 21, 158, 27, COLORS.border, COLORS.panelBg, "round")
-    self:drawText(4, 22, "Pool       Col Slice            Pri  Items     Fluids    Top Ingredient        Rate    ETA     State        Action", COLORS.muted, COLORS.panelBg)
+    self:drawText(4, 22, "Pool       Col Slice          Pri  Tier  Ch   Items    Fluids   Top Ingredient       Rate    ETA     State       Action", COLORS.muted, COLORS.panelBg)
     self:drawText(3, 23, string.rep("─", 156), COLORS.border, COLORS.panelBg)
 
     local q = self.state.queue or {}
     local maxShow = 22
     self.queueScroll = math.max(0, math.min(math.max(0, #q - maxShow), self.queueScroll or 0))
     if #q == 0 then
-        self:drawText(4, 25, "All bound NC / Ingredient subnets are empty (Idle).", COLORS.muted, COLORS.panelBg)
+        self:drawText(4, 25, "All bound NC subnets are empty (Idle - 0 tick scan overhead).", COLORS.muted, COLORS.panelBg)
     else
         for r = 1, math.min(maxShow, #q - self.queueScroll) do
             local item = q[r + self.queueScroll]
             local ry = 23 + r
-            local ci = Hardware.COLORS[item.color]
+            local ci = Hardware.COLORS[item.color % 16]
             local stTxt, stCol = "Queued", COLORS.cyan
             if item.isActive then stTxt, stCol = "ACTIVE", COLORS.green
             elseif item.isPending then stTxt, stCol = "SETTLING", COLORS.yellow
             elseif item.isStalled then stTxt, stCol = "STALLED", COLORS.red
             end
+            local chStr = item.activeChannel and ("Ch" .. item.activeChannel)
+                or (item.pendingChannel and ("~C" .. item.pendingChannel) or "-")
             self:drawText(4, ry, padOrTrunc(item.poolName, 10), COLORS.fg, COLORS.panelBg)
             self:drawText(15, ry, "■", ci and ci.hex or COLORS.fg, COLORS.panelBg)
             self:drawText(17, ry, string.format("%02d", item.color), COLORS.muted, COLORS.panelBg)
-            self:drawText(20, ry, padOrTrunc(item.label, 16), COLORS.fg, COLORS.panelBg)
-            self:drawText(37, ry, padOrTrunc(tostring(item.priority):upper(), 4), COLORS.purple, COLORS.panelBg)
-            self:drawText(42, ry, padOrTrunc(UI.formatNumber(item.itemUnits, false), 9), COLORS.fg, COLORS.panelBg)
-            self:drawText(52, ry, padOrTrunc(UI.formatNumber(item.fluidUnits, true), 9), COLORS.cyan, COLORS.panelBg)
-            self:drawText(62, ry, padOrTrunc(item.topLabel, 21), COLORS.muted, COLORS.panelBg)
-            self:drawText(84, ry, string.format("%-7s", string.format("%.1f/s", item.rate or 0)), COLORS.muted, COLORS.panelBg)
-            self:drawText(92, ry, padOrTrunc(UI.formatEta(item.etaSec), 7), COLORS.yellow, COLORS.panelBg)
-            self:drawText(100, ry, padOrTrunc(stTxt, 12), stCol, COLORS.panelBg)
+            self:drawText(20, ry, padOrTrunc(item.label, 14), COLORS.fg, COLORS.panelBg)
+            self:drawText(35, ry, padOrTrunc(tostring(item.priority):upper(), 4), COLORS.purple, COLORS.panelBg)
+            self:drawText(40, ry, padOrTrunc(tostring(item.tier or "BULK"), 5),
+                item.tier == "PROBE" and COLORS.cyan or COLORS.muted, COLORS.panelBg)
+            self:drawText(46, ry, padOrTrunc(chStr, 4), COLORS.green, COLORS.panelBg)
+            self:drawText(51, ry, padOrTrunc(UI.formatNumber(item.itemUnits, false), 8), COLORS.fg, COLORS.panelBg)
+            self:drawText(60, ry, padOrTrunc(UI.formatNumber(item.fluidUnits, true), 8), COLORS.cyan, COLORS.panelBg)
+            self:drawText(69, ry, padOrTrunc(item.topLabel, 20), COLORS.muted, COLORS.panelBg)
+            self:drawText(90, ry, padOrTrunc(string.format("%.1f/s", item.rate or 0), 7), COLORS.muted, COLORS.panelBg)
+            self:drawText(98, ry, padOrTrunc(UI.formatEta(item.etaSec), 7), COLORS.yellow, COLORS.panelBg)
+            self:drawText(106, ry, padOrTrunc(stTxt, 11), stCol, COLORS.panelBg)
 
             local poolForced = self.state.forceColorByPool and self.state.forceColorByPool[item.poolId] == item.color
-            local bx = self:drawButton(113, ry, poolForced and "[Unforce]" or "[Force]",
+            local bx = self:drawButton(118, ry, poolForced and "[Unforce]" or "[Force]",
                 poolForced and COLORS.yellow or COLORS.cyan, COLORS.btnBg,
                 function()
                     self.state.forceColorByPool[item.poolId] = poolForced and nil or item.color
                     self.state._forcePollNow = true
-                    self:save(poolForced and "Cleared manual force." or string.format("Forced %s Color %d.", item.poolName, item.color))
+                    self:save(poolForced and "Cleared manual force." or string.format("Forced %s NC %02d.", item.poolName, item.color))
                 end) + 1
             if item.isStalled then
                 self:drawButton(bx, ry, "[Clear Stall]", COLORS.yellow, COLORS.amberBg, function()
                     Scheduler.clearStall(self.cfg, self.state, item.poolId, item.color)
                     self.state._forcePollNow = true
-                    self:save("Cleared stall on Color " .. tostring(item.color))
+                    self:save("Cleared stall on NC " .. tostring(item.color))
                 end)
             end
         end
@@ -537,68 +594,95 @@ function UI:renderSlicesTab()
 
     if not pool then return end
 
-    -- 16-Color Matrix (y=7..25)
+    if (tonumber(pool.numSlices) or 16) == 32 then
+        self:drawButton(122, 5, self.sliceBank == 0 and "[Bank A: 00-15]" or " Bank A: 00-15 ",
+            self.sliceBank == 0 and COLORS.fg or COLORS.muted,
+            self.sliceBank == 0 and COLORS.btnActiveBg or COLORS.btnBg,
+            function() self.sliceBank = 0 end)
+        self:drawButton(139, 5, self.sliceBank == 1 and "[Bank B: 16-31]" or " Bank B: 16-31 ",
+            self.sliceBank == 1 and COLORS.fg or COLORS.muted,
+            self.sliceBank == 1 and COLORS.btnActiveBg or COLORS.btnBg,
+            function() self.sliceBank = 1 end)
+    end
+
+    -- 16-Row Matrix for current Bank (y=7..25)
     self:drawFrame(2, 7, 158, 19, COLORS.border, COLORS.panelBg, "round")
-    self:drawText(4, 8, "Col Swatch     Label            Interface    Pri   Status     Work (Items / Fluids)    Base  Rate     ETA", COLORS.muted, COLORS.panelBg)
+    self:drawText(4, 8, "NC Swatch     Label            Interface    Pri   Status       Work (Items / Fluids)    Base  Rate     ETA      Tier", COLORS.muted, COLORS.panelBg)
     local pst = (self.state.poolStates and self.state.poolStates[pool.id]) or {}
     local discIfs = (self.state.discovery and self.state.discovery.interfaces) or {}
+    local bankOffset = (self.sliceBank or 0) * 16
 
-    for c = 0, 15 do
-        local slice = pool.slices[c]
-        local sState = (self.state.sliceStates and self.state.sliceStates[Scheduler.sliceKey(pool.id, c)]) or {}
-        local ci = Hardware.COLORS[c]
-        local ry = 9 + c
-        local isSel = (c == (self.selectedColor or 0))
-        local rowBg = isSel and COLORS.selectedBg or ((c % 2 == 0) and COLORS.panelBg or COLORS.rowAltBg)
-        self:fillRect(3, ry, 156, 1, " ", rowBg)
+    for row = 0, 15 do
+        local nc = bankOffset + row
+        local slice = pool.slices[nc]
+        if slice then
+            local sState = (self.state.sliceStates and self.state.sliceStates[Scheduler.sliceKey(pool.id, nc)]) or {}
+            local ci = Hardware.COLORS[nc % 16]
+            local ry = 9 + row
+            local isSel = (nc == (self.selectedColor or 0))
+            local rowBg = isSel and COLORS.selectedBg or ((row % 2 == 0) and COLORS.panelBg or COLORS.rowAltBg)
+            self:fillRect(3, ry, 156, 1, " ", rowBg)
 
-        self:drawText(4, ry, string.format("%02d", c), COLORS.muted, rowBg)
-        self:drawText(7, ry, "■", ci.hex, rowBg)
-        self:drawText(9, ry, padOrTrunc(ci.name, 9), ci.hex == 0x21262D and COLORS.fg or ci.hex, rowBg)
-        self:drawText(19, ry, padOrTrunc(slice.label, 16), COLORS.fg, rowBg)
-        self:drawText(36, ry, slice.ifaceAddr and Hardware.shortAddr(slice.ifaceAddr) or "--",
-            slice.ifaceAddr and COLORS.cyan or COLORS.muted, rowBg)
-        self:drawText(49, ry, padOrTrunc(tostring(slice.priority):upper(), 5), COLORS.purple, rowBg)
+            self:drawText(4, ry, string.format("%02d", nc), COLORS.muted, rowBg)
+            self:drawText(7, ry, "■", ci.hex, rowBg)
+            self:drawText(9, ry, padOrTrunc(ci.name, 9), ci.hex == 0x21262D and COLORS.fg or ci.hex, rowBg)
+            self:drawText(19, ry, padOrTrunc(slice.label, 16), COLORS.fg, rowBg)
+            self:drawText(36, ry, slice.ifaceAddr and Hardware.shortAddr(slice.ifaceAddr) or "--",
+                slice.ifaceAddr and COLORS.cyan or COLORS.muted, rowBg)
+            self:drawText(49, ry, padOrTrunc(tostring(slice.priority):upper(), 5), COLORS.purple, rowBg)
 
-        local stStr, stCol = "Unbound", COLORS.muted
-        if slice.ifaceAddr then
-            if pst.phase == "ACTIVE" and pst.activeColor == c then stStr, stCol = "ACTIVE", COLORS.green
-            elseif pst.phase == "PULSE_TEST" and pst.pulseColor == c then stStr, stCol = "PULSE", COLORS.yellow
-            elseif sState.stalledUntil and (self.state.lastStepSec or 0) < sState.stalledUntil then stStr, stCol = "STALL", COLORS.red
-            elseif slice.enabled == false or slice.priority == "off" then stStr, stCol = "Off", COLORS.muted
-            elseif (sState.workScore or 0) > 0 then stStr, stCol = "Queued", COLORS.cyan
-            else stStr, stCol = "Idle", COLORS.fg
+            local actCh, pendCh, pulseCh = nil, nil, nil
+            for chIdx, cs in ipairs(pst.channels or {}) do
+                if cs.phase == "ACTIVE" and cs.activeNc == nc then actCh = chIdx
+                elseif cs.phase == "SETTLING" and cs.pendingNc == nc then pendCh = chIdx
+                elseif cs.phase == "PULSE_TEST" and cs.pulseNc == nc then pulseCh = chIdx
+                end
             end
+
+            local stStr, stCol = "Unbound", COLORS.muted
+            if slice.ifaceAddr then
+                if actCh then stStr, stCol = "ACT:Ch" .. actCh, COLORS.green
+                elseif pulseCh then stStr, stCol = "PULSE:C" .. pulseCh, COLORS.yellow
+                elseif pendCh then stStr, stCol = "SETL:C" .. pendCh, COLORS.yellow
+                elseif sState.stalledUntil and (self.state.lastStepSec or 0) < sState.stalledUntil then stStr, stCol = "STALL", COLORS.red
+                elseif slice.enabled == false or slice.priority == "off" then stStr, stCol = "Off", COLORS.muted
+                elseif (sState.workScore or 0) > 0 then stStr, stCol = "Queued", COLORS.cyan
+                else stStr, stCol = "Idle", COLORS.fg
+                end
+            end
+            self:drawText(55, ry, padOrTrunc(stStr, 11), stCol, rowBg)
+
+            local wStr = slice.ifaceAddr
+                and string.format("%-8s / %-8s", UI.formatNumber(sState.itemUnits or 0, false), UI.formatNumber(sState.fluidUnits or 0, true))
+                or "--"
+            self:drawText(67, ry, padOrTrunc(wStr, 24), COLORS.fg, rowBg)
+
+            local bCnt = 0
+            for _ in pairs(slice.baselineItems or {}) do bCnt = bCnt + 1 end
+            for _ in pairs(slice.baselineFluids or {}) do bCnt = bCnt + 1 end
+            self:drawText(92, ry, bCnt > 0 and string.format("%dNC", bCnt) or "-", bCnt > 0 and COLORS.cyan or COLORS.muted, rowBg)
+            self:drawText(97, ry, slice.learnedRate and string.format("%.1f/s", slice.learnedRate) or "--", COLORS.muted, rowBg)
+            self:drawText(106, ry, (sState.workScore or 0) > 0 and UI.formatEta(sState.etaSec) or "--", COLORS.yellow, rowBg)
+            self:drawText(115, ry, (sState.workScore or 0) > 0 and tostring(sState.tier or "BULK") or "--",
+                sState.tier == "PROBE" and COLORS.cyan or COLORS.muted, rowBg)
+
+            self:addHitbox(3, ry, 158, ry, function() self.selectedColor = nc end)
         end
-        self:drawText(55, ry, padOrTrunc(stStr, 9), stCol, rowBg)
-
-        local wStr = slice.ifaceAddr
-            and string.format("%-8s / %-8s", UI.formatNumber(sState.itemUnits or 0, false), UI.formatNumber(sState.fluidUnits or 0, true))
-            or "--"
-        self:drawText(65, ry, padOrTrunc(wStr, 25), COLORS.fg, rowBg)
-
-        local bCnt = 0
-        for _ in pairs(slice.baselineItems or {}) do bCnt = bCnt + 1 end
-        for _ in pairs(slice.baselineFluids or {}) do bCnt = bCnt + 1 end
-        self:drawText(91, ry, bCnt > 0 and string.format("%dNC", bCnt) or "-", bCnt > 0 and COLORS.cyan or COLORS.muted, rowBg)
-        self:drawText(96, ry, slice.learnedRate and string.format("%.1f/s", slice.learnedRate) or "--", COLORS.muted, rowBg)
-        self:drawText(105, ry, (sState.workScore or 0) > 0 and UI.formatEta(sState.etaSec) or "--", COLORS.yellow, rowBg)
-
-        self:addHitbox(3, ry, 158, ry, function() self.selectedColor = c end)
     end
 
     -- Selected Slice Inspector (y=27..48)
     local selC = self.selectedColor or 0
     local sel = pool.slices[selC]
-    local sci = Hardware.COLORS[selC]
+    if not sel then return end
+    local sci = Hardware.COLORS[selC % 16]
     self:drawFrame(2, 27, 158, 21, COLORS.border, COLORS.panelBg, "round")
-    self:drawText(4, 27, string.format(" ◈ INSPECTOR: Color %02d (%s) ", selC, sci.name), COLORS.accent, COLORS.panelBg)
+    self:drawText(4, 27, string.format(" ◈ INSPECTOR: NC %02d (%s) ", selC, sci.name), COLORS.accent, COLORS.panelBg)
 
-    local ix = self:drawButton(4, 29, "[Rename: " .. padOrTrunc(sel.label, 18) .. "]", COLORS.fg, COLORS.btnBg, function()
+    local ix = self:drawButton(4, 29, "[Rename: " .. padOrTrunc(sel.label, 16) .. "]", COLORS.fg, COLORS.btnBg, function()
         self:openTextPrompt("Slice Label (e.g. Circuit 1 / Pink Catalyst / Extruder Plate):", sel.label, function(v)
             if v and v ~= "" then
                 sel.label = v
-                self:save("Renamed slice C" .. selC .. " -> " .. v)
+                self:save("Renamed NC " .. selC .. " -> " .. v)
             end
         end)
     end) + 2
@@ -607,60 +691,80 @@ function UI:renderSlicesTab()
         local cur = 1
         for k, p in ipairs(Scheduler.PRIORITY_ORDER) do if p == sel.priority then cur = k break end end
         sel.priority = Scheduler.PRIORITY_ORDER[(cur % #Scheduler.PRIORITY_ORDER) + 1]
-        self:save("Priority C" .. selC .. " -> " .. sel.priority)
+        self:save("Priority NC " .. selC .. " -> " .. sel.priority)
     end) + 2
 
     ix = self:drawButton(ix, 29, sel.enabled ~= false and "[Enabled: ON]" or "[Enabled: OFF]",
         sel.enabled ~= false and COLORS.green or COLORS.red, COLORS.btnBg, function()
             sel.enabled = not (sel.enabled ~= false)
-            self:save("Slice C" .. selC .. " enabled -> " .. tostring(sel.enabled))
+            self:save("Slice NC " .. selC .. " enabled -> " .. tostring(sel.enabled))
         end) + 2
 
+    local nCh = #(pool.channels or {})
+    local pCh = math.max(1, math.min(nCh, self.selectedChIdx or 1))
+    if nCh > 1 then
+        ix = self:drawButton(ix, 29, "[Ch" .. pCh .. "]", COLORS.cyan, COLORS.btnBg, function()
+            self.selectedChIdx = (pCh % nCh) + 1
+        end) + 1
+    end
     ix = self:drawButton(ix, 29, "[Pulse 2s]", COLORS.yellow, COLORS.amberBg, function()
-        local okP, errP = Scheduler.triggerPulseTest(self.cfg, self.state, pool.id, selC, 2.0, self.state.lastStepSec or 0, self.comp)
+        local okP, errP = Scheduler.triggerPulseTest(self.cfg, self.state, pool.id, selC, 2.0, self.state.lastStepSec or 0, self.comp, pCh)
         if not okP then self.statusMsg = tostring(errP) end
     end) + 2
 
     local isForced = self.state.forceColorByPool and self.state.forceColorByPool[pool.id] == selC
-    ix = self:drawButton(ix, 29, isForced and "[Unforce Slice]" or "[Force Slice]", COLORS.cyan, COLORS.btnBg, function()
+    ix = self:drawButton(ix, 29, isForced and "[Unforce]" or "[Force]", COLORS.cyan, COLORS.btnBg, function()
         self.state.forceColorByPool[pool.id] = isForced and nil or selC
         self.state._forcePollNow = true
-        self:save(isForced and "Cleared force." or ("Forced Color " .. selC))
+        self:save(isForced and "Cleared force." or ("Forced NC " .. selC))
     end) + 2
 
     if sel.ifaceAddr then
         ix = self:drawButton(ix, 29, "[Calibrate NC]", COLORS.cyan, COLORS.btnBg, function()
             local okC, nI, nF = Hardware.calibrateBaseline(sel, { ignoreBuiltinNC = self.cfg.ignoreBuiltinNC }, self.comp)
             if okC then
-                self:save(string.format("Calibrated C%d baseline (%d custom items, %d fluids).", selC, nI or 0, nF or 0))
+                self:save(string.format("Calibrated NC%02d baseline (%d items, %d fluids).", selC, nI or 0, nF or 0))
             else
                 self.statusMsg = "Calibrate failed: " .. tostring(nI)
             end
         end) + 2
         self:drawButton(ix, 29, "[Unbind]", COLORS.red, COLORS.btnBg, function()
             sel.ifaceAddr = nil
-            self:save("Unbound Color " .. selC)
+            Scheduler.refreshSubscriptions(self.cfg, self.state, self.comp)
+            self:save("Unbound NC " .. selC)
         end)
     end
 
-    -- Bindable interface picker list (y=31..46)
-    self:drawText(4, 31, "Bind Full-Block ME Dual Interface (discovered subnets):", COLORS.muted, COLORS.panelBg)
+    -- Bindable interface picker list (y=31..44, paged 24 per page)
+    self:drawText(4, 31, string.format("Bind Full-Block ME Dual Interface (%d discovered):", #discIfs), COLORS.muted, COLORS.panelBg)
+    if #discIfs > 24 then
+        local maxPg = math.floor((#discIfs - 1) / 24)
+        self.ifacePage = math.max(0, math.min(maxPg, self.ifacePage or 0))
+        self:drawButton(60, 31, "[<Prev]", COLORS.cyan, COLORS.btnBg, function() self.ifacePage = math.max(0, self.ifacePage - 1) end)
+        self:drawButton(68, 31, "[Next>]", COLORS.cyan, COLORS.btnBg, function() self.ifacePage = math.min(maxPg, self.ifacePage + 1) end)
+    else
+        self.ifacePage = 0
+    end
+
     if #discIfs == 0 then
         self:drawText(4, 33, "No valid full-block me_interface discovered yet. Attach OC Adapter to a FULL-BLOCK Dual Interface and Rescan.", COLORS.yellow, COLORS.panelBg)
     else
         local usedElsewhere = {}
         for _, pl in ipairs(self.cfg.pools) do
-            for cc = 0, 15 do
+            for cc = 0, (pl.numSlices or 16) - 1 do
                 local a = pl.slices[cc] and pl.slices[cc].ifaceAddr
                 if a and not (pl.id == pool.id and cc == selC) then
-                    usedElsewhere[a] = string.format("P%d:C%d", pl.id, cc)
+                    usedElsewhere[a] = string.format("P%d:%02d", pl.id, cc)
                 end
             end
         end
-        for idx = 1, math.min(24, #discIfs) do
+        local startIdx = (self.ifacePage or 0) * 24 + 1
+        for k = 0, 23 do
+            local idx = startIdx + k
             local inf = discIfs[idx]
-            local colIdx = (idx - 1) % 3
-            local rowIdx = math.floor((idx - 1) / 3)
+            if not inf then break end
+            local colIdx = k % 3
+            local rowIdx = math.floor(k / 3)
             local bxIf = 4 + colIdx * 51
             local byIf = 33 + rowIdx
             local isBoundHere = (sel.ifaceAddr == inf.address)
@@ -674,7 +778,8 @@ function UI:renderSlicesTab()
                 isBoundHere and COLORS.darkGreen or COLORS.btnBg,
                 function()
                     sel.ifaceAddr = inf.address
-                    self:save(string.format("Bound Color %d -> %s", selC, inf.shortAddr))
+                    Scheduler.refreshSubscriptions(self.cfg, self.state, self.comp)
+                    self:save(string.format("Bound NC %02d -> %s", selC, inf.shortAddr))
                 end)
         end
     end
@@ -682,11 +787,11 @@ function UI:renderSlicesTab()
     self:drawButton(4, 46, "[Clear Learned Baselines]", COLORS.yellow, COLORS.btnBg, function()
         sel.baselineItems = {}
         sel.baselineFluids = {}
-        self:save("Cleared idle baseline on Color " .. selC)
+        self:save("Cleared idle baseline on NC " .. selC)
     end)
     self:drawButton(31, 46, "[Reset Rate]", COLORS.muted, COLORS.btnBg, function()
         sel.learnedRate = nil
-        self:save("Reset learned drain rate on Color " .. selC)
+        self:save("Reset learned drain rate on NC " .. selC)
     end)
 end
 
@@ -695,57 +800,142 @@ function UI:renderPoolsTab()
     local disc = self.state.discovery or {}
     local rsList = disc.redstones or {}
 
-    -- Left Card: Pool Management
+    -- Left Card: Pool & Multi-Channel Management
     self:drawFrame(2, 5, 78, 43, COLORS.border, COLORS.panelBg, "round")
-    self:drawText(4, 5, " ◈ BUNDLED MACHINE POOLS ", COLORS.accent, COLORS.panelBg)
+    self:drawText(4, 5, " ◈ POOLS & INPUT CHANNELS ", COLORS.accent, COLORS.panelBg)
     if pool then
-        self:drawButton(4, 7, "[Pool Name: " .. padOrTrunc(pool.name, 20) .. "]", COLORS.fg, COLORS.btnBg, function()
-            self:openTextPrompt("Pool Name (e.g. LCR Pool / Bender Bank):", pool.name, function(v)
+        self:drawButton(4, 7, "[Pool Name: " .. padOrTrunc(pool.name, 18) .. "]", COLORS.fg, COLORS.btnBg, function()
+            self:openTextPrompt("Pool Name (e.g. LCR Pool / Extruder Bank):", pool.name, function(v)
                 if v and v ~= "" then pool.name = v; self:save("Renamed pool -> " .. v) end
             end)
         end)
-        self:drawButton(40, 7, pool.enabled ~= false and "[Pool: ENABLED]" or "[Pool: DISABLED]",
+        self:drawButton(38, 7, pool.enabled ~= false and "[Pool: ON]" or "[Pool: OFF]",
             pool.enabled ~= false and COLORS.green or COLORS.red, COLORS.btnBg, function()
                 pool.enabled = not (pool.enabled ~= false)
                 self:save(pool.name .. " enabled -> " .. tostring(pool.enabled))
             end)
-
-        self:drawText(4, 10, "Bundled Side :", COLORS.muted, COLORS.panelBg)
-        self:drawButton(19, 10, "[" .. (Hardware.SIDE_NAMES[pool.side] or "?") .. "]", COLORS.cyan, COLORS.btnBg, function(step)
-            Hardware.setPoolOutputs(pool.rsAddr, pool.side, nil, self.comp)
-            pool.side = (pool.side + (step or 1) + 6) % 6
-            self:save(pool.name .. " Bundled Side -> " .. (Hardware.SIDE_NAMES[pool.side] or pool.side))
+        local nSlices = tonumber(pool.numSlices) or 16
+        self:drawButton(51, 7, string.format("[Capacity: %d NCs]", nSlices), COLORS.cyan, COLORS.btnBg, function()
+            pool.numSlices = (nSlices == 16) and 32 or 16
+            Scheduler.normalizeConfig(self.cfg)
+            self:save(pool.name .. " capacity -> " .. tostring(pool.numSlices) .. " NCs")
         end)
 
-        self:drawText(34, 10, "Policy :", COLORS.muted, COLORS.panelBg)
-        self:drawButton(43, 10, "[" .. tostring(pool.mode):upper() .. "]", COLORS.purple, COLORS.btnBg, function()
+        self:drawText(4, 9, "Policy:", COLORS.muted, COLORS.panelBg)
+        self:drawButton(12, 9, "[" .. tostring(pool.mode):upper() .. "]", COLORS.purple, COLORS.btnBg, function()
             local cur = 1
             for k, m in ipairs(Scheduler.POOL_MODES) do if m == pool.mode then cur = k break end end
             pool.mode = Scheduler.POOL_MODES[(cur % #Scheduler.POOL_MODES) + 1]
             self:save(pool.name .. " mode -> " .. pool.mode)
         end)
+        self:drawText(29, 9, "Channels:", COLORS.muted, COLORS.panelBg)
+        self:drawButton(39, 9, "[+Ch]", COLORS.green, COLORS.btnBg, function()
+            local nC = #(pool.channels or {})
+            if nC < 4 then
+                pool.channels[nC + 1] = Scheduler.newChannel(nC + 1, pool.rsAddr, ((pool.side or 2) + nC) % 6)
+                self.selectedChIdx = nC + 1
+                self:save(string.format("Added Input Channel %d on %s.", nC + 1, pool.name))
+            end
+        end)
+        self:drawButton(46, 9, "[-Ch]", COLORS.red, COLORS.btnBg, function()
+            local nC = #(pool.channels or {})
+            if nC > 1 then
+                Hardware.zeroAllManagedPools(self.cfg, self.comp, self.state)
+                table.remove(pool.channels, nC)
+                self.selectedChIdx = math.min(self.selectedChIdx, #pool.channels)
+                self:save(string.format("Removed Input Channel %d from %s.", nC, pool.name))
+            end
+        end)
 
-        self:drawText(4, 13, "Redstone I/O :", COLORS.muted, COLORS.panelBg)
-        if #rsList == 0 then
-            self:drawText(19, 13, "None discovered (connect Redstone I/O)", COLORS.red, COLORS.panelBg)
-        else
-            for i = 1, math.min(6, #rsList) do
-                local rs = rsList[i]
-                local act = (pool.rsAddr == rs.address)
-                self:drawButton(19, 12 + i, string.format("[%s %s (%s)]",
-                    act and "✓" or " ", rs.shortAddr, rs.bundled and "Bundled" or "No-Bundle"),
-                    act and COLORS.green or (rs.bundled and COLORS.fg or COLORS.red),
-                    act and COLORS.darkGreen or COLORS.btnBg,
-                    function()
-                        pool.rsAddr = rs.address
-                        self:save(pool.name .. " Redstone -> " .. rs.shortAddr)
-                    end)
+        -- Channel List (y=11..16)
+        self:drawText(4, 11, "Input Channels (GTNH Hatch Priority: Ch1 High -> ChK Low):", COLORS.muted, COLORS.panelBg)
+        for ci, ch in ipairs(pool.channels or {}) do
+            local ryC = 11 + ci
+            local sel = (ci == self.selectedChIdx)
+            local b1 = ch.banks and ch.banks[1] or {}
+            local b2 = ch.banks and ch.banks[2] or {}
+            local rowTxt = string.format("%s Ch%d [%-9s] %-14s B1:%s(%s) B2:%s(%s)",
+                sel and ">" or " ", ci, padOrTrunc(ch.name, 9), padOrTrunc(ch.gtColor, 14),
+                Hardware.shortAddr(b1.rsAddr), Hardware.SIDE_NAMES[b1.side] or "?",
+                Hardware.shortAddr(b2.rsAddr), Hardware.SIDE_NAMES[b2.side] or "?")
+            self:drawButton(4, ryC, padOrTrunc(rowTxt, 74),
+                sel and COLORS.fg or (ch.enabled ~= false and COLORS.cyan or COLORS.muted),
+                sel and COLORS.selectedBg or COLORS.panelBg,
+                function() self.selectedChIdx = ci end)
+        end
+
+        -- Selected Channel Editor (y=18..43)
+        local ch = pool.channels and pool.channels[self.selectedChIdx]
+        if ch then
+            local ci = self.selectedChIdx
+            self:drawText(4, 18, string.rep("─", 74), COLORS.border, COLORS.panelBg)
+            self:drawText(4, 19, string.format("Editing Input Channel %d (%s):", ci, ch.gtColor), COLORS.accent, COLORS.panelBg)
+            self:drawButton(4, 21, "[Name: " .. padOrTrunc(ch.name, 12) .. "]", COLORS.fg, COLORS.btnBg, function()
+                self:openTextPrompt("Channel Name (e.g. Ch1 High / Express):", ch.name, function(v)
+                    if v and v ~= "" then ch.name = v; self:save("Renamed Ch" .. ci .. " -> " .. v) end
+                end)
+            end)
+            self:drawButton(27, 21, ch.enabled ~= false and "[Ch: ENABLED]" or "[Ch: OFF]",
+                ch.enabled ~= false and COLORS.green or COLORS.red, COLORS.btnBg, function()
+                    ch.enabled = not (ch.enabled ~= false)
+                    self:save(string.format("%s Ch%d -> %s", pool.name, ci, tostring(ch.enabled)))
+                end)
+            self:drawButton(43, 21, "[Dye: " .. padOrTrunc(ch.gtColor, 16) .. "]", COLORS.cyan, COLORS.btnBg, function()
+                self:openTextPrompt("GT Hatch Dye Label (Black=1, Red=2, Blue=5, Orange=15):", ch.gtColor, function(v)
+                    if v and v ~= "" then ch.gtColor = v; self:save("Updated GT Dye label.") end
+                end)
+            end)
+
+            local b1 = ch.banks[1]
+            self:drawText(4, 24, "Bank A (NC 00-15) Side:", COLORS.muted, COLORS.panelBg)
+            self:drawButton(28, 24, "[" .. (Hardware.SIDE_NAMES[b1.side] or "?") .. "]", COLORS.cyan, COLORS.btnBg, function(step)
+                Hardware.zeroAllManagedPools(self.cfg, self.comp, self.state)
+                b1.side = (b1.side + (step or 1) + 6) % 6
+                if ci == 1 then pool.side = b1.side end
+                self:save(string.format("Ch%d Bank A Side -> %s", ci, Hardware.SIDE_NAMES[b1.side] or b1.side))
+            end)
+
+            local b2 = ch.banks[2]
+            self:drawText(4, 26, "Bank B (NC 16-31) Side:", COLORS.muted, COLORS.panelBg)
+            self:drawButton(28, 26, "[" .. (Hardware.SIDE_NAMES[b2.side] or "?") .. "]", COLORS.cyan, COLORS.btnBg, function(step)
+                Hardware.zeroAllManagedPools(self.cfg, self.comp, self.state)
+                b2.side = (b2.side + (step or 1) + 6) % 6
+                self:save(string.format("Ch%d Bank B Side -> %s", ci, Hardware.SIDE_NAMES[b2.side] or b2.side))
+            end)
+            local b2Btn = string.format("[BankB RS: %s]", Hardware.shortAddr(b2.rsAddr))
+            self:drawButton(39, 26, b2Btn, b2.rsAddr and COLORS.green or COLORS.muted, COLORS.btnBg, function()
+                if #rsList == 0 then return end
+                local nextIdx = 1
+                for idx, rs in ipairs(rsList) do
+                    if rs.address == b2.rsAddr then nextIdx = idx + 1 break end
+                end
+                b2.rsAddr = (nextIdx <= #rsList) and rsList[nextIdx].address or nil
+                self:save(string.format("Ch%d Bank B RS -> %s", ci, Hardware.shortAddr(b2.rsAddr)))
+            end)
+
+            self:drawText(4, 29, "Bank A Redstone I/O:", COLORS.muted, COLORS.panelBg)
+            if #rsList == 0 then
+                self:drawText(26, 29, "None discovered (connect Redstone I/O)", COLORS.red, COLORS.panelBg)
+            else
+                for i = 1, math.min(6, #rsList) do
+                    local rs = rsList[i]
+                    local act = (b1.rsAddr == rs.address)
+                    self:drawButton(26, 28 + i, string.format("[%s %s (%s)]",
+                        act and "✓" or " ", rs.shortAddr, rs.bundled and "Bundled" or "No-Bundle"),
+                        act and COLORS.green or (rs.bundled and COLORS.fg or COLORS.red),
+                        act and COLORS.darkGreen or COLORS.btnBg,
+                        function()
+                            b1.rsAddr = rs.address
+                            if ci == 1 then pool.rsAddr = rs.address end
+                            self:save(string.format("%s Ch%d Bank A RS -> %s", pool.name, ci, rs.shortAddr))
+                        end)
+                end
             end
         end
 
         if #self.cfg.pools > 1 then
             self:drawButton(4, 44, "[Delete Selected Pool]", COLORS.red, COLORS.darkRed, function()
-                Hardware.setPoolOutputs(pool.rsAddr, pool.side, nil, self.comp)
+                Hardware.zeroAllManagedPools(self.cfg, self.comp, self.state)
                 table.remove(self.cfg.pools, poolIdx)
                 self.selectedPoolIdx = math.max(1, poolIdx - 1)
                 self:save("Deleted pool.")
@@ -753,23 +943,26 @@ function UI:renderPoolsTab()
         end
     end
 
-    -- Right Card: Global Scheduler Tuning
+    -- Right Card: Global Scheduler & MLFQ Tuning
     self:drawFrame(82, 5, 78, 43, COLORS.border, COLORS.panelBg, "round")
-    self:drawText(84, 5, " ◈ GLOBAL SCHEDULER TUNING ", COLORS.accent, COLORS.panelBg)
+    self:drawText(84, 5, " ◈ GLOBAL MLFQ & SCHEDULER TUNING ", COLORS.accent, COLORS.panelBg)
 
     local rows = {
-        { key = "minHoldSec",        label = "Min Hold Quantum (s)",  step = 5,    min = 1,   max = 600, fmt = "%.0fs" },
-        { key = "settleSec",         label = "Settle Guard All-OFF",  step = 0.25, min = 0,   max = 30,  fmt = "%.2fs" },
-        { key = "preemptRatio",      label = "SRTF Preempt Ratio",    step = 0.05, min = 0.05,max = 0.95,fmt = "%.2fx" },
-        { key = "agingPerMin",       label = "Wait Aging / Minute",   step = 0.05, min = 0,   max = 0.75,fmt = "%.2f" },
-        { key = "stallTimeoutSec",   label = "Stall Yield Timeout",   step = 15,   min = 5,   max = 3600,fmt = "%.0fs" },
-        { key = "retryStalledSec",   label = "Retry Stalled Interval",step = 15,   min = 5,   max = 3600,fmt = "%.0fs" },
-        { key = "pollIntervalSec",   label = "Poll Interval (s)",     step = 0.25, min = 0.1, max = 10,  fmt = "%.2fs" },
-        { key = "emptyConfirmPolls", label = "Empty Confirm Polls",   step = 1,    min = 1,   max = 10,  fmt = "%.0f" },
-        { key = "defaultProbeRate",  label = "Initial Probe Rate u/s",step = 2,    min = 0.5, max = 500, fmt = "%.1f" },
+        { key = "probeWindowSec",      label = "MLFQ Probe Window (s)",   step = 0.25, min = 0.25, max = 30,   fmt = "%.2fs" },
+        { key = "fastThresholdSec",    label = "Known Fast Thresh (s)",   step = 0.5,  min = 0.5,  max = 60,   fmt = "%.1fs" },
+        { key = "probePreemptHoldSec", label = "Probe Preempt Hold (s)",  step = 0.25, min = 0.25, max = 60,   fmt = "%.2fs" },
+        { key = "minHoldSec",          label = "Min Hold Quantum (s)",    step = 5,    min = 0.5,  max = 600,  fmt = "%.1fs" },
+        { key = "settleSec",           label = "Settle Guard All-OFF",    step = 0.25, min = 0,    max = 30,   fmt = "%.2fs" },
+        { key = "preemptRatio",        label = "SRTF Preempt Ratio",      step = 0.05, min = 0.05, max = 0.95, fmt = "%.2fx" },
+        { key = "agingPerMin",         label = "Wait Aging / Minute",     step = 0.05, min = 0,    max = 0.75, fmt = "%.2f" },
+        { key = "stallTimeoutSec",     label = "Stall Yield Timeout",     step = 15,   min = 5,    max = 3600, fmt = "%.0fs" },
+        { key = "idlePollSec",         label = "Idle Sleep Fallback (s)", step = 5,    min = 2,    max = 300,  fmt = "%.0fs" },
+        { key = "pollIntervalSec",     label = "Active Poll Interval",    step = 0.25, min = 0.1,  max = 10,   fmt = "%.2fs" },
+        { key = "emptyConfirmPolls",   label = "Empty Confirm Polls",     step = 1,    min = 1,    max = 10,   fmt = "%.0f" },
+        { key = "defaultProbeRate",    label = "Initial Probe Rate u/s",  step = 2,    min = 0.5,  max = 500,  fmt = "%.1f" },
     }
     for i, r in ipairs(rows) do
-        local ry = 8 + (i - 1) * 3
+        local ry = 8 + (i - 1) * 2
         self:drawText(85, ry, padOrTrunc(r.label, 25), COLORS.fg, COLORS.panelBg)
         self:drawText(112, ry, string.format(r.fmt, tonumber(self.cfg[r.key]) or 0), COLORS.cyan, COLORS.panelBg)
         self:drawButton(124, ry, "[-]", COLORS.yellow, COLORS.btnBg, function()
@@ -782,19 +975,27 @@ function UI:renderPoolsTab()
         end)
     end
 
-    self:drawText(85, 36, "Ignore Built-in NCs:", COLORS.muted, COLORS.panelBg)
-    self:drawButton(112, 36, self.cfg.ignoreBuiltinNC ~= false and "[ON (Circuits/Molds/Lenses)]" or "[OFF (Baseline Only)]",
+    self:drawText(85, 35, "Ignore Built-in NCs:", COLORS.muted, COLORS.panelBg)
+    self:drawButton(112, 35, self.cfg.ignoreBuiltinNC ~= false and "[ON (Circuits/Molds/Lenses)]" or "[OFF (Baseline Only)]",
         self.cfg.ignoreBuiltinNC ~= false and COLORS.green or COLORS.yellow, COLORS.btnBg, function()
             self.cfg.ignoreBuiltinNC = not (self.cfg.ignoreBuiltinNC ~= false)
             self:save("Ignore Built-in GTNH NCs -> " .. tostring(self.cfg.ignoreBuiltinNC))
         end)
 
-    self:drawText(85, 39, "Log Verbosity      :", COLORS.muted, COLORS.panelBg)
-    self:drawButton(112, 39, "[" .. tostring(self.cfg.logLevel):upper() .. "]", COLORS.cyan, COLORS.btnBg, function()
+    self:drawText(85, 38, "Log Verbosity      :", COLORS.muted, COLORS.panelBg)
+    self:drawButton(112, 38, "[" .. tostring(self.cfg.logLevel):upper() .. "]", COLORS.cyan, COLORS.btnBg, function()
         local cur = 2
         for k, lv in ipairs(LOG_LEVELS) do if lv == self.cfg.logLevel then cur = k break end end
         self.cfg.logLevel = LOG_LEVELS[(cur % #LOG_LEVELS) + 1]
         self:save("Log verbosity -> " .. self.cfg.logLevel)
+    end)
+
+    local cacheCnt = #(self.state.recipeRateOrder or {})
+    self:drawText(85, 41, string.format("Recipe Speed Cache : %d / 128", cacheCnt), COLORS.muted, COLORS.panelBg)
+    self:drawButton(124, 41, "[Clear Cache]", COLORS.yellow, COLORS.btnBg, function()
+        self.state.recipeRates = {}
+        self.state.recipeRateOrder = {}
+        self:save("Cleared learned recipe speed cache.")
     end)
 end
 
@@ -812,18 +1013,20 @@ function UI:renderSetupTab()
         self:addHitbox(bx, by, bx + bw - 1, by + 2, fn)
     end
 
+    local scanCh = pool and math.max(1, math.min(#(pool.channels or {}), self.setupChIdx or 1)) or 1
     drawBigAction(7, 5, 34, "↻  RESCAN HARDWARE", COLORS.cyan, COLORS.cyan, COLORS.btnBg, function()
         Scheduler.syncHardware(self.cfg, self.state, self.comp)
         self:save("Rescanned Redstone I/O and Subnet Interfaces.")
     end)
-    drawBigAction(45, 5, 34, "⚡  AUTO-SCAN TRUNK", COLORS.green, COLORS.green, COLORS.btnBg, function()
+    drawBigAction(45, 5, 34, string.format("⚡ AUTO-SCAN CH%d TRUNK", scanCh), COLORS.green, COLORS.green, COLORS.btnBg, function()
         if not pool then return end
         self.cfg.armed = false
         local addrs = {}
         for _, it in ipairs(disc.interfaces or {}) do addrs[#addrs + 1] = it.address end
-        local res = Hardware.autoScanTrunkPool(pool, addrs, { pulseSec = 0.25 }, self.comp)
+        local res = Hardware.autoScanTrunkPool(pool, addrs, { pulseSec = 0.25, channelIdx = scanCh }, self.comp)
         if res.ok then
-            self:save(string.format("Auto-Scan bound %d slice(s) on %s.", res.boundCount or 0, pool.name))
+            Scheduler.refreshSubscriptions(self.cfg, self.state, self.comp)
+            self:save(string.format("Auto-Scan Ch%d bound %d slice(s) on %s.", scanCh, res.boundCount or 0, pool.name))
         else
             self.statusMsg = "Auto-Scan error: " .. tostring(res.error)
         end
@@ -841,7 +1044,7 @@ function UI:renderSetupTab()
     drawBigAction(121, 5, 34, "⊕  CALIBRATE IDLE NCs", COLORS.cyan, COLORS.cyan, COLORS.btnBg, function()
         if not pool then return end
         local nOk = 0
-        for c = 0, 15 do
+        for c = 0, (pool.numSlices or 16) - 1 do
             local s = pool.slices[c]
             if s and s.ifaceAddr then
                 if Hardware.calibrateBaseline(s, { ignoreBuiltinNC = self.cfg.ignoreBuiltinNC }, self.comp) then
@@ -854,7 +1057,7 @@ function UI:renderSetupTab()
 
     -- Hardware Card (left) & Auto-Scan Guide (right)
     self:drawFrame(2, 9, 78, 16, COLORS.border, COLORS.panelBg, "round")
-    self:drawText(4, 9, " ◈ DISCOVERY & EXTERNAL LINK ", COLORS.accent, COLORS.panelBg)
+    self:drawText(4, 9, " ◈ DISCOVERY, EVENTS & LINK ", COLORS.accent, COLORS.panelBg)
     self:drawButton(57, 9, isStandalone and "[Ext:Standalone]" or "[Ext:Mesh/Auto ]",
         isStandalone and COLORS.yellow or COLORS.cyan,
         isStandalone and COLORS.amberBg or COLORS.btnBg,
@@ -863,70 +1066,71 @@ function UI:renderSetupTab()
             self:save("External Link -> " .. (self.cfg.extLinkMode == "off" and "Standalone" or "Mesh/Auto"))
         end)
 
-    self:drawText(4, 11, string.format("Bundled Redstone I/O : %d found", #(disc.redstones or {})), COLORS.fg, COLORS.panelBg)
+    self:drawText(4, 11, string.format("Bundled Redstone I/O : %d found (96 wires/block)", #(disc.redstones or {})), COLORS.fg, COLORS.panelBg)
     self:drawText(4, 13, string.format("Full-Block Dual IFs  : %d valid", #(disc.interfaces or {})), COLORS.green, COLORS.panelBg)
     self:drawButton(44, 13, "[Auto-Bind Sequential]", COLORS.cyan, COLORS.btnBg, function()
         if not pool then return end
         local list = disc.interfaces or {}
         local bound = 0
-        for i = 1, math.min(16, #list) do
+        for i = 1, math.min(pool.numSlices or 16, #list) do
             pool.slices[i - 1].ifaceAddr = list[i].address
             bound = bound + 1
         end
-        self:save(string.format("Sequentially bound %d interface(s) -> Color 0..%d.", bound, math.max(0, bound - 1)))
+        Scheduler.refreshSubscriptions(self.cfg, self.state, self.comp)
+        self:save(string.format("Sequentially bound %d interface(s) -> NC 00..%02d.", bound, math.max(0, bound - 1)))
     end)
 
-    self:drawText(4, 15, string.format("Wireless Modem/Tunnel: %s",
+    local subStatus = self.state._allSubscribed and "ACTIVE (GTNH 2.9 Push Events -> 0-tick Idle!)" or "Polling Fallback (bind event-capable IFs)"
+    self:drawText(4, 15, padOrTrunc("Event Subscriptions  : " .. subStatus, 74), self.state._allSubscribed and COLORS.green or COLORS.yellow, COLORS.panelBg)
+
+    self:drawText(4, 17, string.format("Wireless Modem/Tunnel: %s",
         disc.hasModem and (disc.hasWireless and "Wireless (port 4205)" or "Wired Modem") or (disc.hasTunnel and "Linked Card" or "None (Standalone OK)")),
         COLORS.muted, COLORS.panelBg)
 
+    if pool and #(pool.channels or {}) > 1 then
+        self:drawButton(4, 19, string.format("[Scan Channel: Ch%d (Click to cycle)]", scanCh), COLORS.cyan, COLORS.btnBg, function()
+            self.setupChIdx = (scanCh % #(pool.channels or {})) + 1
+        end)
+    end
+
     local warns = disc.partWarnings or {}
     if #warns > 0 then
-        self:drawText(4, 17, string.format("! WARNING: %d Flat Cable-Part ME Interface(s) detected!", #warns), COLORS.yellow, COLORS.panelBg)
-        for wi = 1, math.min(3, #warns) do
-            self:drawText(4, 17 + wi, padOrTrunc(warns[wi].message, 74), COLORS.yellow, COLORS.panelBg)
+        self:drawText(4, 21, string.format("! WARNING: %d Flat Cable-Part ME Interface(s) detected!", #warns), COLORS.yellow, COLORS.panelBg)
+        for wi = 1, math.min(2, #warns) do
+            self:drawText(4, 21 + wi, padOrTrunc(warns[wi].message, 74), COLORS.yellow, COLORS.panelBg)
         end
     else
-        self:drawText(4, 18, "✓ All discovered ME Interfaces expose NetworkControl (full-block OK).", COLORS.green, COLORS.panelBg)
+        self:drawText(4, 22, "✓ All discovered ME Interfaces expose NetworkControl (full-block OK).", COLORS.green, COLORS.panelBg)
     end
 
     self:drawFrame(82, 9, 78, 16, COLORS.border, COLORS.panelBg, "round")
-    self:drawText(84, 9, " ◈ 4-SECOND TRUNK AUTO-PAIRING GUIDE ", COLORS.accent, COLORS.panelBg)
-    self:drawText(84, 11, "1. Put 1 Marker item (e.g. Cobblestone in Chest+StorageBus) on Machine Trunk.", COLORS.fg, COLORS.panelBg)
-    self:drawText(84, 13, "2. Click [AUTO-SCAN TRUNK] above. OC forces all colors OFF, pulses Color 0..15", COLORS.fg, COLORS.panelBg)
-    self:drawText(84, 14, "   one by one, and binds whichever subnet suddenly sees the marker item!", COLORS.fg, COLORS.panelBg)
-    self:drawText(84, 16, "3. Remove the marker chest (or click [Guided Drop] & drop 1 item per slice).", COLORS.fg, COLORS.panelBg)
-    self:drawText(84, 18, "4. Click [CALIBRATE IDLE NCs] if any subnet holds permanent GT++ shapes,", COLORS.fg, COLORS.panelBg)
-    self:drawText(84, 19, "   catalysts, petri dishes, or non-consumed fluids inside its Ingredient Drive.", COLORS.fg, COLORS.panelBg)
+    self:drawText(84, 9, " ◈ TRUNK AUTO-PAIRING & SAME-COLOR RULE ", COLORS.accent, COLORS.panelBg)
+    self:drawText(84, 11, "1. Put 1 Marker item (Cobblestone in Chest+StorageBus) on Ch# Cable.", COLORS.fg, COLORS.panelBg)
+    self:drawText(84, 13, "2. Click [AUTO-SCAN CH# TRUNK]. OC sweeps NC 00..15/31 & binds matches.", COLORS.fg, COLORS.panelBg)
+    self:drawText(84, 15, "3. Multi-Channel: Use SAME Bundled Color #k for NC #k on every Channel!", COLORS.cyan, COLORS.panelBg)
+    self:drawText(84, 17, "   e.g. Ch1=North (Black Bus), Ch2=South (Blue Bus). Never cross-wire!", COLORS.fg, COLORS.panelBg)
+    self:drawText(84, 19, "4. Click [CALIBRATE IDLE NCs] only if any idle NC lives in a subnet drive.", COLORS.fg, COLORS.panelBg)
+    self:drawText(84, 21, "   Recommended: put NCs behind the Toggle Bus on Extract-Only buses!", COLORS.muted, COLORS.panelBg)
 
-    -- Wiring Topologies Comparison (bottom)
+    -- Wiring Topology (bottom)
     self:drawFrame(2, 26, 158, 22, COLORS.border, COLORS.panelBg, "round")
-    self:drawText(4, 26, " ◈ RECOMMENDED GTNH TOPOLOGIES (ZERO MACHINE MFUs REQUIRED) ", COLORS.accent, COLORS.panelBg)
-    local leftDiag = {
-        "[A] DUAL-TRUNK ARBITRARY-NC (GT++ Shapes / Catalysts / Petri Dishes / Fluid NCs)",
-        "  Mainnet Pattern Dual IF (Adv Blocking Card ON + Allow Insert Same Recipe)",
-        "     |-> [Full-Block Subnet Dual IF] <-> Quartz Fiber 24/7 + ME Drive (0 NC inside!)",
-        "           |-- Bundled Color k --> [Toggle Bus #k-Ing] --> MACHINE INGREDIENT TRUNK",
-        "           `-- Bundled Color k --> [Toggle Bus #k-NC ] --> MACHINE NC TRUNK",
-        "  * Put non-consumed NC #k behind Toggle Bus #k-NC (1ch Storage Bus + Chest).",
-        "  * Set Multiblocks to Input Separation: OFF (safe: 1 active color + Settle Guard!).",
-        "  * Ingredient Subnet #k NEVER sees NC #k -> Adv Blocking Card works 100%!",
+    self:drawText(4, 26, " ◈ MULTI-CHANNEL COLORED-HATCH TOPOLOGY (0-TICK PUSH + 1-TICK SWITCH) ", COLORS.accent, COLORS.panelBg)
+    local diag = {
+        "ALWAYS-ON NC WAITING ROOM #k (2ch ad-hoc subnet, NO ME Controller, 0 NCs inside -> Adv Blocking Card works for ALL GTNH recipes!):",
+        "  [Mainnet Pattern Dual IF] (Adv Blocking Card ON + Allow Insert Same Recipe)",
+        "     `-> [Full-Block Subnet Dual IF #k] <-> Quartz Fiber 24/7 + [ME Drive: Item Cell + Fluid Cell]   <-- OC Adapter (Push EvSub!)",
+        "            |-- Face 1: Extract-Only Storage Buses + [Chest/Holder NC #k] --> [Toggle Bus Ch1 Color k] --> CH1 TRUNK (Black, Prio 1)",
+        "            `-- Face 2: Extract-Only Storage Buses + [Chest/Holder NC #k] --> [Toggle Bus Ch2 Color k] --> CH2 TRUNK (Blue, Prio 5)",
+        "",
+        "MACHINES (Adv. Stocking Input Bus + Adv. Stocking Input Hatch, Auto-Pull = ON, Refresh = 1-2 ticks, Input Separation = ON):",
+        "  * Spray CH1 Bus+Hatch BLACK (checked 1st by GTNH!) -> Fast PROBE jobs always land on Ch1 with 0s interruption.",
+        "  * Optional CH2: Spray CH2 Bus+Hatch BLUE (checked 5th) -> OC demotes long BULK jobs onto Ch2, leaving Ch1 IDLE & pre-settled!",
+        "  * In-flight machines NEVER fail or lose items when a Toggle Bus switches: Stocking inputs extract atomically on recipe start.",
+        "  * GT++ Extruder Shapes, Catalysts, Petri Dishes & Data Sticks work 100% natively because NC #k sits on the Toggle Bus trunk side.",
     }
-    local rightDiag = {
-        "[B] SINGLE-TRUNK CIRCUIT/MOLD (Standard GT Circuits, Molds, Extruder Shapes, Lenses)",
-        "  Mainnet Pattern Dual IF (Adv Blocking Card ON + Allow Insert Same Recipe)",
-        "     |-> [Full-Block Subnet Dual IF] <-> Quartz Fiber + ME Drive (Cell + Circuit #k)",
-        "           `-- Bundled Color k --> [ME Toggle Bus #k] --> SHARED MACHINE TRUNK",
-        "                 `-> Machines: Adv. Stocking Bus + Adv. Stocking Hatch (autoPull=ON)",
-        "  * Use a FULL-BLOCK ME Dual Interface for OC Adapter (cable-part lacks AE2 API!).",
-        "  * Only OC touches: 1 Bundled Redstone I/O + each Subnet's Full-Block Dual IF.",
-    }
-    for i, line in ipairs(leftDiag) do
-        self:drawText(4, 27 + i, padOrTrunc(line, 152), (i == 1) and COLORS.green or COLORS.fg, COLORS.panelBg)
-    end
-    self:drawText(4, 37, string.rep("─", 154), COLORS.border, COLORS.panelBg)
-    for i, line in ipairs(rightDiag) do
-        self:drawText(4, 38 + i, padOrTrunc(line, 152), (i == 1) and COLORS.cyan or COLORS.muted, COLORS.panelBg)
+    for i, line in ipairs(diag) do
+        local col = (i == 1 or i == 7) and COLORS.green or ((i >= 8) and COLORS.cyan or COLORS.fg)
+        self:drawText(4, 28 + i, padOrTrunc(line, 154), col, COLORS.panelBg)
     end
 end
 
@@ -1051,12 +1255,15 @@ function UI:handleKeyDown(char, code)
     elseif code == 15 or char == 9 then self.tab = (self.tab % 4) + 1
     elseif char == 32 then
         self.cfg.armed = not self.cfg.armed
-        if not self.cfg.armed then Scheduler.allOff(self.cfg, self.state, nil, self.comp) end
+        if not self.cfg.armed then Scheduler.allOff(self.cfg, self.state, nil, self.comp)
+        else self.state._forcePollNow = true end
         self:save(self.cfg.armed and "Armed." or "Paused (all OFF).")
     elseif char == string.byte("l") or char == string.byte("L") then
         self.logModalActive = true; self.logModalScroll = 0
     elseif char == string.byte("r") or char == string.byte("R") then
         Scheduler.syncHardware(self.cfg, self.state, self.comp)
+        self.state._forcePollNow = true
+        self.state._forceFullScan = true
         self:save("Rescanned hardware.")
     elseif char == string.byte("q") or char == string.byte("Q") then
         Scheduler.allOff(self.cfg, self.state, nil, self.comp)

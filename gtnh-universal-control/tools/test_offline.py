@@ -409,6 +409,7 @@ local component = require("component")
 local computer = require("computer")
 local serialization = require("serialization")
 local Hardware = require("lib.hardware")
+local Policy = require("lib.policy")
 local Scheduler = require("lib.scheduler")
 local UI = require("lib.ui")
 
@@ -470,7 +471,7 @@ end
 -- =========================================================================
 -- TEST 1: Syntax & Module Load Verification (collectgarbage == nil)
 -- =========================================================================
-for _, rel in ipairs({ "install.lua", "main.lua", "lib/hardware.lua", "lib/scheduler.lua", "lib/ui.lua" }) do
+for _, rel in ipairs({ "install.lua", "main.lua", "lib/hardware.lua", "lib/policy.lua", "lib/scheduler.lua", "lib/ui.lua" }) do
     local ch, err = loadfile(__UNIV_ROOT .. "/" .. rel)
     assert(ch, "Syntax error in " .. rel .. ": " .. tostring(err))
 end
@@ -532,6 +533,7 @@ cfg.minHoldSec = 15.0
 cfg.settleSec = 1.0
 cfg.emptyConfirmPolls = 2
 cfg.preemptRatio = 0.35
+cfg.pools[1].mode = "srtf"
 cfg.pools[1].rsAddr = "rs-main-001"
 cfg.pools[1].side = 2
 cfg.pools[1].slices[0].ifaceAddr = "if-screw-000"
@@ -714,14 +716,278 @@ ui:handleTouch(30, 1, 0)
 assertEq(cfg.armed, false, "touching [ARMED ] disarms cleanly")
 ui:render()
 
+-- Render Multi-Channel & 32-NC Bank view too so every glyph renders into __RENDERED_CELL_CPS
+cfg.pools[1].numSlices = 32
+Scheduler.normalizeConfig(cfg)
+cfg.pools[1].channels[2] = Scheduler.newChannel(2, "rs-main-001", 3)
+ui.sliceBank = 1
+for t = 1, 4 do ui.tab = t; ui:render() end
+ui.sliceBank = 0
+
 -- CLI --check and --off test
 package.loaded["lib.hardware"] = Hardware
+package.loaded["lib.policy"] = Policy
 local mainChunk = assert(loadfile(__UNIV_ROOT .. "/main.lua"))
 mainChunk("--check")
 mainChunk("--off")
 
+-- =========================================================================
+-- TEST 11: GTNH 2.9 Push Subscriptions, 0-Scan Idle & Multi-Stack Delta Varargs
+-- =========================================================================
+component._reset()
+local evScans = { a = 0, b = 0 }
+local evItemsA, evFluidsA = {}, {}
+local evItemsB, evFluidsB = {}, {}
+local function makeSubIF(key, itemsTbl, fluidsTbl)
+    local subI, subF = false, false
+    return {
+        getItemsInNetwork = function()
+            evScans[key] = evScans[key] + 1
+            return itemsTbl
+        end,
+        getFluidsInNetwork = function() return fluidsTbl end,
+        setItemEventSubscription = function(v) subI = (v == true) return nil end,
+        setFluidEventSubscription = function(v) subF = (v == true) return nil end,
+        isItemEventSubscription = function() return subI end,
+        isFluidEventSubscription = function() return subF end,
+    }
+end
+local rsEv, sidesEv = makeBundledRS()
+component._register("rs-ev", "redstone", rsEv)
+component._register("if-ev-a", "me_interface", makeSubIF("a", evItemsA, evFluidsA))
+component._register("if-ev-b", "me_interface", makeSubIF("b", evItemsB, evFluidsB))
+
+local evCfg = Scheduler.defaultConfig()
+evCfg.armed = true
+evCfg.idlePollSec = 30.0
+evCfg.pools[1].rsAddr = "rs-ev"
+evCfg.pools[1].side = 2
+evCfg.pools[1].slices[0].ifaceAddr = "if-ev-a"
+evCfg.pools[1].slices[1].ifaceAddr = "if-ev-b"
+
+local evState = Scheduler.newState()
+Scheduler.syncHardware(evCfg, evState)
+assertEq(evState._allSubscribed, true, "All bound interfaces subscribed via GTNH 2.9 EventSubscription")
+
+-- Initial seed scan at t=0.0
+Scheduler.step(evCfg, evState, 0.0)
+assertEq(evScans.a, 1, "Initial seed scan A = 1")
+assertEq(evScans.b, 1, "Initial seed scan B = 1")
+assertEq(Scheduler.nextWakeupDelay(evCfg, evState, 0.0), 30.0, "Idle subscribed sleeps idlePollSec (30s)")
+
+-- Idle ticks t=1..10 must execute ZERO getItemsInNetwork scans!
+for t = 1, 10 do
+    Scheduler.step(evCfg, evState, t * 1.0)
+end
+assertEq(evScans.a, 1, "0 scans on idle subscribed slice A")
+assertEq(evScans.b, 1, "0 scans on idle subscribed slice B")
+
+-- Push 6 distinct item stacks + 2 fluids via incremental delta events!
+local batch6 = {
+    { name = "gt:item1", damage = 0, size = 4, label = "Item 1" },
+    { name = "gt:item2", damage = 1, size = 8, label = "Item 2" },
+    { name = "gt:item3", damage = 2, size = 12, label = "Item 3" },
+    { name = "gt:item4", damage = 3, size = 16, label = "Item 4" },
+    { name = "gt:item5", damage = 4, size = 20, label = "Item 5" },
+    { name = "gt:item6", damage = 5, size = 40, label = "Item 6" },
+}
+for i = 1, #batch6 do evItemsA[i] = { name = batch6[i].name, damage = batch6[i].damage, size = batch6[i].size, label = batch6[i].label } end
+evFluidsA[1] = { name = "oxygen", amount = 4000, label = "Oxygen" }
+evFluidsA[2] = { name = "nitrogen", amount = 2000, label = "Nitrogen" }
+
+assert(Scheduler.handleNetworkEvent(evCfg, evState, "network_item_changed", "if-ev-a", batch6, 10.2), "Handled 6-stack item delta")
+assert(Scheduler.handleNetworkEvent(evCfg, evState, "network_fluid_changed", "if-ev-a", evFluidsA, 10.2), "Handled 2-fluid delta")
+assertEq(evState._forcePollNow, true, "Event sets _forcePollNow for 0ms wakeup")
+
+Scheduler.step(evCfg, evState, 10.5)
+assertEq(evState.poolStates[1].activeColor, 0, "NC 0 activated via push event")
+assertEq(evScans.a, 1, "Still 0 extra scans after arrival event")
+assertEq(sidesEv[2][0], 255, "Redstone ON from event delta alone")
+
+-- Partial drain delta while > 0 (must NOT scan A or idle B)
+evItemsA[6].size = 20
+Scheduler.handleNetworkEvent(evCfg, evState, "network_item_changed", "if-ev-a", {
+    { name = "gt:item6", damage = 5, size = -20, label = "Item 6" },
+}, 11.0)
+Scheduler.step(evCfg, evState, 11.5)
+assertEq(evScans.a, 1, "Still 0 scans during live positive drain delta")
+assertEq(evScans.b, 1, "Idle B still untouched")
+
+-- Full drain to 0 triggers 1 ground-truth confirm scan -> batch complete -> back to 30s sleep!
+for i = 1, 6 do evItemsA[i] = nil end
+evFluidsA[1], evFluidsA[2] = nil, nil
+Scheduler.handleNetworkEvent(evCfg, evState, "network_item_changed", "if-ev-a", {
+    { name = "gt:item1", damage = 0, size = -4 },
+    { name = "gt:item2", damage = 1, size = -8 },
+    { name = "gt:item3", damage = 2, size = -12 },
+    { name = "gt:item4", damage = 3, size = -16 },
+    { name = "gt:item5", damage = 4, size = -20 },
+    { name = "gt:item6", damage = 5, size = -20 },
+}, 12.0)
+Scheduler.handleNetworkEvent(evCfg, evState, "network_fluid_changed", "if-ev-a", {
+    { name = "oxygen", amount = -4000 },
+    { name = "nitrogen", amount = -2000 },
+}, 12.0)
+Scheduler.step(evCfg, evState, 12.2)
+assertEq(evScans.a, 2, "Exact 1 ground-truth confirm scan on reaching 0")
+assertEq(evScans.b, 1, "Idle B remained at 0 extra scans")
+assertEq(evState.kpis.completedBatches, 1, "1 event-driven batch completed cleanly")
+assertEq(Scheduler.nextWakeupDelay(evCfg, evState, 12.2), 30.0, "Returns to 30s deep sleep once idle")
+
+-- =========================================================================
+-- TEST 12: MLFQ Probe When Amount != Duration + Recipe Speed Cache
+-- =========================================================================
+component._reset()
+local rsM, sidesM = makeBundledRS()
+local ifSlow, itSlow, flSlow = makeSubnetIF({ { name = "gt:xenoxene_ore", damage = 0, size = 10, label = "Xenoxene" } }, {})
+local ifFast, itFast, flFast = makeSubnetIF({}, {})
+component._register("rs-mlfq", "redstone", rsM)
+component._register("if-slow-0", "me_interface", ifSlow)
+component._register("if-fast-1", "me_interface", ifFast)
+
+local mCfg2 = Scheduler.defaultConfig()
+mCfg2.armed = true
+mCfg2.probeWindowSec = 1.5
+mCfg2.probePreemptHoldSec = 1.5
+mCfg2.fastThresholdSec = 3.0
+mCfg2.minHoldSec = 15.0
+mCfg2.settleSec = 0.5
+mCfg2.emptyConfirmPolls = 1
+mCfg2.pools[1].mode = "mlfq"
+mCfg2.pools[1].rsAddr = "rs-mlfq"
+mCfg2.pools[1].side = 2
+mCfg2.pools[1].slices[0].ifaceAddr = "if-slow-0"
+mCfg2.pools[1].slices[1].ifaceAddr = "if-fast-1"
+
+local mSt2 = Scheduler.newState()
+Scheduler.syncHardware(mCfg2, mSt2)
+
+-- t=0.0: Slow Xenoxene (10 items) starts in PROBE
+Scheduler.step(mCfg2, mSt2, 0.0)
+assertEq(mSt2.poolStates[1].activeColor, 0, "Slow NC0 starts in PROBE")
+
+-- t=1.5: Xenoxene only drained 0.375 -> 9.625 (0.25/s -> 38.5s ETA), graduates to BULK & caches slow rate!
+itSlow[1].size = 9.625
+Scheduler.step(mCfg2, mSt2, 1.5)
+assertEq(mSt2.sliceStates["1:0"].tier, "BULK", "Xenoxene graduates to BULK at probeWindowSec=1.5s")
+
+-- t=2.0: 250,000 L Hydrogen (workScore = 250.0 >> 9.625!) arrives in NC1 -> enters PROBE & preempts BULK Xenoxene!
+flFast[1] = { name = "hydrogen", amount = 250000, label = "Hydrogen" }
+Scheduler.step(mCfg2, mSt2, 2.0)
+assertEq(mSt2.sliceStates["1:1"].tier, "PROBE", "Huge fast fluid enters PROBE tier despite 250 > 9.625 workScore")
+assertEq(mSt2.poolStates[1].phase, "SETTLING", "Preempts BULK Xenoxene after probePreemptHoldSec")
+Scheduler.step(mCfg2, mSt2, 2.5)
+assertEq(mSt2.poolStates[1].activeColor, 1, "Hydrogen NC1 active on trunk")
+
+-- Hydrogen finishes 250,000 L in 0.5s -> caches 500 u/s speed!
+flFast[1] = nil
+Scheduler.step(mCfg2, mSt2, 3.0)
+assert(next(mSt2.recipeRates) ~= nil, "Recipe speed cache populated for Xenoxene + Hydrogen")
+
+-- Both clear -> Repeat arrival simultaneously: Xenoxene (10) AND Hydrogen (250,000 L) at t=5.0!
+itSlow[1] = nil
+Scheduler.step(mCfg2, mSt2, 4.0)
+Scheduler.step(mCfg2, mSt2, 4.5) -- settled & idle
+itSlow[1] = { name = "gt:xenoxene_ore", damage = 0, size = 10, label = "Xenoxene" }
+flFast[1] = { name = "hydrogen", amount = 250000, label = "Hydrogen" }
+Scheduler.step(mCfg2, mSt2, 5.0)
+assertEq(mSt2.sliceStates["1:0"].tier, "BULK", "Repeat Xenoxene immediately classified BULK from recipe cache")
+assertEq(mSt2.sliceStates["1:1"].tier, "PROBE", "Repeat Hydrogen immediately classified PROBE from recipe cache")
+assertEq(mSt2.poolStates[1].activeColor, 1, "Fast 250kL Hydrogen beats 10 slow Xenoxene IMMEDIATELY on repeat!")
+
+-- =========================================================================
+-- TEST 13: Multi-Channel Ch1 High->Ch2 Low BULK Demotion & 0s Fast Preempt
+-- =========================================================================
+component._reset()
+local rsMC, sidesMC = makeBundledRS()
+local ifA, itA = makeSubnetIF({ { name = "gt:long_recipe", damage = 0, size = 5000, label = "Long Recipe" } })
+local ifB, itB = makeSubnetIF({})
+component._register("rs-mc", "redstone", rsMC)
+component._register("if-mc-a", "me_interface", ifA)
+component._register("if-mc-b", "me_interface", ifB)
+
+local mcCfg = Scheduler.defaultConfig()
+mcCfg.armed = true
+mcCfg.settleSec = 1.0
+mcCfg.probeWindowSec = 1.5
+mcCfg.pools[1].mode = "mlfq"
+mcCfg.pools[1].channels = {
+    [1] = Scheduler.newChannel(1, "rs-mc", 2), -- North (Ch1 High Prio Black)
+    [2] = Scheduler.newChannel(2, "rs-mc", 3), -- South (Ch2 Low Prio Blue)
+}
+mcCfg.pools[1].rsAddr = "rs-mc"
+mcCfg.pools[1].side = 2
+mcCfg.pools[1].slices[0].ifaceAddr = "if-mc-a"
+mcCfg.pools[1].slices[4].ifaceAddr = "if-mc-b"
+
+local mcSt = Scheduler.newState()
+Scheduler.syncHardware(mcCfg, mcSt)
+
+-- t=0.0: Single job starts on Ch1 (PROBE)
+Scheduler.step(mcCfg, mcSt, 0.0)
+assertEq(sidesMC[2][0], 255, "t=0.0 New job starts on Ch1 High Prio")
+assertEq(sidesMC[3][0], 0, "Ch2 stays OFF")
+
+-- t=1.5: Graduates to BULK -> immediately demotes Ch1 -> Ch2, leaving Ch1 IDLE & OFF!
+itA[1].size = 4990
+Scheduler.step(mcCfg, mcSt, 1.5)
+assertEq(sidesMC[2][0], 0, "t=1.5 Ch1 turns OFF on demotion")
+assertEq(sidesMC[3][0], 255, "t=1.5 Ch2 takes over Long Recipe NC0 seamlessly")
+
+-- t=3.0: Fast craft arrives in NC4 -> Ch1 already settled -> starts with 0s delay while Ch2 stays on NC0!
+itB[1] = { name = "gt:fast_chip", damage = 0, size = 8, label = "Fast Chip" }
+Scheduler.step(mcCfg, mcSt, 3.0)
+assertEq(sidesMC[2][4], 255, "t=3.0 Ch1 activates NC4 with ZERO settle delay")
+assertEq(sidesMC[3][0], 255, "t=3.0 Ch2 continues NC0 uninterrupted in true parallel")
+
+-- Verify miswired duplicate (rsAddr, side) guard refuses 2 active colors on same wire!
+mcCfg.pools[1].channels[2].banks[1].side = 2
+Scheduler.step(mcCfg, mcSt, 3.2)
+local onSide2 = 0
+for c = 0, 15 do if sidesMC[2][c] > 0 then onSide2 = onSide2 + 1 end end
+assert(onSide2 <= 1, "Miswired duplicate wire never asserts 2 colors simultaneously")
+
+-- =========================================================================
+-- TEST 14: 32-NC Dual-Bank Wiring + Round-Robin / FIFO / Priority Policies
+-- =========================================================================
+component._reset()
+local rs32, sides32 = makeBundledRS()
+local ifB22 = makeSubnetIF({ { name = "gt:extruder_bar", damage = 0, size = 32, label = "Alloy Bar" } })
+component._register("rs-32", "redstone", rs32)
+component._register("if-32-22", "me_interface", ifB22)
+
+local cfg32 = Scheduler.defaultConfig()
+cfg32.armed = true
+cfg32.pools[1].numSlices = 32
+cfg32.pools[1].rsAddr = "rs-32"
+cfg32.pools[1].side = 2
+cfg32.pools[1].channels[1].banks[2] = { rsAddr = "rs-32", side = 4 } -- West Bank B (16..31)
+cfg32.pools[1].slices = {}
+for idx = 0, 31 do cfg32.pools[1].slices[idx] = { color = idx, label = "NC" .. idx, priority = "normal", enabled = true } end
+cfg32.pools[1].slices[22].ifaceAddr = "if-32-22"
+
+local st32 = Scheduler.newState()
+Scheduler.syncHardware(cfg32, st32)
+Scheduler.step(cfg32, st32, 0.0)
+assertEq(sides32[4][6], 255, "NC 22 routes to Bank B (side 4) Color 6 (22 % 16)")
+assertEq(sides32[2][6], 0, "Bank A (side 2) stays OFF")
+
+-- Policy unit verification: FIFO & Priority modes
+local polPool = Scheduler.newPool(1, "Pol", "rs-32", 2)
+local pCands = {
+    { ncIdx = 0, color = 0, slice = polPool.slices[0], priWeight = 2, tier = "BULK", tierRank = 0, rawEta = 5, effectiveEta = 5, busySince = 20, workScore = 40 },
+    { ncIdx = 1, color = 1, slice = polPool.slices[1], priWeight = 2, tier = "BULK", tierRank = 0, rawEta = 50, effectiveEta = 50, busySince = 10, workScore = 400 },
+}
+polPool.mode = "fifo"
+local dFifo = Policy.decide(polPool, nil, pCands, {}, cfg32, 30)
+assertEq(dFifo[1], 1, "FIFO picks earlier busySince (10 < 20) regardless of ETA")
+polPool.mode = "priority"
+pCands[1].priWeight = 3
+local dPri = Policy.decide(polPool, nil, pCands, {}, cfg32, 30)
+assertEq(dPri[1], 0, "Priority picks higher priWeight (3 > 2)")
+
 -- Keep objects alive so Python checks true live heap usage
-rawset(_G, "__HELD_OBJECTS", { cfg, state, ui, scanPool })
+rawset(_G, "__HELD_OBJECTS", { cfg, state, ui, scanPool, evState, mSt2, mcSt, st32 })
 """
             host.exec_lua(lua_suite, "universal_test_suite")
 
@@ -789,6 +1055,7 @@ rawset(_G, "__HELD_OBJECTS", { cfg, state, ui, scanPool })
                     f2:close()
                     assert(body:find("customTag=999", 1, true), "Update overwrote config.cfg!")
                     assert(__py_exists("/home/universal/main.lua"), "Missing installed main.lua")
+                    assert(__py_exists("/home/universal/lib/policy.lua"), "Missing installed lib/policy.lua")
                     assert(__py_exists("/usr/bin/universal.lua"), "Missing /usr/bin/universal.lua")
                     """,
                     "standalone_install_test",
