@@ -119,6 +119,16 @@ function Hardware.discover(compLib, state)
                 if not seenIf[addr] then
                     seenIf[addr] = true
                     local p = getProxy(addr, cl, state)
+                    local nCpus = 0
+                    if p and type(p.getCpus) == "function" then
+                        local okC, cpus = pcall(p.getCpus)
+                        if okC and type(cpus) == "table" then nCpus = #cpus end
+                    end
+                    local hasSlot1Pat = false
+                    if p and type(p.getInterfacePattern) == "function" then
+                        local okP, pat1 = pcall(p.getInterfacePattern, 1)
+                        if okP and type(pat1) == "table" then hasSlot1Pat = true end
+                    end
                     interfaces[#interfaces + 1] = {
                         address = addr,
                         shortAddr = Hardware.shortAddr(addr),
@@ -126,6 +136,9 @@ function Hardware.discover(compLib, state)
                         hasNet = p ~= nil and (type(p.getItemsInNetwork) == "function"),
                         hasPatterns = p ~= nil and (type(p.setInterfacePatternInput) == "function"),
                         hasCpus = p ~= nil and (type(p.getCpus) == "function"),
+                        nCpus = nCpus,
+                        hasSlot1Pat = hasSlot1Pat,
+                        roleHint = (hasSlot1Pat or nCpus > 0) and "IN" or "OUT",
                     }
                 end
             end
@@ -327,6 +340,69 @@ function Hardware.encodeExoticizerPattern(ex, idx, batchInputs, compLib, state)
         end
     end
     return true, fakeName
+end
+
+-- Recover storage cells stranded inside ME IO Port (slots 1..12) back into the Output ME Drive.
+function Hardware.recoverStrandedCells(ex, compLib, state, maxWaitSec, sleepFn)
+    local tpAddr = ex and ex.transposerAddress
+    if not tpAddr or tpAddr == "" then
+        return false, 0, "Unbound Transposer"
+    end
+    local ioSide = tonumber(ex.meIoPortSide) or 5
+    local driveSide = tonumber(ex.meDriveSide) or 4
+    local waitLimit = (tonumber(maxWaitSec) ~= nil) and tonumber(maxWaitSec) or 2.0
+    local doSleep = sleepFn or (os and os.sleep) or function() end
+
+    local function countRange(lo, hi)
+        local n = 0
+        for s = lo, hi do
+            local okC, cnt = callSafe(tpAddr, "getSlotStackSize", compLib, state, ioSide, s)
+            if okC and (tonumber(cnt) or 0) > 0 then
+                n = n + 1
+            end
+        end
+        return n
+    end
+
+    local inCnt = countRange(1, 6)
+    local outCnt = countRange(7, 12)
+    if inCnt == 0 and outCnt == 0 then
+        return true, 0
+    end
+
+    local elapsed = 0.0
+    while inCnt > 0 and elapsed < waitLimit do
+        pcall(doSleep, 0.1)
+        elapsed = elapsed + 0.1
+        inCnt = countRange(1, 6)
+    end
+
+    local movedBack = 0
+    for s = 7, 12 do
+        local okC, cnt = callSafe(tpAddr, "getSlotStackSize", compLib, state, ioSide, s)
+        if okC and (tonumber(cnt) or 0) > 0 then
+            local okB, mvB = callSafe(tpAddr, "transferItem", compLib, state, ioSide, driveSide, 1, s)
+            if not okB or (tonumber(mvB) or 0) <= 0 then
+                okB, mvB = callSafe(tpAddr, "transferItem", compLib, state, ioSide, driveSide, 1)
+            end
+            if okB and (tonumber(mvB) or 0) > 0 then
+                movedBack = movedBack + 1
+            end
+        end
+    end
+    for s = 1, 6 do
+        local okC, cnt = callSafe(tpAddr, "getSlotStackSize", compLib, state, ioSide, s)
+        if okC and (tonumber(cnt) or 0) > 0 then
+            local okB, mvB = callSafe(tpAddr, "transferItem", compLib, state, ioSide, driveSide, 1, s)
+            if not okB or (tonumber(mvB) or 0) <= 0 then
+                okB, mvB = callSafe(tpAddr, "transferItem", compLib, state, ioSide, driveSide, 1)
+            end
+            if okB and (tonumber(mvB) or 0) > 0 then
+                movedBack = movedBack + 1
+            end
+        end
+    end
+    return true, movedBack
 end
 
 -- Dynamically drain all cells present in Output ME Drive through ME IO Port and return them cleanly.
@@ -825,6 +901,12 @@ function Hardware.handleMeshMessage(cfg, state, localAddr, sender, port, msgType
                     state._forcePollNow = true
                 end
                 reply = { ok = true }
+            elseif cmd.action == "unstick" then
+                if state then
+                    state._pendingUnstick = tonumber(cmd.exoticizerId) or "all"
+                    state._forcePollNow = true
+                end
+                reply = { ok = true, action = "unstick", exoticizerId = cmd.exoticizerId }
             elseif cmd.action == "set_mode" then
                 local exId = tonumber(cmd.exoticizerId) or 1
                 local m = tostring(cmd.mode or "")

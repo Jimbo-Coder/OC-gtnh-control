@@ -285,7 +285,7 @@ local function runInstaller(args)
         local hasDisplay = (component.list("screen", true)() ~= nil) and (component.list("gpu", true)() ~= nil)
         local autoCmd = hasDisplay and baseCmd or (baseCmd .. " --worker")
         local wantAuto = (optAutostart ~= nil) and optAutostart or askYesNo(
-            string.format("Auto-start on boot in /home/.shrc (%s)? [Y/n]: ", autoCmd), false, optYes, optNoPrompt)
+            string.format("Auto-start on boot in /home/.shrc (%s)? [Y/n]: ", autoCmd), true, optYes, optNoPrompt)
         if wantAuto then
             local prefix = (type(existingShrc) == "string" and existingShrc ~= "") and existingShrc or ""
             if prefix ~= "" and prefix:sub(-1) ~= "\n" then prefix = prefix .. "\n" end

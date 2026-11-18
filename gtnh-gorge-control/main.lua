@@ -25,6 +25,9 @@ end
 
 local CONFIG_PATH = filesystem.concat(scriptDir, "config.cfg")
 local BACKUP_CONFIG_PATH = "/home/config.gorge.bak"
+local INFLIGHT_PATH = filesystem.concat(scriptDir, "inflight.dat")
+local BACKUP_INFLIGHT_PATH = "/home/inflight.gorge.bak"
+local SHRC_PATH = "/home/.shrc"
 
 do
     local prevPath = package.path
@@ -80,14 +83,58 @@ local function saveConfig(cfg)
     return ok
 end
 
+local function persistInflight(state)
+    if state and state._inflightDirty then
+        Scheduler.saveInflight(INFLIGHT_PATH, state, BACKUP_INFLIGHT_PATH)
+    end
+end
+
+local function isGorgeShrcLine(line)
+    if line:match("^%s*#") then return false end
+    return line:find("/home/gorge/main.lua", 1, true) ~= nil
+        or line:find("/usr/bin/gorge", 1, true) ~= nil
+        or line:match("^%s*gorge%s*$") ~= nil
+        or line:match("^%s*gorge%s+") ~= nil
+end
+
+local function isAutostartEnabled()
+    local raw = readWholeFile(SHRC_PATH)
+    if type(raw) ~= "string" then return false end
+    for line in raw:gmatch("[^\r\n]+") do
+        if isGorgeShrcLine(line) then return true end
+    end
+    return false
+end
+
+local function setAutostartEnabled(enable)
+    local raw = readWholeFile(SHRC_PATH) or ""
+    local lines = {}
+    for line in raw:gmatch("[^\r\n]+") do
+        if not isGorgeShrcLine(line) then
+            lines[#lines + 1] = line
+        end
+    end
+    if enable then
+        local hasDisplay = (component.list("screen", true)() ~= nil) and (component.list("gpu", true)() ~= nil)
+        local cmd = filesystem.exists("/usr/bin/gorge.lua") and "gorge" or "/home/gorge/main.lua"
+        if not hasDisplay then cmd = cmd .. " --worker" end
+        lines[#lines + 1] = cmd
+    end
+    local body = (#lines > 0) and (table.concat(lines, "\n") .. "\n") or ""
+    writeWholeFile(SHRC_PATH, body)
+    return enable
+end
+
 local function printHelp()
     print("GTNH Gorge & Multi-Exoticizer Control")
     print("Usage:")
-    print("  gorge            Launch 160x50 Touch Control Center (or --worker if headless)")
-    print("  gorge --worker   Run headless scheduler daemon")
-    print("  gorge --check    Read-only hardware, Godforge & Exoticizer batch dry-run check")
-    print("  gorge --off      Disarm, cancel active fake crafts, and set idle patterns")
-    print("  gorge --update   Update scripts cleanly while preserving config.cfg")
+    print("  gorge                  Launch 160x50 Touch Control Center (or --worker if headless)")
+    print("  gorge --worker         Run headless scheduler daemon (auto-restarts on fault)")
+    print("  gorge --check          Read-only hardware, Godforge & Exoticizer batch dry-run check")
+    print("  gorge --unstick        Recover stranded IO Port cells, cancel fake crafts & reset patterns")
+    print("  gorge --autostart on|off  Enable or disable boot autostart in /home/.shrc")
+    print("  gorge --off            Disarm, cancel active fake crafts, and set idle patterns")
+    print("  gorge --update         Update scripts cleanly while preserving config.cfg")
 end
 
 local function dispatchEvent(cfg, state, evTbl, ui)
@@ -142,138 +189,168 @@ local function runCheck()
 end
 
 local function runWorker()
-    local cfg = loadConfig()
-    local state = Scheduler.newState()
-    Scheduler.syncHardware(cfg, state)
-    Hardware.openMeshPort(cfg, nil, state)
+    while true do
+        local cfg = loadConfig()
+        local state = Scheduler.newState()
+        Scheduler.loadInflight(INFLIGHT_PATH, state, BACKUP_INFLIGHT_PATH)
+        Scheduler.syncHardware(cfg, state)
+        Hardware.openMeshPort(cfg, nil, state)
 
-    print("GTNH Gorge Control worker started (" .. (cfg.armed and "ARMED" or "PAUSED") .. "). Ctrl+C to stop.")
-    local running = true
-    local lastSave = computer.uptime()
+        print("GTNH Gorge Control worker started (" .. (cfg.armed and "ARMED" or "PAUSED") .. "). Ctrl+C to stop.")
+        local running = true
+        local userExit = false
+        local lastSave = computer.uptime()
 
-    local okLoop, errLoop = xpcall(function()
-        while running do
-            local now = computer.uptime()
-            state._forcePollNow = false
-            Scheduler.step(cfg, state, now)
-            Hardware.pushMeshMetrics(cfg, state, now)
-            if (now - lastSave) >= 60.0 then
-                lastSave = now
-                saveConfig(cfg)
-            end
-
-            local deadline = computer.uptime() + Scheduler.nextWakeupDelay(cfg, state, computer.uptime())
-            while running and computer.uptime() < deadline do
-                local timeout = math.max(0.05, deadline - computer.uptime())
-                local evTbl = { event.pull(timeout) }
-                local _, stopReq = dispatchEvent(cfg, state, evTbl, nil)
-                if stopReq then
-                    running = false
-                    break
+        local okLoop, errLoop = xpcall(function()
+            while running do
+                local now = computer.uptime()
+                state._forcePollNow = false
+                Scheduler.step(cfg, state, now)
+                persistInflight(state)
+                Hardware.pushMeshMetrics(cfg, state, now)
+                if (now - lastSave) >= 60.0 then
+                    lastSave = now
+                    saveConfig(cfg)
                 end
-                if state._forcePollNow then
-                    break
+
+                local deadline = computer.uptime() + Scheduler.nextWakeupDelay(cfg, state, computer.uptime())
+                while running and computer.uptime() < deadline do
+                    local timeout = math.max(0.05, deadline - computer.uptime())
+                    local evTbl = { event.pull(timeout) }
+                    local _, stopReq = dispatchEvent(cfg, state, evTbl, nil)
+                    if stopReq then
+                        running = false
+                        userExit = true
+                        break
+                    end
+                    if state._forcePollNow then
+                        break
+                    end
                 end
             end
+        end, debug.traceback)
+
+        pcall(saveConfig, cfg)
+        pcall(persistInflight, state)
+        if userExit then
+            print("Gorge Control worker stopped cleanly.")
+            return
+        elseif not okLoop then
+            io.stderr:write("Gorge Control worker fault (restarting in 2s):\n" .. tostring(errLoop) .. "\n")
+            os.sleep(2)
+        else
+            return
         end
-    end, debug.traceback)
-
-    pcall(saveConfig, cfg)
-    if not okLoop then
-        io.stderr:write("Gorge Control worker error:\n" .. tostring(errLoop) .. "\n")
-    else
-        print("Gorge Control worker stopped cleanly.")
     end
 end
 
 local function runGUI()
-    local cfg = loadConfig()
-    local state = Scheduler.newState()
-    Scheduler.syncHardware(cfg, state)
-    Hardware.openMeshPort(cfg, nil, state)
+    while true do
+        local cfg = loadConfig()
+        local state = Scheduler.newState()
+        Scheduler.loadInflight(INFLIGHT_PATH, state, BACKUP_INFLIGHT_PATH)
+        Scheduler.syncHardware(cfg, state)
+        Hardware.openMeshPort(cfg, nil, state)
 
-    local disc = state.discovery or {}
-    if (not disc.hasGpu) or (not disc.hasScreen) then
-        runWorker()
-        return
-    end
-
-    local savePending = false
-    local saveDeadline = 0
-    local function scheduleSave(c)
-        savePending = true
-        saveDeadline = computer.uptime() + 0.35
-        cfg = c or cfg
-    end
-    local function flushSave()
-        if savePending then
-            savePending = false
-            saveConfig(cfg)
+        local disc = state.discovery or {}
+        if (not disc.hasGpu) or (not disc.hasScreen) then
+            runWorker()
+            return
         end
-    end
 
-    local ui = UI.new(cfg, state, scheduleSave)
-
-    local okLoop, errLoop = xpcall(function()
-        ui:render()
-        local lastDigest = Scheduler.renderDigest(cfg, state)
-        Scheduler.step(cfg, state, computer.uptime())
-        local bootDigest = Scheduler.renderDigest(cfg, state)
-        if bootDigest ~= lastDigest then
-            ui:render()
-            lastDigest = bootDigest
+        local savePending = false
+        local saveDeadline = 0
+        local function scheduleSave(c)
+            savePending = true
+            saveDeadline = computer.uptime() + 0.35
+            cfg = c or cfg
         end
-        local nextPoll = computer.uptime() + Scheduler.nextWakeupDelay(cfg, state, computer.uptime())
-
-        while ui.running do
-            local dirty = false
-            local now = computer.uptime()
-            local waitSec = math.max(0.05, math.min(nextPoll - now, Scheduler.nextWakeupDelay(cfg, state, now)))
-            if state._forcePollNow then waitSec = 0.01 end
-            if savePending then waitSec = math.min(waitSec, math.max(0.02, saveDeadline - now)) end
-
-            local evTbl = { event.pull(waitSec) }
-            local evDirty, stopReq = dispatchEvent(cfg, state, evTbl, ui)
-            if stopReq then
-                savePending = true
-                ui.running = false
-                break
+        local function flushSave()
+            if savePending then
+                savePending = false
+                saveConfig(cfg)
             end
-            if evDirty then dirty = true end
+        end
 
-            local curTime = computer.uptime()
-            if ui.running and (state._forcePollNow == true or curTime >= nextPoll) then
-                state._forcePollNow = false
-                Scheduler.step(cfg, state, curTime)
-                Hardware.pushMeshMetrics(cfg, state, curTime)
-                nextPoll = computer.uptime() + Scheduler.nextWakeupDelay(cfg, state, computer.uptime())
-                local curDigest = Scheduler.renderDigest(cfg, state)
-                if curDigest ~= lastDigest then
-                    dirty = true
+        local extras = {
+            isAutostartEnabled = isAutostartEnabled,
+            toggleAutostart = function()
+                return setAutostartEnabled(not isAutostartEnabled())
+            end,
+        }
+        local ui = UI.new(cfg, state, scheduleSave, nil, extras)
+        local userExit = false
+
+        local okLoop, errLoop = xpcall(function()
+            ui:render()
+            local lastDigest = Scheduler.renderDigest(cfg, state)
+            Scheduler.step(cfg, state, computer.uptime())
+            persistInflight(state)
+            local bootDigest = Scheduler.renderDigest(cfg, state)
+            if bootDigest ~= lastDigest then
+                ui:render()
+                lastDigest = bootDigest
+            end
+            local nextPoll = computer.uptime() + Scheduler.nextWakeupDelay(cfg, state, computer.uptime())
+
+            while ui.running do
+                local dirty = false
+                local now = computer.uptime()
+                local waitSec = math.max(0.05, math.min(nextPoll - now, Scheduler.nextWakeupDelay(cfg, state, now)))
+                if state._forcePollNow then waitSec = 0.01 end
+                if savePending then waitSec = math.min(waitSec, math.max(0.02, saveDeadline - now)) end
+
+                local evTbl = { event.pull(waitSec) }
+                local evDirty, stopReq = dispatchEvent(cfg, state, evTbl, ui)
+                if stopReq then
+                    savePending = true
+                    userExit = true
+                    ui.running = false
+                    break
+                end
+                if evDirty then dirty = true end
+
+                local curTime = computer.uptime()
+                if ui.running and (state._forcePollNow == true or curTime >= nextPoll) then
+                    state._forcePollNow = false
+                    Scheduler.step(cfg, state, curTime)
+                    persistInflight(state)
+                    Hardware.pushMeshMetrics(cfg, state, curTime)
+                    nextPoll = computer.uptime() + Scheduler.nextWakeupDelay(cfg, state, computer.uptime())
+                    local curDigest = Scheduler.renderDigest(cfg, state)
+                    if curDigest ~= lastDigest then
+                        dirty = true
+                    end
+                end
+
+                if savePending and computer.uptime() >= saveDeadline then
+                    flushSave()
+                end
+                if dirty and ui.running then
+                    ui:render()
+                    lastDigest = Scheduler.renderDigest(cfg, state)
                 end
             end
+            if not ui.running then
+                userExit = true
+            end
+        end, debug.traceback)
 
-            if savePending and computer.uptime() >= saveDeadline then
-                flushSave()
-            end
-            if dirty and ui.running then
-                ui:render()
-                lastDigest = Scheduler.renderDigest(cfg, state)
-            end
+        flushSave()
+        pcall(saveConfig, cfg)
+        pcall(persistInflight, state)
+        if component.isAvailable("gpu") then
+            pcall(component.gpu.setBackground, 0x000000)
+            pcall(component.gpu.setForeground, 0xFFFFFF)
         end
-    end, debug.traceback)
-
-    flushSave()
-    pcall(saveConfig, cfg)
-    if component.isAvailable("gpu") then
-        pcall(component.gpu.setBackground, 0x000000)
-        pcall(component.gpu.setForeground, 0xFFFFFF)
-    end
-    term.clear()
-    if okLoop then
-        print("GTNH Gorge Control stopped cleanly.")
-    else
-        io.stderr:write("GTNH Gorge Control error:\n" .. tostring(errLoop) .. "\n")
+        term.clear()
+        if userExit or okLoop then
+            print("GTNH Gorge Control stopped cleanly.")
+            return
+        else
+            io.stderr:write("GTNH Gorge Control fault (restarting in 2s):\n" .. tostring(errLoop) .. "\n")
+            os.sleep(2)
+        end
     end
 end
 
@@ -286,12 +363,29 @@ local function main(args)
         elseif a == "--check" or a == "check" then
             runCheck()
             return
+        elseif a == "--unstick" or a == "unstick" then
+            local cfg = loadConfig()
+            local state = Scheduler.newState()
+            Scheduler.loadInflight(INFLIGHT_PATH, state, BACKUP_INFLIGHT_PATH)
+            Scheduler.syncHardware(cfg, state)
+            local rec, can = Scheduler.unstickExoticizer(cfg, state, nil, nil, "manual")
+            persistInflight(state)
+            print(string.format("Gorge Control unstuck all (%d cell(s) recovered, %d craft(s) canceled, patterns reset).", rec, can))
+            return
+        elseif a == "--autostart" or a == "autostart" then
+            local argNext = tostring(args[i + 1] or ""):lower()
+            local enable = (argNext == "on" or argNext == "true" or argNext == "1") and true
+                or ((argNext == "off" or argNext == "false" or argNext == "0") and false or (not isAutostartEnabled()))
+            setAutostartEnabled(enable)
+            print(string.format("Gorge Control boot autostart (/home/.shrc): %s", enable and "ENABLED" or "DISABLED"))
+            return
         elseif a == "--off" or a == "off" then
             local cfg = loadConfig()
             cfg.armed = false
             local state = Scheduler.newState()
             Scheduler.syncHardware(cfg, state)
             local n = Scheduler.cancelAllFakeCrafts(cfg, state)
+            persistInflight(state)
             saveConfig(cfg)
             print(string.format("Gorge Control disarmed (%d fake craft(s) canceled, slot-1 patterns reset).", n))
             return

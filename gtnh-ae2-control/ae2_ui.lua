@@ -7,10 +7,14 @@ local unicode = require("unicode")
 
 local UI = {}
 
-local TAB_OVERVIEW = 1
-local TAB_CPUS     = 2
-local TAB_MESH     = 3
-local TAB_SETUP    = 4
+local TAB_OVERVIEW  = 1
+local TAB_CPUS      = 2
+local TAB_MESH      = 3
+local TAB_DTPF      = 4
+local TAB_UNIVERSAL = 5
+local TAB_GORGE     = 6
+local TAB_PUMP      = 7
+local TAB_SETUP     = 8
 
 local COLORS = {
     bg          = 0x0C1117,
@@ -122,6 +126,7 @@ function UI.new(cfg, hubState, callbacks, compLib)
         tab = TAB_OVERVIEW,
         running = true,
         cpuScroll = 0,
+        tabScroll = 0,
         cpuBusyOnly = false,
         confirmCancelCpu = nil,
         logScroll = 0,
@@ -321,10 +326,14 @@ function UI:renderHeader()
     end)
 
     local tabs = {
-        { id = TAB_OVERVIEW, label = "[1] OVERVIEW & POWER" },
-        { id = TAB_CPUS,     label = "[2] CRAFTING CPUs" },
-        { id = TAB_MESH,     label = "[3] OC MESH PEERS" },
-        { id = TAB_SETUP,    label = "[4] SETUP & EXPORTS" },
+        { id = TAB_OVERVIEW,  label = "[1] OVERVIEW" },
+        { id = TAB_CPUS,      label = "[2] CPUs" },
+        { id = TAB_MESH,      label = "[3] MESH" },
+        { id = TAB_DTPF,      label = "[4] DTPF" },
+        { id = TAB_UNIVERSAL, label = "[5] UNIVERSAL" },
+        { id = TAB_GORGE,     label = "[6] GORGE" },
+        { id = TAB_PUMP,      label = "[7] PUMP" },
+        { id = TAB_SETUP,     label = "[8] SETUP" },
     }
     local tx = 2
     for _, tb in ipairs(tabs) do
@@ -334,8 +343,24 @@ function UI:renderHeader()
             act and COLORS.btnActiveBg or COLORS.headerBg,
             function()
                 self.tab = tb.id
+                self.tabScroll = 0
                 self.confirmCancelCpu = nil
-            end) + 2
+            end) + 1
+    end
+    local peers = hub.peers or {}
+    local nowU = tonumber(hub.nowUptime) or 0
+    local function peerOn(p, win) return p and p.addr ~= nil and (nowU - (p.lastSeen or -1000)) < win end
+    local badgeX = self.w - 42
+    for _, pd in ipairs({
+        { lbl = "DTPF",  p = peers.dtpf,  win = 60,  tab = TAB_DTPF },
+        { lbl = "UNIV",  p = peers.univ,  win = 60,  tab = TAB_UNIVERSAL },
+        { lbl = "GORGE", p = peers.gorge, win = 60,  tab = TAB_GORGE },
+        { lbl = "PUMP",  p = peers.pump,  win = 180, tab = TAB_PUMP },
+    }) do
+        local okP = peerOn(pd.p, pd.win)
+        badgeX = self:drawButton(badgeX, 2, "[" .. pd.lbl .. (okP and ":ON]" or ":--]"),
+            okP and COLORS.green or COLORS.muted, COLORS.headerBg,
+            function() self.tab = pd.tab; self.tabScroll = 0; self.confirmCancelCpu = nil end) + 1
     end
     self:drawText(1, 3, string.rep("─", self.w), COLORS.border, COLORS.bg)
 end
@@ -565,7 +590,7 @@ function UI:renderCpusTab()
     end
 end
 
-function UI:renderMeshPeerCard(x, y, cw, ch, title, peerKey, peer, winSec, renderBodyFn)
+function UI:renderMeshPeerCard(x, y, cw, ch, title, peerKey, peer, winSec, targetTab, renderBodyFn)
     self:drawFrame(x, y, cw, ch, COLORS.border, COLORS.panelBg, "round")
     self:drawText(x + 2, y, " ◈ " .. title .. " ", COLORS.accent, COLORS.panelBg)
 
@@ -586,11 +611,17 @@ function UI:renderMeshPeerCard(x, y, cw, ch, title, peerKey, peer, winSec, rende
             self.statusMsg = tostring(self.cb.onPeerAction(peerKey, "resume") or ("Sent Resume -> " .. peerKey))
         end
     end) + 2
-    self:drawButton(bx, y + ch - 3, "[Poll]", COLORS.cyan, COLORS.btnBg, function()
+    bx = self:drawButton(bx, y + ch - 3, "[Poll]", COLORS.cyan, COLORS.btnBg, function()
         if self.cb.onPeerAction then
             self.statusMsg = tostring(self.cb.onPeerAction(peerKey, "poll") or ("Polled " .. peerKey))
         end
-    end)
+    end) + 2
+    if targetTab then
+        self:drawButton(x + cw - 12, y + ch - 3, "[Open ->]", COLORS.fg, COLORS.btnActiveBg, function()
+            self.tab = targetTab
+            self.tabScroll = 0
+        end)
+    end
 
     local st = peer and peer.status or nil
     if type(st) ~= "table" then
@@ -604,7 +635,7 @@ function UI:renderMeshTab()
     local peers = (self.hub and self.hub.peers) or {}
 
     -- Card 1: DTPF Fleet (x=2, y=5, w=77, h=21)
-    self:renderMeshPeerCard(2, 5, 77, 21, "DTPF FLEET CONTROLLER", "dtpf", peers.dtpf, 60, function(st, bx, by, bw)
+    self:renderMeshPeerCard(2, 5, 77, 21, "DTPF FLEET CONTROLLER", "dtpf", peers.dtpf, 60, TAB_DTPF, function(st, bx, by, bw)
         local units = type(st.units) == "table" and st.units or {}
         local onN, actN = 0, 0
         for _, u in ipairs(units) do
@@ -633,7 +664,7 @@ function UI:renderMeshTab()
     end)
 
     -- Card 2: Space Pump Array (x=81, y=5, w=78, h=21)
-    self:renderMeshPeerCard(81, 5, 78, 21, "SPACE PUMP ARRAY", "pump", peers.pump, 180, function(st, bx, by, bw)
+    self:renderMeshPeerCard(81, 5, 78, 21, "SPACE PUMP ARRAY", "pump", peers.pump, 180, TAB_PUMP, function(st, bx, by, bw)
         local pumps = type(st.pumps) == "table" and st.pumps or {}
         local actN, multSum = 0, 0
         for _, p in ipairs(pumps) do
@@ -667,7 +698,7 @@ function UI:renderMeshTab()
     end)
 
     -- Card 3: Universal RS Controller (x=2, y=27, w=77, h=21)
-    self:renderMeshPeerCard(2, 27, 77, 21, "UNIVERSAL RS CONTROLLER", "univ", peers.univ, 60, function(st, bx, by, bw)
+    self:renderMeshPeerCard(2, 27, 77, 21, "UNIVERSAL RS CONTROLLER", "univ", peers.univ, 60, TAB_UNIVERSAL, function(st, bx, by, bw)
         self:drawText(bx, by, string.format("Armed: %-5s  Active Pools: %d  Queued: %d  Stalled: %d",
             tostring(st.armed == true), tonumber(st.activePools) or 0,
             tonumber(st.queuedSlices) or 0, tonumber(st.stalledCount) or 0),
@@ -687,7 +718,7 @@ function UI:renderMeshTab()
     end)
 
     -- Card 4: Gorge & Exoticizer Rack (x=81, y=27, w=78, h=21)
-    self:renderMeshPeerCard(81, 27, 78, 21, "GORGE & EXOTICIZER RACK", "gorge", peers.gorge, 60, function(st, bx, by, bw)
+    self:renderMeshPeerCard(81, 27, 78, 21, "GORGE & EXOTICIZER RACK", "gorge", peers.gorge, 60, TAB_GORGE, function(st, bx, by, bw)
         local gf = type(st.godforge) == "table" and st.godforge or {}
         self:drawText(bx, by, string.format("Armed: %-5s  Active Ex: %d  Cycles: %d  Errors: %d",
             tostring(st.armed == true), tonumber(st.activeCount) or 0,
@@ -710,6 +741,297 @@ function UI:renderMeshTab()
             end
         end
     end)
+end
+
+function UI:renderPeerOfflineGuide(title, installKey, peer, winSec)
+    self:drawFrame(2, 5, 157, 43, COLORS.border, COLORS.panelBg, "round")
+    self:drawText(4, 5, " ◈ " .. title .. " ", COLORS.accent, COLORS.panelBg)
+    self:drawText(143, 5, " OFFLINE ", COLORS.red, COLORS.panelBg)
+    self:drawText(4, 9, peer and peer.addr and "Peer seen on OC Mesh, waiting for telemetry packet..." or "No telemetry received from this module yet.", COLORS.yellow, COLORS.panelBg)
+    self:drawText(4, 12, "To connect this module to Mainnet AE2 Orchestrator:", COLORS.fg, COLORS.panelBg)
+    self:drawText(4, 14, string.format("1. Install on target OC computer:  install.lua %s", installKey), COLORS.cyan, COLORS.panelBg)
+    self:drawText(4, 16, "2. Attach Wireless Modem (strength >= 400) or Linked Card Tunnel on port 4205.", COLORS.muted, COLORS.panelBg)
+    self:drawText(4, 18, "3. Verify module ExtLink setting is not [Standalone (OFF)].", COLORS.muted, COLORS.panelBg)
+    local bx = self:drawButton(4, 22, "[Broadcast Mesh Ping]", COLORS.green, COLORS.btnBg, function()
+        if self.cb.onMeshPing then self.cb.onMeshPing() end
+        self.statusMsg = "Broadcast MESH_MAINNET_HELLO beacon."
+    end) + 2
+    self:drawButton(bx, 22, "[<- Mesh Overview]", COLORS.fg, COLORS.btnBg, function()
+        self.tab = TAB_MESH
+        self.tabScroll = 0
+    end)
+end
+
+function UI:drawOrchestratorBtn(bx, y, label, fg, bg, peerKey, action, extra)
+    return self:drawButton(bx, y, label, fg, bg, function()
+        if self.cb.onPeerAction then
+            self.statusMsg = tostring(self.cb.onPeerAction(peerKey, action, extra) or (peerKey .. ":" .. action))
+        end
+    end) + 2
+end
+
+function UI:renderDtpfTab()
+    local peer = self.hub and self.hub.peers and self.hub.peers.dtpf
+    local st = peer and peer.status or nil
+    if type(st) ~= "table" then
+        self:renderPeerOfflineGuide("DTPF FLEET ORCHESTRATOR", "dtpf", peer, 60)
+        return
+    end
+    local now = tonumber(self.hub.nowUptime) or 0
+    local fresh = peer.addr and (now - (peer.lastSeen or -1000)) < 60
+    local units = type(st.units) == "table" and st.units or {}
+    local onN, actN, convN = 0, 0, 0
+    for _, u in ipairs(units) do
+        if type(u) == "table" then
+            if u.online then onN = onN + 1 end
+            if u.active then actN = actN + 1 end
+            if u.wantConv then convN = convN + 1 end
+        end
+    end
+
+    self:drawFrame(2, 5, 157, 7, COLORS.border, COLORS.panelBg, "round")
+    self:drawText(4, 5, " ◈ DTPF FLEET ORCHESTRATOR ", COLORS.accent, COLORS.panelBg)
+    self:drawText(138, 5, fresh and (" ONLINE (" .. UI.formatAge(now, peer.lastSeen) .. ") ") or " STALE ", fresh and COLORS.green or COLORS.yellow, COLORS.panelBg)
+    self:drawText(4, 7, padOrTrunc(string.format(
+        "Armed:%-5s  Units:%d/%d online (%d active, %d conv)  OD:%s  DTR:%s  Total:%s EU/t (Direct:%s  Cat:%s)",
+        tostring(st.armed == true), onN, #units, actN, convN, st.odActive and "YES" or "NO",
+        UI.formatNumber(st.dtrStock or 0, "L"), UI.formatNumber(st.totalEut or 0),
+        UI.formatNumber(st.directEut or 0), UI.formatNumber(st.catEut or 0)), 152), COLORS.fg, COLORS.panelBg)
+
+    local bx = 4
+    bx = self:drawOrchestratorBtn(bx, 9, "[Arm Fleet]", COLORS.fg, COLORS.darkGreen, "dtpf", "resume")
+    bx = self:drawOrchestratorBtn(bx, 9, "[Pause Fleet]", COLORS.yellow, COLORS.amberBg, "dtpf", "pause")
+    bx = self:drawOrchestratorBtn(bx, 9, "[Poll Now]", COLORS.cyan, COLORS.btnBg, "dtpf", "poll")
+    bx = self:drawOrchestratorBtn(bx, 9, "[Maint Sync]", COLORS.fg, COLORS.btnBg, "dtpf", "maint_sync")
+    bx = self:drawOrchestratorBtn(bx, 9, "[Toggle OD Flush]", COLORS.purple, COLORS.btnBg, "dtpf", "flush_od")
+    self:drawOrchestratorBtn(bx, 9, "[Lock AutoPull]", COLORS.red, COLORS.btnBg, "dtpf", "lock_autopull")
+
+    self:drawFrame(2, 13, 157, 35, COLORS.border, COLORS.panelBg, "round")
+    self:drawText(4, 13, string.format(" ◈ DTPF UNITS (%d) ", #units), COLORS.accent, COLORS.panelBg)
+    self:drawText(4, 15, padOrTrunc(string.format("%-4s %-14s %-8s %-5s %-9s %-8s %-12s %-30s %s",
+        "#", "Unit", "State", "Conv", "Discount", "Coil K", "EU/t", "Active Family / Recipe", "Hatch"), 152), COLORS.muted, COLORS.panelBg)
+    self:drawText(4, 16, string.rep("─", 152), COLORS.border, COLORS.panelBg)
+
+    local maxShow = 15
+    local maxScroll = math.max(0, #units - maxShow)
+    self.tabScroll = math.max(0, math.min(maxScroll, self.tabScroll or 0))
+    for i = 1, math.min(maxShow, #units - self.tabScroll) do
+        local idx = self.tabScroll + i
+        local u = units[idx]
+        if type(u) == "table" then
+            local ry = 16 + i * 2
+            local bg = (i % 2 == 0) and COLORS.rowAltBg or COLORS.panelBg
+            self:fillRect(3, ry, 155, 1, " ", COLORS.fg, bg)
+            local stTxt = u.active and "ACTIVE" or (u.online and "IDLE" or "OFFLINE")
+            local eut = (tonumber(u.directEut) or 0) + (tonumber(u.catEut) or 0)
+            local line = string.format("%-4d %-14s %-8s %-5s %6.2f%%   %-8s %-12s %-30s %s",
+                idx, padOrTrunc(u.name or ("DTPF#" .. idx), 14), stTxt, u.wantConv and "YES" or "NO",
+                tonumber(u.discountPct) or 0, UI.formatNumber(u.coilHeat or 0),
+                UI.formatNumber(eut), padOrTrunc(u.familyId or "idle", 30),
+                padOrTrunc(u.hatchLabel or "-", 28))
+            self:drawText(4, ry, padOrTrunc(line, 152), u.active and COLORS.green or (u.online and COLORS.fg or COLORS.muted), bg)
+        end
+    end
+end
+
+function UI:renderUniversalTab()
+    local peer = self.hub and self.hub.peers and self.hub.peers.univ
+    local st = peer and peer.status or nil
+    if type(st) ~= "table" then
+        self:renderPeerOfflineGuide("UNIVERSAL RS CONTROLLER ORCHESTRATOR", "universal", peer, 60)
+        return
+    end
+    local now = tonumber(self.hub.nowUptime) or 0
+    local fresh = peer.addr and (now - (peer.lastSeen or -1000)) < 60
+    local pools = type(st.pools) == "table" and st.pools or {}
+
+    self:drawFrame(2, 5, 157, 7, COLORS.border, COLORS.panelBg, "round")
+    self:drawText(4, 5, " ◈ UNIVERSAL RS CONTROLLER ORCHESTRATOR ", COLORS.accent, COLORS.panelBg)
+    self:drawText(138, 5, fresh and (" ONLINE (" .. UI.formatAge(now, peer.lastSeen) .. ") ") or " STALE ", fresh and COLORS.green or COLORS.yellow, COLORS.panelBg)
+    self:drawText(4, 7, padOrTrunc(string.format(
+        "Armed:%-5s  Active Pools:%d  Queued Slices:%d  Stalled:%d  Completed Batches:%d  Preemptions:%d",
+        tostring(st.armed == true), tonumber(st.activePools) or 0, tonumber(st.queuedSlices) or 0,
+        tonumber(st.stalledCount) or 0, tonumber(st.completedBatches) or 0, tonumber(st.preemptions) or 0), 152),
+        (tonumber(st.stalledCount) or 0) > 0 and COLORS.yellow or COLORS.fg, COLORS.panelBg)
+
+    local bx = 4
+    bx = self:drawOrchestratorBtn(bx, 9, "[Arm All]", COLORS.fg, COLORS.darkGreen, "univ", "resume")
+    bx = self:drawOrchestratorBtn(bx, 9, "[Pause All]", COLORS.yellow, COLORS.amberBg, "univ", "pause")
+    bx = self:drawOrchestratorBtn(bx, 9, "[Full Scan]", COLORS.cyan, COLORS.btnBg, "univ", "poll")
+    self:drawOrchestratorBtn(bx, 9, "[Clear Stalls]", COLORS.red, COLORS.btnBg, "univ", "clear_stalls")
+
+    self:drawFrame(2, 13, 157, 35, COLORS.border, COLORS.panelBg, "round")
+    self:drawText(4, 13, string.format(" ◈ MACHINE POOLS & CHANNELS (%d) ", #pools), COLORS.accent, COLORS.panelBg)
+    self:drawText(4, 15, padOrTrunc(string.format("%-4s %-18s %-8s %-10s %-10s %-44s %s",
+        "#", "Pool / Channel", "Mode", "Phase", "Wire", "Active Recipe / Item", "ETA"), 152), COLORS.muted, COLORS.panelBg)
+    self:drawText(4, 16, string.rep("─", 152), COLORS.border, COLORS.panelBg)
+
+    local rows = {}
+    for i, p in ipairs(pools) do
+        if type(p) == "table" then
+            rows[#rows + 1] = {
+                idx = i, name = p.name or ("Pool#" .. i), mode = p.mode or "mlfq",
+                phase = p.phase or "IDLE", wire = p.activeColor and ("Ch" .. tostring(p.activeColor)) or "-",
+                label = p.activeLabel or p.activeItem or "-", eta = p.etaSec, isCh = false,
+            }
+            for _, ch in ipairs(type(p.channels) == "table" and p.channels or {}) do
+                if type(ch) == "table" then
+                    rows[#rows + 1] = {
+                        idx = "", name = "  -> " .. tostring(ch.name or "Ch"), mode = ch.activeNc and ("NC" .. ch.activeNc) or "-",
+                        phase = ch.phase or "IDLE", wire = ch.color and ("Ch" .. tostring(ch.color)) or "-",
+                        label = ch.activeLabel or "-", eta = ch.etaSec, isCh = true,
+                    }
+                end
+            end
+        end
+    end
+    local maxShow = 15
+    local maxScroll = math.max(0, #rows - maxShow)
+    self.tabScroll = math.max(0, math.min(maxScroll, self.tabScroll or 0))
+    for i = 1, math.min(maxShow, #rows - self.tabScroll) do
+        local r = rows[self.tabScroll + i]
+        local ry = 16 + i * 2
+        local bg = (i % 2 == 0) and COLORS.rowAltBg or COLORS.panelBg
+        self:fillRect(3, ry, 155, 1, " ", COLORS.fg, bg)
+        local etaTxt = r.eta and string.format("%.0fs", r.eta) or "-"
+        local line = string.format("%-4s %-18s %-8s %-10s %-10s %-44s %s",
+            tostring(r.idx), padOrTrunc(r.name, 18), padOrTrunc(r.mode, 8), padOrTrunc(r.phase, 10),
+            padOrTrunc(r.wire, 10), padOrTrunc(r.label, 44), etaTxt)
+        self:drawText(4, ry, padOrTrunc(line, 152), (r.phase == "ACTIVE" or r.phase == "RUNNING") and COLORS.green or (r.isCh and COLORS.muted or COLORS.fg), bg)
+    end
+end
+
+function UI:renderGorgeTab()
+    local peer = self.hub and self.hub.peers and self.hub.peers.gorge
+    local st = peer and peer.status or nil
+    if type(st) ~= "table" then
+        self:renderPeerOfflineGuide("FORGE OF THE GODS & EXOTICIZER ORCHESTRATOR", "gorge", peer, 60)
+        return
+    end
+    local now = tonumber(self.hub.nowUptime) or 0
+    local fresh = peer.addr and (now - (peer.lastSeen or -1000)) < 60
+    local gf = type(st.godforge) == "table" and st.godforge or {}
+    local exs = type(st.exoticizers) == "table" and st.exoticizers or {}
+
+    self:drawFrame(2, 5, 157, 8, COLORS.border, COLORS.panelBg, "round")
+    self:drawText(4, 5, " ◈ FORGE OF THE GODS & MULTI-EXOTICIZER ORCHESTRATOR ", COLORS.accent, COLORS.panelBg)
+    self:drawText(138, 5, fresh and (" ONLINE (" .. UI.formatAge(now, peer.lastSeen) .. ") ") or " STALE ", fresh and COLORS.green or COLORS.yellow, COLORS.panelBg)
+    self:drawText(4, 7, padOrTrunc(string.format(
+        "Rack Armed:%-5s  Active Exoticizers:%d / %d  Completed Cycles:%d  Errors:%d  LSC Fill:%s",
+        tostring(st.armed == true), tonumber(st.activeCount) or 0, #exs,
+        tonumber(st.completedCycles) or 0, tonumber(st.errorCount) or 0,
+        st.lscPct and string.format("%.1f%%", st.lscPct) or "--"), 152), COLORS.fg, COLORS.panelBg)
+    self:drawText(4, 8, padOrTrunc(string.format(
+        "Godforge Controller: Online=%s  Active=%s  WorkAllowed=%s  Rings:%s  Connected:%s  Upgrades:%s",
+        tostring(gf.online == true), tostring(gf.active == true), tostring(gf.workAllowed ~= false),
+        tostring(gf.rings or "-"), tostring(gf.connected or "-"), tostring(gf.upgrades or "-")), 152), COLORS.cyan, COLORS.panelBg)
+
+    local bx = 4
+    bx = self:drawOrchestratorBtn(bx, 10, "[Arm Gorge]", COLORS.fg, COLORS.darkGreen, "gorge", "resume")
+    bx = self:drawOrchestratorBtn(bx, 10, "[Pause Gorge]", COLORS.yellow, COLORS.amberBg, "gorge", "pause")
+    bx = self:drawOrchestratorBtn(bx, 10, "[Unstick All]", COLORS.yellow, COLORS.btnBg, "gorge", "unstick")
+    bx = self:drawOrchestratorBtn(bx, 10, "[Retry Errors]", COLORS.purple, COLORS.btnBg, "gorge", "retry_errors")
+    self:drawOrchestratorBtn(bx, 10, "[Poll Now]", COLORS.cyan, COLORS.btnBg, "gorge", "poll")
+
+    self:drawFrame(2, 14, 157, 34, COLORS.border, COLORS.panelBg, "round")
+    self:drawText(4, 14, string.format(" ◈ EXOTICIZER MODULES (%d / 8) ", #exs), COLORS.accent, COLORS.panelBg)
+    self:drawText(4, 16, padOrTrunc(string.format("%-4s %-18s %-17s %-11s %-12s %-8s %-42s %s",
+        "#", "Exoticizer", "Cfg Mode", "Eff Mode", "Phase", "Cycles", "Status / Last Error", "Action"), 152), COLORS.muted, COLORS.panelBg)
+    self:drawText(4, 17, string.rep("─", 152), COLORS.border, COLORS.panelBg)
+
+    local modeSeq = { "magmatter", "gluon", "auto" }
+    for i = 1, math.min(10, #exs) do
+        local ex = exs[i]
+        if type(ex) == "table" then
+            local ry = 17 + i * 2
+            local bg = (i % 2 == 0) and COLORS.rowAltBg or COLORS.panelBg
+            self:fillRect(3, ry, 155, 1, " ", COLORS.fg, bg)
+            local exId = ex.id or i
+            local cfgM = tostring(ex.mode or "auto")
+            self:drawText(4, ry, string.format("%-4d %-18s", exId, padOrTrunc(ex.name or ("Exoticizer #" .. exId), 18)), COLORS.fg, bg)
+            self:drawButton(27, ry, "[" .. padOrTrunc(cfgM:upper(), 11) .. "]", COLORS.purple, COLORS.btnBg, function()
+                local cur = 1
+                for k, m in ipairs(modeSeq) do if m == cfgM then cur = k break end end
+                local nxt = modeSeq[(cur % #modeSeq) + 1]
+                if self.cb.onPeerAction then
+                    self.statusMsg = tostring(self.cb.onPeerAction("gorge", "set_mode", { exoticizerId = exId, mode = nxt }) or ("Set mode " .. nxt))
+                end
+            end)
+            self:drawText(45, ry, padOrTrunc(tostring(ex.activeMode or cfgM):upper(), 11), COLORS.cyan, bg)
+            self:drawText(57, ry, padOrTrunc(tostring(ex.phase or "IDLE"), 12),
+                ex.lastError and COLORS.red or ((ex.phase == "WAIT_END") and COLORS.green or COLORS.fg), bg)
+            self:drawText(70, ry, string.format("%-8d %s", tonumber(ex.cycles) or 0,
+                padOrTrunc(ex.lastError or "OK", 42)), ex.lastError and COLORS.red or COLORS.muted, bg)
+            self:drawOrchestratorBtn(122, ry, "[Unstick]", COLORS.yellow, COLORS.btnBg, "gorge", "unstick", { exoticizerId = exId })
+        end
+    end
+end
+
+function UI:renderPumpTab()
+    local peer = self.hub and self.hub.peers and self.hub.peers.pump
+    local st = peer and peer.status or nil
+    if type(st) ~= "table" then
+        self:renderPeerOfflineGuide("SPACE ELEVATOR PUMP ORCHESTRATOR", "pump", peer, 180)
+        return
+    end
+    local now = tonumber(self.hub.nowUptime) or 0
+    local fresh = peer.addr and (now - (peer.lastSeen or -1000)) < 180
+    local pumps = type(st.pumps) == "table" and st.pumps or {}
+    local actN, multSum = 0, 0
+    for _, p in ipairs(pumps) do
+        if type(p) == "table" then
+            if p.active then actN = actN + 1 end
+            multSum = multSum + (tonumber(p.mult) or 0)
+        end
+    end
+    local thresh = tonumber(st.threshold) or 0.95
+    local flOk, flLow, flRows = 0, 0, {}
+    for k, fl in pairs(type(st.fluids) == "table" and st.fluids or {}) do
+        if type(fl) == "table" and (tonumber(fl.target) or 0) > 0 then
+            local eff = tonumber(fl.total) or ((tonumber(fl.meAmount) or 0) + (tonumber(fl.queued) or 0))
+            local tgt = tonumber(fl.target)
+            local ok = eff >= (thresh * tgt)
+            if ok then flOk = flOk + 1 else flLow = flLow + 1 end
+            flRows[#flRows + 1] = { label = fl.label or tostring(k), eff = eff, target = tgt, pct = (eff / tgt) * 100.0, ok = ok }
+        end
+    end
+    table.sort(flRows, function(a, b)
+        if a.ok ~= b.ok then return not a.ok end
+        return a.label < b.label
+    end)
+
+    self:drawFrame(2, 5, 157, 7, COLORS.border, COLORS.panelBg, "round")
+    self:drawText(4, 5, " ◈ SPACE ELEVATOR PUMP ORCHESTRATOR ", COLORS.accent, COLORS.panelBg)
+    self:drawText(138, 5, fresh and (" ONLINE (" .. UI.formatAge(now, peer.lastSeen) .. ") ") or " STALE ", fresh and COLORS.green or COLORS.yellow, COLORS.panelBg)
+    self:drawText(4, 7, padOrTrunc(string.format(
+        "Paused:%-5s  Active Pumps:%d/%d  Total Parallel Mult:%d  Fluids:%d OK / %d Low (Threshold %.0f%%)",
+        tostring(st.paused == true), actN, #pumps, multSum, flOk, flLow, thresh * 100), 152), COLORS.fg, COLORS.panelBg)
+
+    local bx = 4
+    bx = self:drawOrchestratorBtn(bx, 9, "[Wake / Poll]", COLORS.green, COLORS.darkGreen, "pump", "poll")
+    bx = self:drawOrchestratorBtn(bx, 9, "[Refresh Pumps]", COLORS.cyan, COLORS.btnBg, "pump", "refresh_pumps")
+    self:drawOrchestratorBtn(bx, 9, "[Reload Config]", COLORS.yellow, COLORS.btnBg, "pump", "reload")
+
+    self:drawFrame(2, 13, 157, 35, COLORS.border, COLORS.panelBg, "round")
+    self:drawText(4, 13, string.format(" ◈ MANAGED FLUID TARGETS (%d) ", #flRows), COLORS.accent, COLORS.panelBg)
+    self:drawText(4, 15, padOrTrunc(string.format("%-32s %-14s %-14s %-8s %-32s %s",
+        "Fluid", "Effective", "Target", "Fill %", "Progress", "State"), 152), COLORS.muted, COLORS.panelBg)
+    self:drawText(4, 16, string.rep("─", 152), COLORS.border, COLORS.panelBg)
+
+    local maxShow = 15
+    local maxScroll = math.max(0, #flRows - maxShow)
+    self.tabScroll = math.max(0, math.min(maxScroll, self.tabScroll or 0))
+    for i = 1, math.min(maxShow, #flRows - self.tabScroll) do
+        local r = flRows[self.tabScroll + i]
+        local ry = 16 + i * 2
+        local bg = (i % 2 == 0) and COLORS.rowAltBg or COLORS.panelBg
+        self:fillRect(3, ry, 155, 1, " ", COLORS.fg, bg)
+        self:drawText(4, ry, string.format("%-32s %-14s %-14s %6.1f%%",
+            padOrTrunc(r.label, 32), UI.formatNumber(r.eff, "L"), UI.formatNumber(r.target, "L"), r.pct),
+            r.ok and COLORS.fg or COLORS.yellow, bg)
+        self:drawProgressBar(76, ry, 30, r.pct, r.ok and COLORS.green or COLORS.yellow, COLORS.border, bg)
+        self:drawText(109, ry, r.ok and "OK" or "PUMP/LOW", r.ok and COLORS.green or COLORS.yellow, bg)
+    end
 end
 
 function UI:renderSetupTab()
@@ -852,13 +1174,21 @@ function UI:render()
         self:renderCpusTab()
     elseif self.tab == TAB_MESH then
         self:renderMeshTab()
+    elseif self.tab == TAB_DTPF then
+        self:renderDtpfTab()
+    elseif self.tab == TAB_UNIVERSAL then
+        self:renderUniversalTab()
+    elseif self.tab == TAB_GORGE then
+        self:renderGorgeTab()
+    elseif self.tab == TAB_PUMP then
+        self:renderPumpTab()
     elseif self.tab == TAB_SETUP then
         self:renderSetupTab()
     end
 
     self:drawText(1, self.h - 1, string.rep("─", self.w), COLORS.border, COLORS.bg)
     self:drawText(2, self.h, padOrTrunc(self.statusMsg or "", self.w - 60), COLORS.fg, COLORS.bg)
-    self:drawText(self.w - 57, self.h, "Keys: 1-4 Tabs | S Scan | P Ping | L Log | R Reset | Q Quit", COLORS.muted, COLORS.bg)
+    self:drawText(self.w - 57, self.h, "Keys: 1-8 Tabs | S Scan | P Ping | L Log | R Reset | Q Quit", COLORS.muted, COLORS.bg)
 
     self:renderLogModal()
     self:flush()
@@ -897,17 +1227,23 @@ function UI:handleScroll(dir)
         self.logScroll = math.max(0, (self.logScroll or 0) + delta)
     elseif self.tab == TAB_CPUS then
         self.cpuScroll = math.max(0, (self.cpuScroll or 0) + delta)
+    elseif self.tab >= TAB_DTPF and self.tab <= TAB_PUMP then
+        self.tabScroll = math.max(0, (self.tabScroll or 0) + delta)
     end
     self:render()
 end
 
-function UI:handleKeyDown(char, _code)
+function UI:handleKeyDown(char, code)
     if char == 113 or char == 81 then -- 'q'/'Q'
         self.running = false
-    elseif char == 49 then self.tab = TAB_OVERVIEW; self.confirmCancelCpu = nil
-    elseif char == 50 then self.tab = TAB_CPUS; self.confirmCancelCpu = nil
-    elseif char == 51 then self.tab = TAB_MESH; self.confirmCancelCpu = nil
-    elseif char == 52 then self.tab = TAB_SETUP; self.confirmCancelCpu = nil
+    elseif char >= 49 and char <= 56 then -- '1'..'8'
+        self.tab = char - 48
+        self.tabScroll = 0
+        self.confirmCancelCpu = nil
+    elseif code == 15 or char == 9 then -- Tab cycles 1..8
+        self.tab = (self.tab % 8) + 1
+        self.tabScroll = 0
+        self.confirmCancelCpu = nil
     elseif char == 108 or char == 76 then -- 'l'/'L'
         self.logModalActive = not self.logModalActive
     elseif char == 115 or char == 83 then -- 's'/'S'

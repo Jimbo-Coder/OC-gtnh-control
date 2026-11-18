@@ -83,7 +83,7 @@ function UI.formatNumber(n, suffix)
     end
 end
 
-function UI.new(cfg, state, onSave, compLib)
+function UI.new(cfg, state, onSave, compLib, extras)
     local cl = compLib or component
     local gpu = cl.isAvailable and cl.isAvailable("gpu") and cl.gpu or (cl.list and cl.list("gpu", true)() and cl.proxy(cl.list("gpu", true)()))
     local w, h = 160, 50
@@ -98,6 +98,7 @@ function UI.new(cfg, state, onSave, compLib)
         cfg = cfg,
         state = state,
         onSave = onSave,
+        extras = extras or {},
         comp = cl,
         gpu = gpu,
         w = w,
@@ -293,14 +294,15 @@ function UI:renderHeader()
         kpis.errorCount or 0, gfTxt, lscTxt, linkTxt)
     self:drawText(nx, 1, padOrTrunc(summary, self.w - nx - 38), COLORS.muted, COLORS.headerBg)
 
-    local rx = self.w - 36
+    local rx = self.w - 35
     rx = self:drawButton(rx, 1, "[Poll]", COLORS.cyan, COLORS.btnBg, function()
         self.state._forcePollNow = true
         self.statusMsg = "Manual poll requested."
     end) + 1
-    rx = self:drawButton(rx, 1, "[Cancel Crafts]", COLORS.yellow, COLORS.amberBg, function()
-        local nCan = Scheduler.cancelAllFakeCrafts(self.cfg, self.state, self.comp)
-        self.statusMsg = string.format("Canceled %d fake craft(s) & cleared patterns.", nCan)
+    rx = self:drawButton(rx, 1, "[Unstick All]", COLORS.yellow, COLORS.amberBg, function()
+        local nRec, nCan = Scheduler.unstickExoticizer(self.cfg, self.state, nil, self.comp, "manual")
+        self.state._forcePollNow = true
+        self.statusMsg = string.format("Unstuck all: recovered %d cell(s), canceled %d craft(s).", nRec or 0, nCan or 0)
     end) + 1
     rx = self:drawButton(rx, 1, "[Log]", COLORS.fg, COLORS.btnBg, function()
         self.logModalActive = true
@@ -422,14 +424,10 @@ function UI:renderOverviewTab()
                 self.state._forcePollNow = true
                 self:save(string.format("%s enabled -> %s", ex.name, tostring(ex.enabled)))
             end) + 2
-        bx = self:drawButton(bx, cy + 2, "[Retry]", COLORS.yellow, COLORS.btnBg, function()
-            es.phase = "IDLE"
-            es.retryAt = 0
-            es.craftFailCount = 0
-            es.lastError = nil
-            es.lastLoggedErr = nil
+        bx = self:drawButton(bx, cy + 2, "[Unstick]", COLORS.yellow, COLORS.btnBg, function()
+            local nRec, nCan = Scheduler.unstickExoticizer(self.cfg, self.state, ex.id or exIdx, self.comp, "manual")
             self.state._forcePollNow = true
-            self.statusMsg = ex.name .. " reset to IDLE."
+            self.statusMsg = string.format("Unstuck %s (cells:%d, crafts:%d).", ex.name, nRec or 0, nCan or 0)
         end) + 2
         self:drawButton(bx, cy + 2, "[Inspect]", COLORS.cyan, COLORS.btnBg, function()
             self.selectedExIdx = exIdx
@@ -542,14 +540,10 @@ function UI:renderInspectorTab()
         local _, n = Hardware.cancelFakeCraft(ex, es.fakeName or "", self.comp, self.state, 1.5)
         self.statusMsg = string.format("Canceled %d matching craft(s).", n or 0)
     end) + 2
-    self:drawButton(ax, 40, "[Reset IDLE]", COLORS.green, COLORS.btnBg, function()
-        es.phase = "IDLE"
-        es.retryAt = 0
-        es.craftFailCount = 0
-        es.lastError = nil
-        es.lastLoggedErr = nil
+    self:drawButton(ax, 40, "[Unstick]", COLORS.green, COLORS.btnBg, function()
+        local nRec, nCan = Scheduler.unstickExoticizer(self.cfg, self.state, ex.id or exIdx, self.comp, "manual")
         self.state._forcePollNow = true
-        self.statusMsg = ex.name .. " reset to IDLE."
+        self.statusMsg = string.format("Unstuck %s (cells:%d, crafts:%d).", ex.name, nRec or 0, nCan or 0)
     end)
 end
 
@@ -611,7 +605,16 @@ function UI:renderSetupTab()
             local ry = 9 + (i - 1) * 2
             self:drawText(4, ry, padOrTrunc(r.lbl .. ":", 22), COLORS.muted, COLORS.panelBg)
             local addr = ex[r.field]
-            self:drawButton(27, ry, "[" .. (addr and Hardware.shortAddr(addr) or "Auto/None") .. " (Click cycle)]",
+            local hintTag = ""
+            if addr and r.list == disc.interfaces then
+                for _, item in ipairs(disc.interfaces or {}) do
+                    if item.address == addr and item.roleHint then
+                        hintTag = " " .. item.roleHint
+                        break
+                    end
+                end
+            end
+            self:drawButton(27, ry, "[" .. (addr and (Hardware.shortAddr(addr) .. hintTag) or "Auto/None") .. " (Cycle)]",
                 addr and COLORS.cyan or COLORS.yellow, COLORS.btnBg,
                 function() cycleAddr(r.field, r.list) end)
         end
@@ -699,16 +702,43 @@ function UI:renderSetupTab()
         self:save("Log Level -> " .. self.cfg.logLevel)
     end)
 
-    self:drawText(84, 22, string.format("Discovered: IF=%d  TP=%d  RS=%d  DB=%d  GT=%d  LSC=%s",
+    self:drawText(84, 21, "Auto-Unstick Watch:", COLORS.muted, COLORS.panelBg)
+    local auEn = (self.cfg.autoUnstickEnable ~= false)
+    self:drawButton(106, 21, auEn and "[ON ]" or "[OFF]", auEn and COLORS.green or COLORS.yellow, COLORS.btnBg, function()
+        self.cfg.autoUnstickEnable = not auEn
+        self:save("Auto-Unstick Watchdog -> " .. tostring(self.cfg.autoUnstickEnable))
+    end)
+    self:drawText(113, 21, string.format("%.0fs", tonumber(self.cfg.autoUnstickSec) or 600), COLORS.cyan, COLORS.panelBg)
+    self:drawButton(120, 21, "[-]", COLORS.yellow, COLORS.btnBg, function()
+        self.cfg.autoUnstickSec = math.max(60, (tonumber(self.cfg.autoUnstickSec) or 600) - 60)
+        self:save("Auto-Unstick Sec -> " .. tostring(self.cfg.autoUnstickSec))
+    end)
+    self:drawButton(125, 21, "[+]", COLORS.green, COLORS.btnBg, function()
+        self.cfg.autoUnstickSec = math.min(3600, (tonumber(self.cfg.autoUnstickSec) or 600) + 60)
+        self:save("Auto-Unstick Sec -> " .. tostring(self.cfg.autoUnstickSec))
+    end)
+
+    self:drawText(84, 23, "Boot Autostart:", COLORS.muted, COLORS.panelBg)
+    local autoOn = (self.extras.isAutostartEnabled and self.extras.isAutostartEnabled()) == true
+    self:drawButton(106, 23, autoOn and "[.shrc: ON ]" or "[.shrc: OFF]", autoOn and COLORS.green or COLORS.muted, COLORS.btnBg, function()
+        if self.extras.toggleAutostart then
+            local nowOn = self.extras.toggleAutostart()
+            self.statusMsg = "Boot Autostart (/home/.shrc) -> " .. (nowOn and "ENABLED" or "DISABLED")
+        else
+            self.statusMsg = "Autostart toggle unavailable in standalone UI."
+        end
+    end)
+
+    self:drawText(84, 25, string.format("Discovered: IF=%d  TP=%d  RS=%d  DB=%d  GT=%d  LSC=%s",
         #(disc.interfaces or {}), #(disc.transposers or {}), #(disc.redstones or {}),
         #(disc.databases or {}), #(disc.machines or {}), disc.lscAddr and "YES" or "NO"),
         COLORS.fg, COLORS.panelBg)
 
-    self:drawText(84, 25, "Multi-Exoticizer Rack Architecture:", COLORS.accent, COLORS.panelBg)
-    self:drawText(84, 27, "1. One Tier-3 Database Upgrade holds up to 8 Exoticizers (10 slots each).", COLORS.fg, COLORS.panelBg)
-    self:drawText(84, 29, "2. Each Exoticizer encodes ONLY its active batch fluids (3 Mag or 7 Gluon).", COLORS.fg, COLORS.panelBg)
-    self:drawText(84, 31, "3. Dynamic cell count (1..6) clears Output Drive cleanly via ME IO Port.", COLORS.fg, COLORS.panelBg)
-    self:drawText(84, 33, "4. Missing plasmas or stale proxies enter bounded RETRY_WAIT (no lockup).", COLORS.fg, COLORS.panelBg)
+    self:drawText(84, 28, "Multi-Exoticizer Rack Architecture:", COLORS.accent, COLORS.panelBg)
+    self:drawText(84, 30, "1. One Tier-3 Database Upgrade holds up to 8 Exoticizers (10 slots each).", COLORS.fg, COLORS.panelBg)
+    self:drawText(84, 32, "2. Each Exoticizer encodes ONLY its active batch fluids (3 Mag or 7 Gluon).", COLORS.fg, COLORS.panelBg)
+    self:drawText(84, 34, "3. Dynamic cell count (1..6) clears Output Drive cleanly via ME IO Port.", COLORS.fg, COLORS.panelBg)
+    self:drawText(84, 36, "4. Boot + Auto-Unstick recovers IO Port cells & preserves in-flight batches.", COLORS.fg, COLORS.panelBg)
 end
 
 function UI:renderLogModal()

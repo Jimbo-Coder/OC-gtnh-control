@@ -736,11 +736,11 @@ assertEq(st4.exStates[1].phase, "REQUEST", "Failed craft 2/3")
 Scheduler.step(cfg4, st4, 3.0, { craftWaitSec = 0, sleepFn = function() end })
 assertEq(st4.exStates[1].phase, "RETRY_WAIT", "Entered RETRY_WAIT on 3rd failure (no modal hang!)")
 
--- After backoff, auto-recovers!
-rigF.outItems[1] = nil
-for k in pairs(rigF.outFluids) do rigF.outFluids[k] = nil end
-Scheduler.step(cfg4, st4, 15.0)
-assertEq(st4.exStates[1].phase, "IDLE", "Auto-recovered from RETRY_WAIT after backoff")
+-- After backoff, auto-recovers into REQUEST (preserving post-drain batch), and unstick clears to IDLE!
+Scheduler.step(cfg4, st4, 15.0, { craftWaitSec = 0, sleepFn = function() end })
+assertEq(st4.exStates[1].phase, "REQUEST", "Post-drain RETRY_WAIT resumed ENCODE->REQUEST after backoff")
+Scheduler.unstickExoticizer(cfg4, st4, 1, nil, "manual", { cancelWaitSec = 0, sleepFn = function() end })
+assertEq(st4.exStates[1].phase, "IDLE", "Manual unstick cleared to IDLE")
 
 -- =====================================================================
 -- TEST 5: Godforge Controller + LSC Hysteresis + Mesh + Standalone Guard
@@ -854,7 +854,7 @@ ui6:handleTouch(38, 1, 0)
 assertEq(cfg3.armed, not prevArmed, "Touch toggled Armed button")
 
 -- =====================================================================
--- TEST 7: CLI --check & --off Entrypoint Tests
+-- TEST 7: CLI --check, --off, --unstick & --autostart Entrypoint Tests
 -- =====================================================================
 do
     local mainChunk = assert(loadfile(__GORGE_ROOT .. "/main.lua"))
@@ -862,6 +862,117 @@ do
     mainChunk("--off")
     local cfgAfterOff = serialization.unserialize(__py_read_file(__GORGE_ROOT .. "/config.cfg"))
     assertEq(cfgAfterOff.armed, false, "--off disarmed config")
+    mainChunk("--unstick")
+    mainChunk("--autostart", "on")
+    local shrcOn = __py_read_file("/home/.shrc") or ""
+    assert(shrcOn:find("gorge", 1, true), "--autostart on wrote /home/.shrc")
+    mainChunk("--autostart", "off")
+    local shrcOff = __py_read_file("/home/.shrc") or ""
+    assert(not shrcOff:find("gorge", 1, true), "--autostart off removed gorge from /home/.shrc")
+end
+
+-- =====================================================================
+-- TEST 8: Self-Unsticking, Stranded IO Cells, Post-Drain Retry & roleHint
+-- =====================================================================
+do
+    -- Verify roleHint detects IN vs OUT interfaces cleanly
+    local hintMap = {}
+    for _, inf in ipairs(st3.discovery.interfaces or {}) do hintMap[inf.address] = inf.roleHint end
+    assertEq(hintMap["if-in-1"], "IN", "Interface with pattern+CPUs tagged IN")
+    assertEq(hintMap["if-out-1"], "OUT", "Output subnet interface tagged OUT")
+
+    -- Simulate cells stranded in ME IO Port (slot 2 & slot 7) and recover them
+    local driveCells, ioInCells, ioOutCells = 1, 1, 1
+    local strandTp = {
+        getInventorySize = function() return 10 end,
+        getSlotStackSize = function(side, slot)
+            if side == 4 then return (slot <= driveCells) and 1 or 0 end
+            if side == 5 then
+                if slot == 2 and ioInCells > 0 then return 1 end
+                if slot == 7 and ioOutCells > 0 then return 1 end
+            end
+            return 0
+        end,
+        transferItem = function(fromS, toS, cnt, slot)
+            if fromS == 5 and toS == 4 then
+                if slot == 7 and ioOutCells > 0 then ioOutCells = ioOutCells - 1; driveCells = driveCells + 1; return 1 end
+                if slot == 2 and ioInCells > 0 then ioInCells = ioInCells - 1; driveCells = driveCells + 1; return 1 end
+            end
+            return 0
+        end,
+    }
+    component._register("tp-strand", "transposer", strandTp)
+    local okRec, movedN = Hardware.recoverStrandedCells({ transposerAddress = "tp-strand", meIoPortSide = 5, meDriveSide = 4 }, nil, nil, 0, function() end)
+    assert(okRec, "recoverStrandedCells succeeded")
+    assertEq(movedN, 2, "Recovered both stranded input + output cells from IO Port")
+    assertEq(driveCells, 3, "All 3 cells safely back in Output ME Drive")
+
+    -- Post-drain RETRY_WAIT preserves batchInputs & resumes via saveInflight/loadInflight
+    local allowCraft8 = false
+    local reqCalls8 = 0
+    local rig8 = makeExoticizerRig({
+        cellCount = 2,
+        outItems = { { label = "Draconium Dust", size = 1 } },
+        outFluids = {
+            { label = "Spatially Enlarged Fluid", amount = 8000 },
+            { label = "Tachyon Rich Temporal Fluid", amount = 3000 },
+        },
+    })
+    local patOk8 = rig8.inIf
+    local origReq8 = patOk8.getCraftables
+    patOk8.getCraftables = function(filter)
+        if not allowCraft8 then return {} end
+        reqCalls8 = reqCalls8 + 1
+        return origReq8(filter)
+    end
+    component._reset()
+    component._register("db-8", "database", dbProxy)
+    component._register("if-out-8", "me_interface", rig8.outIf)
+    component._register("if-in-8", "me_interface", rig8.inIf)
+    component._register("tp-8", "transposer", rig8.tp)
+    component._register("rs-8", "redstone", { getInput = function() return 15 end })
+    local cfg8 = Scheduler.defaultConfig()
+    cfg8.armed = true
+    cfg8.retryBackoffSec = 10.0
+    cfg8.autoUnstickEnable = true
+    cfg8.autoUnstickSec = 120.0
+    cfg8.exoticizers = { cfg8.exoticizers[1] }
+    cfg8.exoticizers[1].mode = "magmatter"
+    cfg8.exoticizers[1].outputMeInterfaceAddress = "if-out-8"
+    cfg8.exoticizers[1].inputMeInterfaceAddress = "if-in-8"
+    cfg8.exoticizers[1].transposerAddress = "tp-8"
+    cfg8.exoticizers[1].redstoneIoAddress = "rs-8"
+    local st8 = Scheduler.newState()
+    Scheduler.syncHardware(cfg8, st8)
+
+    -- Drain Output AE -> fails craft 3x -> RETRY_WAIT with inflightPostDrain=true!
+    Scheduler.step(cfg8, st8, 1.0, { craftWaitSec = 0, sleepFn = function() end })
+    Scheduler.step(cfg8, st8, 2.0, { craftWaitSec = 0, sleepFn = function() end })
+    Scheduler.step(cfg8, st8, 3.0, { craftWaitSec = 0, sleepFn = function() end })
+    assertEq(st8.exStates[1].phase, "RETRY_WAIT", "Post-drain failure enters RETRY_WAIT")
+    assertEq(st8.exStates[1].inflightPostDrain, true, "Marked inflightPostDrain=true")
+    assert(Scheduler.saveInflight("/tmp/gorge_test_inflight.dat", st8), "Saved inflight.dat")
+
+    -- Simulate reboot -> reload into fresh state -> resumes ENCODE -> REQUEST -> WAIT_END cleanly!
+    local stReboot = Scheduler.newState()
+    local restoredN = Scheduler.loadInflight("/tmp/gorge_test_inflight.dat", stReboot)
+    assertEq(restoredN, 1, "Loaded 1 inflight batch across reboot")
+    Scheduler.syncHardware(cfg8, stReboot)
+    allowCraft8 = true
+    Scheduler.step(cfg8, stReboot, 20.0, { craftWaitSec = 0, sleepFn = function() end })
+    assertEq(stReboot.exStates[1].phase, "WAIT_END", "Resumed in-flight batch cleanly into WAIT_END")
+    assertEq(reqCalls8, 1, "Re-encoded & requested craft after reboot without losing drained batch")
+
+    -- Auto-Unstick watchdog in WAIT_END after autoUnstickSec=120s
+    Scheduler.step(cfg8, stReboot, 200.0, { cancelWaitSec = 0, sleepFn = function() end })
+    assertEq(stReboot.exStates[1].phase, "IDLE", "Auto-Unstick watchdog cleared wedged WAIT_END back to IDLE")
+
+    -- GORGE_CMD unstick sets _pendingUnstick & executes on step
+    component._register("mod-8", "modem", modemProxy)
+    Hardware.handleMeshMessage(cfg8, stReboot, "mod-8", "ae2-host", 4205, "GORGE_CMD", "u-1", serialization.serialize({ action = "unstick", exoticizerId = 1 }))
+    assertEq(stReboot._pendingUnstick, 1, "GORGE_CMD unstick queued target 1")
+    Scheduler.step(cfg8, stReboot, 205.0, { cancelWaitSec = 0, sleepFn = function() end })
+    assertEq(stReboot._pendingUnstick, nil, "Scheduler processed _pendingUnstick")
 end
 
 rawset(_G, "__HELD_OBJECTS", { cfg3, st3, cfg4, st4, cfg5, st5, ui6 })

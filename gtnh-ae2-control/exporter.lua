@@ -2241,15 +2241,18 @@ local function main()
                 end
                 return false, "CPU not found: " .. tostring(targetName)
             end,
-            onPeerAction = function(peerKey, action)
+            onPeerAction = function(peerKey, action, extra)
+                extra = extra or {}
                 if peerKey == "dtpf" then
                     local payload
                     if action == "pause" then
                         payload = { op = "dtpf_patch", patch = { armed = false } }
                     elseif action == "resume" then
                         payload = { op = "dtpf_patch", patch = { armed = true } }
+                    elseif action == "maint_sync" or action == "flush_od" or action == "lock_autopull" or action == "poll" then
+                        payload = { op = "dtpf_action", action = (action == "poll") and "poll_now" or action }
                     else
-                        payload = { op = "dtpf_action", action = "poll_now" }
+                        payload = { op = "dtpf_action", action = tostring(action) }
                     end
                     local res = callMeshRpc(interface, writeBridgeLine, dtpfMesh, "DTPF_CMD", payload, "DTPF_REPLY", 2.5)
                     if type(res) == "table" and res.ok then
@@ -2260,34 +2263,43 @@ local function main()
                     return "DTPF: " .. tostring(type(res) == "table" and res.error or "No response")
                 elseif peerKey == "pump" then
                     if action == "pause" or action == "resume" then
-                        return "Space Pump runs on stock targets; use [Poll] to wake/refresh."
+                        return "Space Pump runs on stock targets; use [Wake / Poll] or [Refresh Pumps]."
                     end
-                    local res = callMeshRpc(interface, writeBridgeLine, pumpMesh, "PUMP_CMD", { op = "action", action = "wake" }, "PUMP_REPLY", 2.5)
+                    local pumpAct = (action == "refresh_pumps" or action == "reload") and action or "wake"
+                    local res = callMeshRpc(interface, writeBridgeLine, pumpMesh, "PUMP_CMD", { op = "action", action = pumpAct }, "PUMP_REPLY", 2.5)
                     if type(res) == "table" and res.ok then
                         if type(res.status) == "table" then
                             pumpMesh.status = res.status
                             pumpMesh.statusUptime = uptimeNow()
                         end
-                        logMsg("MESH", "Space Pump refreshed via OC Mesh.")
-                        return "Space Pump: wake/refresh OK."
+                        logMsg("MESH", "Space Pump '" .. pumpAct .. "' OK.")
+                        return "Space Pump: " .. pumpAct .. " OK."
                     end
                     return "Space Pump: " .. tostring(type(res) == "table" and res.error or "No response")
                 elseif peerKey == "univ" then
-                    local act = (action == "poll") and "poll_now" or action
+                    local act = (action == "poll") and "poll_now" or tostring(action)
                     local res = callMeshRpc(interface, writeBridgeLine, univMesh, "UNIV_CMD", { action = act }, "UNIV_REPLY", 2.5)
                     if type(res) == "table" and res.ok then
                         if res.armed ~= nil and type(univMesh.status) == "table" then univMesh.status.armed = res.armed end
-                        logMsg("MESH", "Universal action '" .. tostring(act) .. "' OK.")
-                        return "Universal: " .. tostring(act) .. " OK."
+                        logMsg("MESH", "Universal action '" .. act .. "' OK.")
+                        return "Universal: " .. act .. " OK."
                     end
                     return "Universal: " .. tostring(type(res) == "table" and res.error or "No response")
                 elseif peerKey == "gorge" then
-                    local act = (action == "poll") and "poll_now" or action
-                    local res = callMeshRpc(interface, writeBridgeLine, gorgeMesh, "GORGE_CMD", { action = act }, "GORGE_REPLY", 2.5)
+                    local act = (action == "poll") and "poll_now" or tostring(action)
+                    local cmdTbl = { action = act, exoticizerId = extra.exoticizerId, mode = extra.mode }
+                    local res = callMeshRpc(interface, writeBridgeLine, gorgeMesh, "GORGE_CMD", cmdTbl, "GORGE_REPLY", 2.5)
                     if type(res) == "table" and res.ok then
-                        if res.armed ~= nil and type(gorgeMesh.status) == "table" then gorgeMesh.status.armed = res.armed end
-                        logMsg("MESH", "Gorge action '" .. tostring(act) .. "' OK.")
-                        return "Gorge: " .. tostring(act) .. " OK."
+                        if type(gorgeMesh.status) == "table" then
+                            if res.armed ~= nil then gorgeMesh.status.armed = res.armed end
+                            if action == "set_mode" and extra.exoticizerId and extra.mode then
+                                for _, ex in ipairs(gorgeMesh.status.exoticizers or {}) do
+                                    if ex.id == extra.exoticizerId then ex.mode = extra.mode break end
+                                end
+                            end
+                        end
+                        logMsg("MESH", "Gorge action '" .. act .. "' OK.")
+                        return "Gorge: " .. act .. " OK."
                     end
                     return "Gorge: " .. tostring(type(res) == "table" and res.error or "No response")
                 end

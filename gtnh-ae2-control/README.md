@@ -4,11 +4,12 @@ Mainnet AE2 InfluxDB Exporter, Remote Craft Requester / CPU Canceller, Level Mai
 
 ## Features
 
-- **160x50 Touch Control Center (`ae2_ui.lua`)** *(automatically launches when Tier 3 GPU + Screen are present; pass `--headless` for console-only daemon mode)*:
+- **160x50 8-Tab Touch Orchestrator (`ae2_ui.lua`)** *(automatically launches when Tier 3 GPU + Screen are present; pass `--headless` for console-only daemon mode)*:
   - **Tab 1 — Overview & Power**: AE2 power/storage bar, LSC EU fill & wireless EU, server TPS/MSPT/chunks, exporter/bridge/mesh status, top busy Crafting CPUs, and live scrollable Activity Log.
   - **Tab 2 — Crafting CPUs**: Full CPU table with busy filter, pagination, and 2-click `[Cancel Craft]` -> `[Confirm Cancel?]` safety guard.
-  - **Tab 3 — OC Mesh Peers**: Live health & telemetry cards for **DTPF**, **Space Pump**, **Universal RS**, and **Gorge / Exoticizer** with `[Pause]`, `[Resume]`, and `[Poll]` controls.
-  - **Tab 4 — Setup & Exports**: Live ON/OFF feature toggles and interval steppers (`s`) persisted immediately to `/home/config_overrides.lua` (survives updates without touching `/home/config.lua`).
+  - **Tab 3 — OC Mesh Overview**: Live health cards & `[Open ->]` shortcuts for **DTPF**, **Space Pump**, **Universal RS**, and **Gorge**.
+  - **Tabs 4–7 — Dedicated Peer Orchestrators** (**DTPF**, **Universal**, **Gorge**, **Pump**): Full-screen status KPIs, remote actions (`[Arm]`, `[Pause]`, `[Poll Now]`, `[Unstick All]`, `[Retry Errors]`, `[Maint Sync]`, `[Clear Stalls]`, `[Wake / Poll]`, `[Refresh Pumps]`), per-unit/pool/exoticizer/fluid tables, and offline setup guides.
+  - **Tab 8 — Setup & Exports**: Live ON/OFF feature toggles and interval steppers (`s`) persisted immediately to `/home/config_overrides.lua` (survives updates without touching `/home/config.lua`).
 - **GTNH 2.9 Extensions & Telemetry**:
   - Scientific notation (`2.42x10^21`) & LSC sensor telemetry + Crafting CPU duration metrics.
   - `ae2fc:fluid_drop` deduplication and batched Tier-3-RAM-safe item scanning (`allItemsMode = 5`).

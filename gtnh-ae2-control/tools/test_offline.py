@@ -692,19 +692,34 @@ local ui3 = Ae2UI.new(cfg3, hub3, {
         hub3.cpus.busyCount = 0
         return true, "Canceled " .. cpuName
     end,
-    onPeerAction = function(pk, act)
-        peerActionsLog[#peerActionsLog + 1] = pk .. ":" .. act
-        return pk .. " " .. act .. " OK"
+    onPeerAction = function(pk, act, extra)
+        local tag = pk .. ":" .. act
+        if type(extra) == "table" and extra.exoticizerId then
+            tag = tag .. ":" .. tostring(extra.exoticizerId)
+        end
+        if type(extra) == "table" and extra.mode then
+            tag = tag .. ":" .. tostring(extra.mode)
+        end
+        peerActionsLog[#peerActionsLog + 1] = tag
+        return tag .. " OK"
     end,
 })
 
-for t = 1, 4 do
+for t = 1, 8 do
     ui3.tab = t
     ui3:render()
 end
 ui3.logModalActive = true
 ui3:render()
 ui3.logModalActive = false
+
+-- Also exercise offline peer guide state glyph safety on Tabs 4..7
+do
+    local savedPeers = hub3.peers
+    hub3.peers = { dtpf = {}, pump = {}, univ = {}, gorge = {} }
+    for t = 4, 7 do ui3.tab = t; ui3:render() end
+    hub3.peers = savedPeers
+end
 
 -- Switch to Tab 2 (CPUs) & verify 2-click Cancel safety!
 ui3:handleKeyDown(50, 3)
@@ -717,11 +732,34 @@ ui3:handleTouch(127, 10, 0)
 assertEq(canceledCpuName, "CPU-Alpha", "2nd click confirmed and canceled CPU-Alpha")
 assertEq(ui3.confirmCancelCpu, nil, "Cleared confirm state after cancel")
 
--- Switch to Tab 3 (Mesh Peers) & click a Peer [Pause] button (Card 1 bottom y=23, x=6)
+-- Switch to Tab 3 (Mesh Peers) & click Card 1 [Pause] (x=6, y=23)
 ui3:handleKeyDown(51, 4)
 assertEq(ui3.tab, 3, "Key '3' switched to OC Mesh Peers tab")
 ui3:handleTouch(6, 23, 0)
 assertEq(peerActionsLog[#peerActionsLog], "dtpf:pause", "Peer button clicked dtpf:pause")
+
+-- Test dedicated orchestrator Tabs 4..7 actions!
+ui3:handleKeyDown(52, 5) -- Key '4': DTPF
+assertEq(ui3.tab, 4, "Key '4' switched to DTPF tab")
+ui3:handleTouch(46, 9, 0) -- [Maint Sync]
+assertEq(peerActionsLog[#peerActionsLog], "dtpf:maint_sync", "DTPF Maint Sync clicked")
+
+ui3:handleKeyDown(53, 6) -- Key '5': UNIVERSAL
+assertEq(ui3.tab, 5, "Key '5' switched to Universal tab")
+ui3:handleTouch(44, 9, 0) -- [Clear Stalls]
+assertEq(peerActionsLog[#peerActionsLog], "univ:clear_stalls", "Universal Clear Stalls clicked")
+
+ui3:handleKeyDown(54, 7) -- Key '6': GORGE
+assertEq(ui3.tab, 6, "Key '6' switched to Gorge tab")
+ui3:handleTouch(36, 10, 0) -- [Unstick All]
+assertEq(peerActionsLog[#peerActionsLog], "gorge:unstick", "Gorge Unstick All clicked")
+ui3:handleTouch(125, 19, 0) -- Row 1 [Unstick]
+assertEq(peerActionsLog[#peerActionsLog], "gorge:unstick:1", "Gorge row Unstick clicked")
+
+ui3:handleKeyDown(55, 8) -- Key '7': PUMP
+assertEq(ui3.tab, 7, "Key '7' switched to Pump tab")
+ui3:handleTouch(24, 9, 0) -- [Refresh Pumps]
+assertEq(peerActionsLog[#peerActionsLog], "pump:refresh_pumps", "Pump Refresh Pumps clicked")
 
 -- =====================================================================
 -- TEST 4: Live exporter.lua GUI Integration + Overrides Persistence + Pause Export
@@ -741,8 +779,8 @@ posts = {}
 local guiEvs = {
     -- Touch header [EXPORT: ON    ] at x=33, y=1 -> pauses exports & saves /home/config_overrides.lua
     { "touch", "scr-1", 33, 1, 0 },
-    -- Key '4' (Setup & Exports tab)
-    { "key_down", "kbd-1", 52, 5 },
+    -- Key '8' (Setup & Exports tab)
+    { "key_down", "kbd-1", 56, 9 },
     -- Touch [+] on itemInterval (y=7, x=126) -> 65 + 5 = 70s & saves /home/config_overrides.lua
     { "touch", "scr-1", 126, 7, 0 },
     -- Key 'Q' to exit cleanly
@@ -836,7 +874,7 @@ rawset(_G, "__HELD_OBJECTS", { cfg3, hub3, ui3 })
                         logs = {},
                     }
                     local u = Ae2UI.new(cfg, hub, {})
-                    for t = 1, 4 do u.tab = t; u:render() end
+                    for t = 1, 8 do u.tab = t; u:render() end
                     rawset(_G, "__PROD_HOLD", { cfg, hub, u })
                     """,
                     "prod_footprint_test",
