@@ -1176,6 +1176,23 @@ function Hardware.handleMeshMessage(cfg, state, localAddr, sender, port, msgType
                     state._forcePollNow = true
                 end
                 reply = { ok = true }
+            elseif cmd.action == "update_local" then
+                local hasInet = cl and ((cl.isAvailable and cl.isAvailable("internet")) or (cl.list and cl.list("internet", true)() ~= nil))
+                if not hasInet then
+                    reply = { ok = false, error = "No Internet Card on Universal OC" }
+                else
+                    local u = (type(cmd.url) == "string" and cmd.url ~= "") and cmd.url or "http://127.0.0.1:8765/oc-raw"
+                    if not u:match("^https?://[%w%.%-_:]+") then
+                        reply = { ok = false, error = "Invalid update URL" }
+                    else
+                        if state then
+                            state._pendingUpdateUrl = u
+                            state._pendingReboot = true
+                            state._forcePollNow = true
+                        end
+                        reply = { ok = true, updating = true, url = u }
+                    end
+                end
             elseif cmd.action == "reboot" then
                 if state then
                     state._pendingReboot = true

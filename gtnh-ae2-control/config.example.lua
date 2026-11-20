@@ -61,6 +61,10 @@ local config = {
     tpsInterval = 5,
     detailedTps = true,
 
+    -- AE2 Storage / Drives
+    enableStorage = true,
+    storageInterval = 60,
+
     -- Optional Out-of-Game Web Console TCP Bridge (set true only if running ae2_bridge.py)
     enableBridge = false,
     bridgeHost = "127.0.0.1",
@@ -85,6 +89,7 @@ config.energyInterval = config.energyInterval * 72
 config.energyAE2Interval = config.energyAE2Interval * 72
 config.cpuInterval = config.cpuInterval * 72
 config.tpsInterval = config.tpsInterval * 72
+config.storageInterval = (config.storageInterval or 60) * 72
 config.allItemsInterval = config.allItemsInterval * 72
 config.bridgeReconnectTicks = (config.bridgeReconnectSec or 10) * 72
 

@@ -39,13 +39,16 @@ end
 local OVERRIDES_PATH = "/home/config_overrides.lua"
 local INTERVAL_KEYS = {
     "itemInterval", "fluidInterval", "essentiaInterval", "energyInterval",
-    "energyAE2Interval", "cpuInterval", "tpsInterval", "allItemsInterval",
+    "energyAE2Interval", "cpuInterval", "tpsInterval", "storageInterval", "allItemsInterval",
 }
 local TOGGLE_KEYS = {
     "enableItems", "enableFluids", "enableEssentia", "enableEnergy", "enableWireless",
-    "enableEnergyAE2", "enableCpus", "enableTps", "detailedTps", "enableBridge",
-    "enableMesh", "enableLogging", "enableDebug",
+    "enableEnergyAE2", "enableCpus", "enableTps", "detailedTps", "enableStorage",
+    "enableBridge", "enableMesh", "enableLogging", "enableDebug",
 }
+
+if config.enableStorage == nil then config.enableStorage = true end
+if config.storageInterval == nil then config.storageInterval = 60 * 72 end
 
 local baseConfigSnapshot = { toggles = {}, intervals = {}, exportPaused = (config.exportPaused == true) }
 for _, k in ipairs(TOGGLE_KEYS) do
@@ -63,6 +66,7 @@ local maxInt = 9223372036854775807
 local AuthHeader = nil
 local needExitFlag = false
 local pendingSelfReboot = false
+local pendingSelfUpdateUrl = nil
 local lastItemScanSec = 0
 local uiActive = false
 
@@ -91,6 +95,11 @@ local hubState = {
     lastItemsCount = 0,
     exporterPaused = (config.exportPaused == true),
     ae2 = { connected = false, avgInjection = 0, avgUsage = 0, maxStorage = 0, currStorage = 0, idleUsage = 0 },
+    storage = {
+        uniqueItems = 0, totalItems = 0, uniqueFluids = 0, totalFluidLiters = 0,
+        drives = 0, cells = 0, fullCells = 0, usedBytes = 0, totalBytes = 0,
+        bytesPct = 0, usedTypes = 0, totalTypes = 0, typesPct = 0,
+    },
     lsc = { online = false, pct = 0, net5s = 0, in5s = 0, out5s = 0, wirelessStr = "0", wirelessOn = true },
     tps = { online = false, mspt = 0, tps = 20, chunks = 0, dims = 0 },
     cpus = { list = {}, total = 0, busyCount = 0 },
@@ -750,36 +759,50 @@ end
 local function exportItems(interface)
     local itemIter = interface.allItems()
     local lines = {}
+    local uItems, tItems = 0, 0
     while true do
         local currItem = itemIter()
         if currItem == nil then break end
-        if (currItem.size or 0) >= config.itemThreshold and currItem.label and currItem.label:find("^drop of") == nil then
-            lines[#lines + 1] = config.itemMeasurement .. ",item=" .. sanitize(currItem.label) .. " amount=" .. capInt(currItem.size) .. "i"
-            if #lines >= config.itemMaxExport then
-                flushBatch(config.dbURL .. config.itemDB, lines)
-                lines = {}
+        if currItem.label and currItem.label:find("^drop of") == nil then
+            uItems = uItems + 1
+            tItems = tItems + math.floor(tonumber(currItem.size) or 0)
+            if (currItem.size or 0) >= config.itemThreshold then
+                lines[#lines + 1] = config.itemMeasurement .. ",item=" .. sanitize(currItem.label) .. " amount=" .. capInt(currItem.size) .. "i"
+                if #lines >= config.itemMaxExport then
+                    flushBatch(config.dbURL .. config.itemDB, lines)
+                    lines = {}
+                end
             end
         end
     end
+    hubState.storage.uniqueItems = uItems
+    hubState.storage.totalItems = capInt(tItems)
     flushBatch(config.dbURL .. config.itemDB, lines)
 end
 
 local function exportItemsIds(interface, allItemIds)
     local lines = {}
+    local uItems, tItems = 0, 0
     for id in pairs(allItemIds) do
         local currReturn = interface.getItemsInNetworkById({id})
         if currReturn then
             for _, item in pairs(currReturn) do
-                if (item.size or 0) >= config.itemThreshold and item.label and item.label:find("^drop of") == nil then
-                    lines[#lines + 1] = config.itemMeasurement .. ",item=" .. sanitize(item.label) .. " amount=" .. capInt(item.size) .. "i"
-                    if #lines >= config.itemMaxExport then
-                        flushBatch(config.dbURL .. config.itemDB, lines)
-                        lines = {}
+                if item.label and item.label:find("^drop of") == nil then
+                    uItems = uItems + 1
+                    tItems = tItems + math.floor(tonumber(item.size) or 0)
+                    if (item.size or 0) >= config.itemThreshold then
+                        lines[#lines + 1] = config.itemMeasurement .. ",item=" .. sanitize(item.label) .. " amount=" .. capInt(item.size) .. "i"
+                        if #lines >= config.itemMaxExport then
+                            flushBatch(config.dbURL .. config.itemDB, lines)
+                            lines = {}
+                        end
                     end
                 end
             end
         end
     end
+    hubState.storage.uniqueItems = uItems
+    hubState.storage.totalItems = capInt(tItems)
     flushBatch(config.dbURL .. config.itemDB, lines)
 end
 
@@ -801,6 +824,7 @@ local function exportItemsNumeric(interface, onStep)
     local slowRange = config.slowRange
     local currID = 0
     local itemCount = 0
+    local totalItems = 0
     while currID <= maxID do
         local range
         if (currID + batchSize < slowRange[1]) or (currID > slowRange[2]) then
@@ -817,12 +841,15 @@ local function exportItemsNumeric(interface, onStep)
         local ok, currReturn = pcall(interface.getItemsInNetworkById, range)
         if ok and currReturn then
             for _, item in pairs(currReturn) do
-                itemCount = itemCount + 1
-                if (item.size or 0) >= config.itemThreshold and item.label and item.label:find("^drop of") == nil then
-                    lines[#lines + 1] = config.itemMeasurement .. ",item=" .. sanitize(item.label) .. " amount=" .. capInt(item.size) .. "i"
-                    if #lines >= config.itemMaxExport then
-                        flushBatch(config.dbURL .. config.itemDB, lines)
-                        lines = {}
+                if item.label and item.label:find("^drop of") == nil then
+                    itemCount = itemCount + 1
+                    totalItems = totalItems + math.floor(tonumber(item.size) or 0)
+                    if (item.size or 0) >= config.itemThreshold then
+                        lines[#lines + 1] = config.itemMeasurement .. ",item=" .. sanitize(item.label) .. " amount=" .. capInt(item.size) .. "i"
+                        if #lines >= config.itemMaxExport then
+                            flushBatch(config.dbURL .. config.itemDB, lines)
+                            lines = {}
+                        end
                     end
                 end
             end
@@ -835,20 +862,29 @@ local function exportItemsNumeric(interface, onStep)
     lastItemScanSec = math.floor(((os.time() - tScan0) / 72) * 100 + 0.5) / 100
     hubState.lastScanDurSec = lastItemScanSec
     hubState.lastItemsCount = itemCount
+    hubState.storage.uniqueItems = itemCount
+    hubState.storage.totalItems = capInt(totalItems)
 end
 
 local function exportItemsInfMem(interface)
     local itemList = interface.getItemsInNetwork()
     local lines = {}
+    local uItems, tItems = 0, 0
     for _, item in pairs(itemList) do
-        if (item.size or 0) >= config.itemThreshold and item.label and item.label:find("^drop of") == nil then
-            lines[#lines + 1] = config.itemMeasurement .. ",item=" .. sanitize(item.label) .. " amount=" .. capInt(item.size) .. "i"
-            if #lines >= config.itemMaxExport then
-                flushBatch(config.dbURL .. config.itemDB, lines)
-                lines = {}
+        if item.label and item.label:find("^drop of") == nil then
+            uItems = uItems + 1
+            tItems = tItems + math.floor(tonumber(item.size) or 0)
+            if (item.size or 0) >= config.itemThreshold then
+                lines[#lines + 1] = config.itemMeasurement .. ",item=" .. sanitize(item.label) .. " amount=" .. capInt(item.size) .. "i"
+                if #lines >= config.itemMaxExport then
+                    flushBatch(config.dbURL .. config.itemDB, lines)
+                    lines = {}
+                end
             end
         end
     end
+    hubState.storage.uniqueItems = uItems
+    hubState.storage.totalItems = capInt(tItems)
     flushBatch(config.dbURL .. config.itemDB, lines)
 end
 
@@ -870,12 +906,98 @@ local function exportFluids(interface)
     local ok, fluids = pcall(interface.getFluidsInNetwork)
     if not ok or type(fluids) ~= "table" then return end
     local lines = {}
+    local uFl, tFl = 0, 0
     for _, fluid in pairs(fluids) do
-        if (fluid.amount or 0) >= config.fluidThreshold and fluid.label then
-            lines[#lines + 1] = config.fluidMeasurement .. ",fluid=" .. sanitize(fluid.label) .. " amount=" .. capInt(fluid.amount) .. "i"
+        local amt = tonumber(fluid.amount or fluid.size or 0) or 0
+        if fluid.label then
+            uFl = uFl + 1
+            tFl = tFl + math.floor(amt)
+            if amt >= config.fluidThreshold then
+                lines[#lines + 1] = config.fluidMeasurement .. ",fluid=" .. sanitize(fluid.label) .. " amount=" .. capInt(amt) .. "i"
+            end
         end
     end
+    hubState.storage.uniqueFluids = uFl
+    hubState.storage.totalFluidLiters = capInt(tFl)
     flushBatch(config.dbURL .. config.fluidDB, lines)
+end
+
+local function scanMeStorageDrives()
+    local drives, cells, fullCells = 0, 0, 0
+    local usedBytes, totalBytes, usedTypes, totalTypes = 0, 0, 0, 0
+    local function inspectCell(st)
+        if type(st) ~= "table" or type(st.cell) ~= "table" then return false end
+        local c = st.cell
+        local tb = tonumber(c.totalBytes) or 0
+        if tb <= 0 then return false end
+        local ub = tonumber(c.usedBytes) or 0
+        local fb = tonumber(c.freeBytes)
+        local ut = tonumber(c.storedItemTypes) or 0
+        local tt = tonumber(c.totalItemTypes) or 0
+        cells = cells + 1
+        usedBytes = usedBytes + math.floor(ub)
+        totalBytes = totalBytes + math.floor(tb)
+        usedTypes = usedTypes + math.floor(ut)
+        totalTypes = totalTypes + math.floor(tt)
+        if c.canHoldNewItem == false or (fb ~= nil and fb <= 0) then
+            fullCells = fullCells + 1
+        end
+        return true
+    end
+    local function scanSlots(getSzFn, getStkFn, ...)
+        local okSz, sz = pcall(getSzFn, ...)
+        if not okSz or type(sz) ~= "number" or sz < 1 or sz > 20 then return end
+        local foundDrive = false
+        for s = 1, sz do
+            local args = { ... }
+            args[#args + 1] = s
+            local okS, st = pcall(getStkFn, table.unpack(args))
+            if okS and inspectCell(st) then
+                foundDrive = true
+            end
+        end
+        if foundDrive then drives = drives + 1 end
+    end
+    for addr, ctype in component.list(nil, true) do
+        local okP, p = pcall(component.proxy, addr)
+        if okP and type(p) == "table" then
+            if ctype == "inventory_controller" or ctype == "transposer" then
+                if p.getInventorySize and p.getStackInSlot then
+                    for side = 0, 5 do
+                        scanSlots(p.getInventorySize, p.getStackInSlot, side)
+                    end
+                end
+            elseif (ctype == "me_drive" or ctype == "me_chest" or ctype == "inventory") and p.getInventorySize and p.getStackInSlot then
+                scanSlots(p.getInventorySize, p.getStackInSlot)
+            end
+        end
+    end
+    local s = hubState.storage
+    s.drives = drives
+    s.cells = cells
+    s.fullCells = fullCells
+    s.usedBytes = capInt(usedBytes)
+    s.totalBytes = capInt(totalBytes)
+    s.usedTypes = capInt(usedTypes)
+    s.totalTypes = capInt(totalTypes)
+    s.bytesPct = totalBytes > 0 and (math.floor((usedBytes / totalBytes) * 1000 + 0.5) / 10) or 0
+    s.typesPct = totalTypes > 0 and (math.floor((usedTypes / totalTypes) * 1000 + 0.5) / 10) or 0
+    return s
+end
+
+local function exportAe2Storage(interface, skipPost)
+    local s = scanMeStorageDrives()
+    if skipPost or config.enableStorage == false or not config.dbURL then return end
+    local dbName = config.energyAE2DB or config.itemDB or "mainnet"
+    local line = string.format(
+        "ae2_storage unique_items=%di,total_items=%di,unique_fluids=%di,total_fluid_l=%di,drives=%di,cells=%di,full_cells=%di,used_bytes=%di,total_bytes=%di,bytes_pct=%.2f,used_types=%di,total_types=%di,types_pct=%.2f\n",
+        capInt(s.uniqueItems or 0), capInt(s.totalItems or 0),
+        capInt(s.uniqueFluids or 0), capInt(s.totalFluidLiters or 0),
+        capInt(s.drives or 0), capInt(s.cells or 0), capInt(s.fullCells or 0),
+        capInt(s.usedBytes or 0), capInt(s.totalBytes or 0), tonumber(s.bytesPct) or 0,
+        capInt(s.usedTypes or 0), capInt(s.totalTypes or 0), tonumber(s.typesPct) or 0
+    )
+    postInflux(config.dbURL .. dbName, line)
 end
 
 local function formatFloatField(v)
@@ -1907,6 +2029,9 @@ local function handleBridgeCommand(sockWriteLine, interface, cmd)
             meshGorge = isMeshFresh(gorgeMesh, PEER_STALE_SEC),
             meshStock = isMeshFresh(stockMesh, PEER_STALE_SEC),
             meshHealth = buildMeshHealth(uptimeNow()),
+            storage = hubState.storage,
+            tps = hubState.tps,
+            lsc = hubState.lsc,
         })
     elseif op == "cpus" then
         if not interface then
@@ -2156,13 +2281,14 @@ local function handleBridgeCommand(sockWriteLine, interface, cmd)
             end
         end
         return reply({ ok = false, error = "CPU not found: " .. targetCpu })
-    elseif op == "dtpf_state" or op == "dtpf_patch" or op == "dtpf_action" or op == "dtpf_reboot" then
-        local dtpfOp = (op == "dtpf_reboot") and "reboot" or op
+    elseif op == "dtpf_state" or op == "dtpf_patch" or op == "dtpf_action" or op == "dtpf_reboot" or op == "dtpf_update" then
+        local dtpfOp = (op == "dtpf_reboot") and "reboot" or ((op == "dtpf_update") and "update_local" or op)
         local res = callMeshRpc(interface, sockWriteLine, dtpfMesh, "DTPF_CMD", {
             id = cmdId,
             op = dtpfOp,
             patch = cmd.patch,
             action = cmd.action,
+            url = cmd.url,
         }, "DTPF_REPLY", 8.0)
         if type(res) == "table" then
             res.meshRouted = true
@@ -2186,12 +2312,14 @@ local function handleBridgeCommand(sockWriteLine, interface, cmd)
             res.ageSec = 0
         end
         return reply(res)
-    elseif op == "pump_patch" or op == "pump_action" or op == "pump_reboot" then
+    elseif op == "pump_patch" or op == "pump_action" or op == "pump_reboot" or op == "pump_update" then
         local pumpCmd
         if op == "pump_patch" then
             pumpCmd = { op = "patch", label = cmd.label, target = cmd.target, priority = cmd.priority }
         elseif op == "pump_action" then
             pumpCmd = { op = "action", action = cmd.action }
+        elseif op == "pump_update" then
+            pumpCmd = { op = "update_local", url = cmd.url }
         else
             pumpCmd = { op = "reboot" }
         end
@@ -2221,12 +2349,13 @@ local function handleBridgeCommand(sockWriteLine, interface, cmd)
             return reply(res)
         end
         return reply({ ok = false, error = "Empty Universal mesh response" })
-    elseif op == "univ_action" or op == "univ_reboot" then
-        local uAct = (op == "univ_reboot") and "reboot" or cmd.action
+    elseif op == "univ_action" or op == "univ_reboot" or op == "univ_update" then
+        local uAct = (op == "univ_reboot") and "reboot" or ((op == "univ_update") and "update_local" or cmd.action)
         local res = callMeshRpc(interface, sockWriteLine, univMesh, "UNIV_CMD", {
             action = uAct,
             poolId = cmd.poolId or cmd.poolIdx,
             color = cmd.color,
+            url = cmd.url,
         }, "UNIV_REPLY", 5.0)
         if type(res) == "table" then
             res.meshRouted = true
@@ -2249,26 +2378,28 @@ local function handleBridgeCommand(sockWriteLine, interface, cmd)
             return reply(res)
         end
         return reply({ ok = false, error = "Empty Gorge mesh response" })
-    elseif op == "gorge_action" or op == "gorge_reboot" then
-        local gAct = (op == "gorge_reboot") and "reboot" or cmd.action
+    elseif op == "gorge_action" or op == "gorge_reboot" or op == "gorge_update" then
+        local gAct = (op == "gorge_reboot") and "reboot" or ((op == "gorge_update") and "update_local" or cmd.action)
         local res = callMeshRpc(interface, sockWriteLine, gorgeMesh, "GORGE_CMD", {
             action = gAct,
             exoticizerId = cmd.exoticizerId,
             mode = cmd.mode,
+            url = cmd.url,
         }, "GORGE_REPLY", 5.0)
         if type(res) == "table" then
             res.meshRouted = true
             return reply(res)
         end
         return reply({ ok = false, error = "Empty Gorge mesh response" })
-    elseif op == "stock_state" or op == "stock_patch" or op == "stock_action" or op == "stock_reboot" then
-        local stockOp = (op == "stock_reboot") and "stock_action" or op
-        local stockAct = (op == "stock_reboot") and "reboot" or cmd.action
+    elseif op == "stock_state" or op == "stock_patch" or op == "stock_action" or op == "stock_reboot" or op == "stock_update" then
+        local stockOp = (op == "stock_reboot" or op == "stock_update") and "stock_action" or op
+        local stockAct = (op == "stock_reboot") and "reboot" or ((op == "stock_update") and "update_local" or cmd.action)
         local res = callMeshRpc(interface, sockWriteLine, stockMesh, "STOCK_CMD", {
             id = cmdId,
             op = stockOp,
             patch = cmd.patch,
             action = stockAct,
+            url = cmd.url,
         }, "STOCK_REPLY", 8.0)
         if type(res) == "table" then
             res.meshRouted = true
@@ -2292,6 +2423,20 @@ local function handleBridgeCommand(sockWriteLine, interface, cmd)
         table.sort(woken)
         emitMeshHelloIfOnline(sockWriteLine)
         return reply({ ok = true, woken = woken, meshHealth = buildMeshHealth(now) })
+    elseif op == "update_local" then
+        local hasInet = (component.isAvailable and component.isAvailable("internet"))
+            or (component.list and component.list("internet", true)() ~= nil)
+        if not hasInet then
+            return reply({ ok = false, error = "No Internet Card on AE2 Main OC" })
+        end
+        local url = (type(cmd.url) == "string" and cmd.url ~= "") and cmd.url or "http://127.0.0.1:8765/oc-raw"
+        if not url:match("^https?://[%w%.%-_:]+") then
+            return reply({ ok = false, error = "Invalid update URL" })
+        end
+        pendingSelfUpdateUrl = url
+        pendingSelfReboot = true
+        needExitFlag = true
+        return reply({ ok = true, updating = true, url = url })
     elseif op == "reboot" then
         reply({ ok = true, rebooting = true })
         pcall(os.sleep, 0.05)
@@ -2315,6 +2460,7 @@ local function main()
     local lastEnergyAE2Time = startTime
     local lastCpuTime = startTime
     local lastTpsTime = startTime
+    local lastStorageTime = startTime - (tonumber(config.storageInterval) or (60 * 72)) - 1
     local lastAllItemsTime = (config.allItemsInterval == nil) and startTime or (startTime - config.allItemsInterval)
 
     local wantGui = (not forceHeadless) and okUiMod and type(Ae2UI) == "table"
@@ -2447,6 +2593,9 @@ local function main()
                     meshGorge = isMeshFresh(gorgeMesh, PEER_STALE_SEC),
                     meshStock = isMeshFresh(stockMesh, PEER_STALE_SEC),
                     meshHealth = buildMeshHealth(now),
+                    storage = hubState.storage,
+                    tps = hubState.tps,
+                    lsc = hubState.lsc,
                 }))
             end
         end
@@ -2497,6 +2646,7 @@ local function main()
         if tpsCard then
             exportTps(tpsCard, skip)
         end
+        exportAe2Storage(interface, skip)
     end
 
     if wantGui then
@@ -2806,6 +2956,7 @@ local function main()
                     lastEnergyAE2Time = 0
                     lastCpuTime = 0
                     lastTpsTime = 0
+                    lastStorageTime = 0
                 else
                     refreshLocalTelemetryForUi(false)
                 end
@@ -2901,6 +3052,11 @@ local function main()
                 end
                 uiDirty = true
             end
+            if config.enableStorage ~= false and os.time() > lastStorageTime + (tonumber(config.storageInterval) or (60 * 72)) then
+                exportAe2Storage(interface, config.exportPaused == true)
+                lastStorageTime = os.time()
+                uiDirty = true
+            end
 
             if ui and (uptimeNow() - lastUiTelemetryAt) >= 2.0 then
                 lastUiTelemetryAt = uptimeNow()
@@ -2934,7 +3090,34 @@ local function main()
     if not okLoop then
         error(loopErr, 0)
     end
-    if pendingSelfReboot then
+    if pendingSelfUpdateUrl then
+        local updUrl = pendingSelfUpdateUrl
+        pendingSelfUpdateUrl = nil
+        local instPath = "/home/install_ae2.lua"
+        local chunk, loadErr = loadfile and loadfile(instPath) or nil, nil
+        if not chunk and io and io.open then
+            local f = io.open(instPath, "r")
+            if f then
+                local src = f:read("*a")
+                f:close()
+                chunk, loadErr = load(src, "=" .. instPath)
+            end
+        end
+        if chunk then
+            local okU, okInst = pcall(chunk, "--url", updUrl, "--update", "--yes")
+            if okU and okInst ~= false then
+                pendingSelfReboot = false
+                pcall(os.sleep, 0.1)
+                if computer.shutdown then pcall(computer.shutdown, true) end
+            else
+                pendingSelfReboot = false
+                io.stderr:write("AE2 remote update failed: " .. tostring(okInst) .. "\n")
+            end
+        else
+            pendingSelfReboot = false
+            io.stderr:write("AE2 updater load failed: " .. tostring(loadErr or "missing " .. instPath) .. "\n")
+        end
+    elseif pendingSelfReboot then
         pendingSelfReboot = false
         pcall(os.sleep, 0.1)
         if computer.shutdown then

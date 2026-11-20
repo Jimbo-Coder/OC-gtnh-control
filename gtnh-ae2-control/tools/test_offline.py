@@ -482,6 +482,8 @@ local bridgeIn = {
     '{"id":14,"op":"mesh_recover","role":"dtpf"}\n',
     '{"id":15,"op":"gorge_reboot"}\n',
     '{"id":16,"op":"univ_reboot"}\n',
+    '{"id":17,"op":"dtpf_update","url":"http://127.0.0.1:8765/oc-raw"}\n',
+    '{"id":18,"op":"stock_update","url":"http://127.0.0.1:8765/oc-raw"}\n',
 }
 local openCalls, strCalls, sendCalls = 0, 0, 0
 local o1ItemCalls, o1FluidCalls, legacyItemsCalls, legacyFluidsCalls = 0, 0, 0, 0
@@ -611,6 +613,18 @@ component._register("tps-1", "tps_card", {
     getOverallDimsLoaded = function() return 5 end,
     getAllTickTimes = function() return { [0] = 18.2 } end,
 })
+component._register("ic-1", "inventory_controller", {
+    getInventorySize = function(side) return (side == 2) and 10 or nil end,
+    getStackInSlot = function(side, slot)
+        if side == 2 and slot == 1 then
+            return {
+                label = "64k ME Storage Cell",
+                cell = { totalBytes = 65536, usedBytes = 60000, freeBytes = 5536, storedItemTypes = 60, totalItemTypes = 63, canHoldNewItem = true },
+            }
+        end
+        return nil
+    end,
+})
 
 -- Inject DTPF_METRICS + GORGE_METRICS + UNIV_METRICS + PUMP_STATUS before polling ends
 meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", "dtpf-addr", 4205, 0, "DTPF_METRICS", serialization.serialize({
@@ -683,7 +697,7 @@ assertEq(legacyItemsCalls, 0, "inspectMainnetForMaint must NOT scan getItemsInNe
 assertEq(legacyFluidsCalls, 0, "inspectMainnetForMaint must NOT scan getFluidsInNetwork when O(1) exists")
 
 local sawStockToDtpf, sawDtpfToStock, sawHandoffToDtpf, sawHandoffAckToStock, sawWakeHelloReply, sawWatchdogWake, sawMaintAckO1, sawMaintFluidDrop = false, false, false, false, false, false, false, false
-local sawGorgeReboot, sawUnivReboot = false, false
+local sawGorgeReboot, sawUnivReboot, sawDtpfUpdate, sawStockUpdate = false, false, false, false
 for _, pkt in ipairs(sentPackets) do
     if pkt.addr == "dtpf-addr" and pkt.t == "STOCK_CLAIMS" and pkt.p1 == "claims-from-stock" then sawStockToDtpf = true end
     if pkt.addr == "stock-addr" and pkt.t == "DTPF_CLAIMS" and pkt.p1 == "claims-from-dtpf" then sawDtpfToStock = true end
@@ -698,6 +712,14 @@ for _, pkt in ipairs(sentPackets) do
     if pkt.t == "UNIV_CMD" and type(pkt.p2) == "string" then
         local c = serialization.unserialize(pkt.p2)
         if type(c) == "table" and c.action == "reboot" then sawUnivReboot = true end
+    end
+    if pkt.t == "DTPF_CMD" and type(pkt.p2) == "string" then
+        local c = serialization.unserialize(pkt.p2)
+        if type(c) == "table" and c.op == "update_local" and c.url == "http://127.0.0.1:8765/oc-raw" then sawDtpfUpdate = true end
+    end
+    if pkt.t == "STOCK_CMD" and type(pkt.p2) == "string" then
+        local c = serialization.unserialize(pkt.p2)
+        if type(c) == "table" and c.action == "update_local" and c.url == "http://127.0.0.1:8765/oc-raw" then sawStockUpdate = true end
     end
     if pkt.addr == "dtpf-addr" and pkt.t == "MESH_MAINT_ACK" and pkt.p1 == "req-o1" then
         local ackTbl = serialization.unserialize(pkt.p2)
@@ -719,12 +741,16 @@ assert(sawWakeHelloReply, "Exporter must answer GTNH_WAKE with MESH_MAINNET_HELL
 assert(sawWatchdogWake, "Watchdog must send GTNH_WAKE to stale peers (>60s) without false-alarming Space Pump")
 assert(sawGorgeReboot, "Bridge gorge_reboot RPC must send GORGE_CMD reboot")
 assert(sawUnivReboot, "Bridge univ_reboot RPC must send UNIV_CMD reboot")
+assert(sawDtpfUpdate, "Bridge dtpf_update RPC must relay DTPF_CMD update_local")
+assert(sawStockUpdate, "Bridge stock_update RPC must relay STOCK_CMD update_local")
 assert(sawMaintAckO1, "MESH_MAINT_ACK did not return O(1) stocks r1=777, r2=12345")
 assert(sawMaintFluidDrop, "inspectMainnetForMaint must unwrap ae2fc:fluid_drop into busyByKey and busyByLabel")
 
 local joinedInflux = {}
 for _, p in ipairs(posts) do joinedInflux[#joinedInflux + 1] = p.body end
 local allInflux = table.concat(joinedInflux, "\n")
+assert(allInflux:find("ae2_storage ", 1, true), "Missing ae2_storage InfluxDB line: " .. allInflux)
+assert(allInflux:find("drives=1i,cells=1i,full_cells=0i,used_bytes=60000i,total_bytes=65536i", 1, true), "Bad ae2_storage cell metrics: " .. allInflux)
 assert(allInflux:find("godforge_control ", 1, true), "Missing godforge_control InfluxDB line")
 assert(allInflux:find("oc_health ", 1, true), "Missing oc_health InfluxDB watchdog telemetry")
 assert(allInflux:find("univ_ok=", 1, true), "oc_health missing univ_ok field")
@@ -739,6 +765,7 @@ assert(allBridge:find('"meshUniv":true', 1, true), "Ping missing meshUniv=true")
 assert(allBridge:find('"meshGorge":true', 1, true), "Ping missing meshGorge=true")
 assert(allBridge:find('"meshStock":true', 1, true), "Ping missing meshStock=true")
 assert(allBridge:find('"meshHealth"', 1, true), "Ping/mesh_recover missing meshHealth table")
+assert(allBridge:find('"storage"', 1, true), "Ping/hello missing ae2 storage summary table")
 assert(allBridge:find('"brief"', 1, true), "meshHealth missing brief summary field")
 assert(allBridge:find('"woken"', 1, true), "mesh_recover reply missing woken list")
 assert(allBridge:find('"armed":false', 1, true), "univ_action pause reply missing armed=false")

@@ -226,6 +226,36 @@ local function runImport()
         nBlocks, #slots, res.added, res.updated, res.skipped, res.disabled))
 end
 
+local function handlePendingRebootOrUpdate(state)
+    state._pendingReboot = false
+    if state._pendingUpdateUrl then
+        local updUrl = state._pendingUpdateUrl
+        state._pendingUpdateUrl = nil
+        local instPath = filesystem.concat(scriptDir, "install.lua")
+        local src = readWholeFile(instPath)
+        local chunk, loadErr
+        if src then chunk, loadErr = load(src, "=" .. instPath) else loadErr = "missing " .. tostring(instPath) end
+        if chunk then
+            print("GTNH Stock Maintainer updating from " .. updUrl .. "...")
+            local okU, okInst = pcall(chunk, "--url", updUrl, "--update", "--yes")
+            if okU and okInst ~= false then
+                pcall(os.sleep, 0.15)
+                if computer.shutdown then pcall(computer.shutdown, true) end
+                return true
+            end
+            io.stderr:write("Stock Maintainer remote update failed: " .. tostring(okInst) .. "\n")
+            return false
+        end
+        io.stderr:write("Stock Maintainer updater load failed: " .. tostring(loadErr) .. "\n")
+        return false
+    else
+        print("GTNH Stock Maintainer rebooting per remote request...")
+        pcall(os.sleep, 0.15)
+        if computer.shutdown then pcall(computer.shutdown, true) end
+        return true
+    end
+end
+
 local function runWorker()
     while true do
         local cfg = loadConfig()
@@ -266,12 +296,13 @@ local function runWorker()
         end, debug.traceback)
 
         pcall(saveConfig, cfg)
-        if state._pendingReboot then
-            print("GTNH Stock Maintainer rebooting per remote request...")
-            pcall(os.sleep, 0.15)
-            if computer.shutdown then pcall(computer.shutdown, true) end
-            return
-        elseif userExit then
+        if state._pendingReboot or state._pendingUpdateUrl then
+            if handlePendingRebootOrUpdate(state) then return end
+            userExit = false
+            okLoop = false
+            errLoop = "remote update aborted"
+        end
+        if userExit then
             print("GTNH Stock Maintainer worker stopped cleanly.")
             return
         elseif not okLoop then
@@ -377,12 +408,13 @@ local function runGUI()
             pcall(component.gpu.setForeground, 0xFFFFFF)
         end
         term.clear()
-        if state._pendingReboot then
-            print("GTNH Stock Maintainer rebooting per remote request...")
-            pcall(os.sleep, 0.15)
-            if computer.shutdown then pcall(computer.shutdown, true) end
-            return
-        elseif userExit or okLoop then
+        if state._pendingReboot or state._pendingUpdateUrl then
+            if handlePendingRebootOrUpdate(state) then return end
+            userExit = false
+            okLoop = false
+            errLoop = "remote update aborted"
+        end
+        if userExit or okLoop then
             print("GTNH Stock Maintainer stopped cleanly.")
             return
         else

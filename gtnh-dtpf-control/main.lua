@@ -707,7 +707,30 @@ local function runGUI()
             else
                 io.stderr:write("DTPF Automation Controller error:\n" .. tostring(errLoop) .. "\n")
             end
-            if runtimeState._pendingReboot and computer.shutdown then
+            if runtimeState._pendingUpdateUrl then
+                local updUrl = runtimeState._pendingUpdateUrl
+                runtimeState._pendingUpdateUrl = nil
+                local instPath = filesystem.concat(scriptDir, "install.lua")
+                local f = io.open(instPath, "r")
+                local chunk, loadErr
+                if f then
+                    local src = f:read("*a")
+                    f:close()
+                    chunk, loadErr = load(src or "", "=" .. instPath)
+                else
+                    loadErr = "missing " .. tostring(instPath)
+                end
+                if chunk then
+                    local okU, okInst = pcall(chunk, "--url", updUrl, "--update", "--yes")
+                    if okU and okInst ~= false and computer.shutdown then
+                        pcall(computer.shutdown, true)
+                    else
+                        io.stderr:write("DTPF remote update failed: " .. tostring(okInst) .. "\n")
+                    end
+                else
+                    io.stderr:write("DTPF updater load failed: " .. tostring(loadErr) .. "\n")
+                end
+            elseif runtimeState._pendingReboot and computer.shutdown then
                 pcall(computer.shutdown, true)
             end
             break

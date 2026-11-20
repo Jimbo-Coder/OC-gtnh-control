@@ -1202,6 +1202,72 @@ do
     assertEq(orderLog[1], "STOCK_REPLY:req-rbt-1", "STOCK_REPLY sent BEFORE computer.shutdown(true)")
     assertEq(orderLog[2], "SHUTDOWN:true", "computer.shutdown(true) fired after worker exit")
 end
+
+-- TEST 9c: Remote update_local rejects missing Internet Card & defers install+shutdown until after STOCK_REPLY
+do
+    local evLib = require("event")
+    local compLib = require("computer")
+    local shLib = require("shell")
+    local noInetComp = { list = function() return function() return nil end end, isAvailable = function() return false end }
+    local uSt0 = Scheduler.newState()
+    local noInetRes = Scheduler.executeRpcTable(Scheduler.defaultConfig(), uSt0, {
+        id = "u0", op = "stock_action", action = "update_local", url = "http://127.0.0.1:8765/oc-raw",
+    }, noInetComp)
+    assertEq(noInetRes.ok, false, "update_local fails cleanly without Internet Card")
+    assertEq(uSt0._pendingUpdateUrl, nil, "No pending update queued when Internet Card missing")
+    assertEq(uSt0._pendingReboot, nil, "No reboot queued when Internet Card missing")
+
+    local updOrder = {}
+    local updInjected = false
+    local origList, origProxy, origIsAvail = component.list, component.proxy, component.isAvailable
+    local origPull, origShutdown, origProg = evLib.pull, compLib.shutdown, shLib.getRunningProgram
+    shLib.getRunningProgram = function() return "/home/stock/main.lua" end
+    __py_write_file("/home/stock/install.lua", [[
+local args = { ... }
+local out = rawget(_G, "__STOCK_UPD_ORDER")
+if out then out[#out + 1] = "STOCK_INSTALL:" .. table.concat(args, "|") end
+return true
+]])
+    rawset(_G, "__STOCK_UPD_ORDER", updOrder)
+    local uModem = {
+        isOpen = function() return true end, open = function() return true end,
+        isWireless = function() return true end, getStrength = function() return 400 end, setStrength = function() return 400 end,
+        getWakeMessage = function() return "GTNH_WAKE" end, setWakeMessage = function() return "GTNH_WAKE" end,
+        send = function(_, _, mType, reqId)
+            if mType == "STOCK_REPLY" then updOrder[#updOrder + 1] = "STOCK_REPLY:" .. tostring(reqId) end
+            return true
+        end,
+        broadcast = function() return true end,
+    }
+    component.isAvailable = function(k) return k == "internet" or origIsAvail(k) end
+    component.list = function(ctype)
+        local done = false
+        return function()
+            if (ctype == "modem" or ctype == "internet") and not done then
+                done = true
+                return (ctype == "modem") and "mod-upd" or "inet-upd"
+            end
+            return nil
+        end
+    end
+    component.proxy = function(a) return (a == "mod-upd") and uModem or origProxy(a) end
+    compLib.shutdown = function(rbt) updOrder[#updOrder + 1] = "SHUTDOWN:" .. tostring(rbt) end
+    evLib.pull = function()
+        if not updInjected then
+            updInjected = true
+            return "modem_message", "mod-upd", "ae2-addr", 4205, 10, "STOCK_CMD", "req-upd-1",
+                serialization.serialize({ op = "stock_action", action = "update_local", url = "http://127.0.0.1:8765/oc-raw" })
+        end
+        return nil
+    end
+    runCli("--headless")
+    component.list, component.proxy, component.isAvailable = origList, origProxy, origIsAvail
+    evLib.pull, compLib.shutdown, shLib.getRunningProgram = origPull, origShutdown, origProg
+    rawset(_G, "__STOCK_UPD_ORDER", nil)
+    assertEq(updOrder[1], "STOCK_REPLY:req-upd-1", "STOCK_REPLY sent BEFORE install & shutdown")
+    assertEq(updOrder[2], "STOCK_INSTALL:--url|http://127.0.0.1:8765/oc-raw|--update|--yes", "Installer invoked with target bridge URL")
+    assertEq(updOrder[3], "SHUTDOWN:true", "computer.shutdown(true) fired after clean install")
+end
 return "OK"
 """
             res = host.exec_lua(lua_suite, "stock_test_suite")

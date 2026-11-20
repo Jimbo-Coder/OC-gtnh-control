@@ -34,6 +34,7 @@ local refreshRequested = false
 local reloadRequested = false
 local wakeRequested = false
 local rebootRequested = false
+local updateUrlRequested = nil
 local statusLogs = {}
 local cachedMe = nil
 local cachedModem = nil
@@ -464,6 +465,24 @@ local function handleMeshMessage(localAddr, sender, port, msgType, reqId, rawPay
         refreshRequested = true
       elseif act == 'reload' then
         reloadRequested = true
+      elseif act == 'update_local' then
+        local hasInet = (component.isAvailable and component.isAvailable('internet'))
+          or (component.list and component.list('internet', true)() ~= nil)
+        if not hasInet then
+          replyCmd({ ok = false, error = 'No Internet Card on Space Pump OC' })
+          return true
+        end
+        local u = (type(cmd.url) == 'string' and cmd.url ~= '') and cmd.url or 'http://127.0.0.1:8765/oc-raw'
+        if not u:match('^https?://[%w%.%-_:]+') then
+          replyCmd({ ok = false, error = 'Invalid update URL' })
+          return true
+        end
+        updateUrlRequested = u
+        rebootRequested = true
+        wakeRequested = true
+        logMsg('Remote update requested via OC mesh')
+        replyCmd({ ok = true, updating = true, url = u })
+        return true
       elseif act == 'reboot' then
         rebootRequested = true
         wakeRequested = true
@@ -475,6 +494,23 @@ local function handleMeshMessage(localAddr, sender, port, msgType, reqId, rawPay
         return true
       end
       replyCmd({ ok = true, queuedAction = act, status = buildStatusPayload(lastStateName, lastCycleNum) })
+    elseif op == 'update_local' then
+      local hasInet = (component.isAvailable and component.isAvailable('internet'))
+        or (component.list and component.list('internet', true)() ~= nil)
+      if not hasInet then
+        replyCmd({ ok = false, error = 'No Internet Card on Space Pump OC' })
+        return true
+      end
+      local u = (type(cmd.url) == 'string' and cmd.url ~= '') and cmd.url or 'http://127.0.0.1:8765/oc-raw'
+      if not u:match('^https?://[%w%.%-_:]+') then
+        replyCmd({ ok = false, error = 'Invalid update URL' })
+        return true
+      end
+      updateUrlRequested = u
+      rebootRequested = true
+      wakeRequested = true
+      logMsg('Remote update requested via OC mesh')
+      replyCmd({ ok = true, updating = true, url = u })
     elseif op == 'reboot' then
       rebootRequested = true
       wakeRequested = true
@@ -777,9 +813,38 @@ local main = thread.create(function()
       for _, pump in ipairs(pumps) do
         pcall(pump.module.setWorkAllowed, false)
       end
-      os.sleep(0.15)
-      if computer.shutdown then pcall(computer.shutdown, true) end
-      return
+      if updateUrlRequested then
+        local updUrl = updateUrlRequested
+        updateUrlRequested = nil
+        local instPath = '/home/install_pump.lua'
+        local chunk, loadErr = loadfile and loadfile(instPath) or nil, 'missing ' .. instPath
+        if not chunk and io and io.open then
+          local f = io.open(instPath, 'r')
+          if f then
+            local src = f:read('*a')
+            f:close()
+            chunk, loadErr = load(src, '=' .. instPath)
+          end
+        end
+        if chunk then
+          local okU, okInst = pcall(chunk, '--url', updUrl, '--update', '--yes')
+          if okU and okInst ~= false then
+            os.sleep(0.15)
+            if computer.shutdown then pcall(computer.shutdown, true) end
+            return
+          else
+            logMsg('Space Pump remote update failed: ' .. tostring(okInst))
+            rebootRequested = false
+          end
+        else
+          logMsg('Space Pump updater load failed: ' .. tostring(loadErr))
+          rebootRequested = false
+        end
+      else
+        os.sleep(0.15)
+        if computer.shutdown then pcall(computer.shutdown, true) end
+        return
+      end
     end
     if not okCycle then
       logMsg('Pump fault (retrying in 5s): ' .. tostring(cycleErr):sub(1, 140))

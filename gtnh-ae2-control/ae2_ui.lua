@@ -388,6 +388,14 @@ function UI:renderOverviewTab()
         self:drawText(4, 7, padOrTrunc(string.format("Usage: %s  Idle: %s", UI.formatNumber(ae2.avgUsage, unit), UI.formatNumber(ae2.idleUsage, unit)), 34), COLORS.fg, COLORS.panelBg)
         self:drawText(4, 8, padOrTrunc(string.format("Injet: %s  Fill: %.1f%%", UI.formatNumber(ae2.avgInjection, unit), pct), 34), COLORS.cyan, COLORS.panelBg)
         self:drawText(4, 9, padOrTrunc(string.format("Cell : %s / %s", UI.formatNumber(ae2.currStorage), UI.formatNumber(ae2.maxStorage)), 34), COLORS.muted, COLORS.panelBg)
+        local stor = hub.storage or {}
+        if (tonumber(stor.drives) or 0) > 0 then
+            local bPct = tonumber(stor.bytesPct) or 0
+            local sCol = bPct >= 90 and COLORS.red or (bPct >= 75 and COLORS.yellow or COLORS.green)
+            self:drawText(4, 10, padOrTrunc(string.format("Drive: %.1f%% (%dc, %dfull)", bPct, tonumber(stor.cells) or 0, tonumber(stor.fullCells) or 0), 34), sCol, COLORS.panelBg)
+        elseif (tonumber(stor.uniqueItems) or 0) > 0 or (tonumber(stor.uniqueFluids) or 0) > 0 then
+            self:drawText(4, 10, padOrTrunc(string.format("Types: %d items / %d fluids", tonumber(stor.uniqueItems) or 0, tonumber(stor.uniqueFluids) or 0), 34), COLORS.muted, COLORS.panelBg)
+        end
         self:drawProgressBar(4, 11, 34, pct, COLORS.cyan, COLORS.border, COLORS.panelBg)
     else
         self:drawText(4, 8, "No AE2 Interface bound", COLORS.yellow, COLORS.panelBg)

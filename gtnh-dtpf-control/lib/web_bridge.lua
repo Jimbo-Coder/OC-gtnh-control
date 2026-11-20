@@ -833,6 +833,23 @@ function WebBridge:executeRpcTable(cmd)
         local snap = self:buildSnapshot()
         snap.id = id
         return snap
+    elseif op == "update_local" then
+        local okC, cLib = pcall(require, "component")
+        local cl = (okC and type(cLib) == "table") and cLib or rawget(_G, "component")
+        local hasInet = cl and ((cl.isAvailable and cl.isAvailable("internet")) or (cl.list and cl.list("internet", true)() ~= nil))
+        if not hasInet then
+            return { id = id, ok = false, error = "No Internet Card on DTPF OC" }
+        end
+        local url = (type(cmd.url) == "string" and cmd.url ~= "") and cmd.url or "http://127.0.0.1:8765/oc-raw"
+        if not url:match("^https?://[%w%.%-_:]+") then
+            return { id = id, ok = false, error = "Invalid update URL" }
+        end
+        if self.state then
+            self.state._pendingUpdateUrl = url
+            self.state._pendingReboot = true
+            self.state._forcePollNow = true
+        end
+        return { id = id, ok = true, updating = true, url = url }
     elseif op == "reboot" then
         if self.state then
             self.state._pendingReboot = true

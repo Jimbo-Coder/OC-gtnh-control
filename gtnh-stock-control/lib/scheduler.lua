@@ -1213,6 +1213,23 @@ function Scheduler.executeRpcTable(cfg, state, cmd, compLib, onMutate)
             Scheduler.pushLog(state, "out", string.format("Dispatched %d rule(s) to DTPF over OC Mesh.", #items), "OUT")
         elseif act == "run_bench" then
             Hardware.runBenchmark(cfg, state, compLib)
+        elseif act == "update_local" then
+            local cl = compLib or rawget(_G, "component")
+            if not cl then
+                local okC, cMod = pcall(require, "component")
+                if okC then cl = cMod end
+            end
+            local hasInet = cl and ((cl.isAvailable and cl.isAvailable("internet")) or (cl.list and cl.list("internet", true)() ~= nil))
+            if not hasInet then
+                return { id = id, ok = false, error = "No Internet Card on Stock Maintainer OC" }
+            end
+            local url = (type(cmd.url) == "string" and cmd.url ~= "") and cmd.url or "http://127.0.0.1:8765/oc-raw"
+            if not url:match("^https?://[%w%.%-_:]+") then
+                return { id = id, ok = false, error = "Invalid update URL" }
+            end
+            state._pendingUpdateUrl = url
+            state._pendingReboot = true
+            return { id = id, ok = true, updating = true, url = url }
         elseif act == "reboot" then
             state._pendingReboot = true
             return { id = id, ok = true, rebooting = true }

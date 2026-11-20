@@ -177,6 +177,42 @@ local function runCheck()
     print("=== CHECK COMPLETE (NO REDSTONE MODIFIED) ===")
 end
 
+local function handlePendingRebootOrUpdate(state)
+    if state._pendingUpdateUrl then
+        local updUrl = state._pendingUpdateUrl
+        state._pendingUpdateUrl = nil
+        local instPath = filesystem.concat(scriptDir, "install.lua")
+        local f = io.open(instPath, "r")
+        local chunk, loadErr
+        if f then
+            local src = f:read("*a")
+            f:close()
+            chunk, loadErr = load(src or "", "=" .. instPath)
+        else
+            loadErr = "missing " .. tostring(instPath)
+        end
+        if chunk then
+            print("Universal Control updating from " .. updUrl .. "...")
+            local okU, okInst = pcall(chunk, "--url", updUrl, "--update", "--yes")
+            if okU and okInst ~= false then
+                pcall(os.sleep, 0.15)
+                if computer.shutdown then pcall(computer.shutdown, true) end
+                return true
+            end
+            io.stderr:write("Universal Control remote update failed: " .. tostring(okInst) .. "\n")
+            return false
+        end
+        io.stderr:write("Universal Control updater load failed: " .. tostring(loadErr) .. "\n")
+        return false
+    elseif state._pendingReboot then
+        print("Universal Control rebooting per remote request (all bundled outputs OFF).")
+        pcall(os.sleep, 0.15)
+        if computer.shutdown then pcall(computer.shutdown, true) end
+        return true
+    end
+    return false
+end
+
 local function runWorker()
     while true do
         local cfg = loadConfig()
@@ -225,12 +261,13 @@ local function runWorker()
         pcall(Hardware.zeroAllManagedPools, cfg, nil, state)
         pcall(saveConfig, cfg, state)
         pcall(flushRatesIfDirty, state)
-        if state._pendingReboot then
-            print("Universal Control rebooting per remote request (all bundled outputs OFF).")
-            pcall(os.sleep, 0.15)
-            if computer.shutdown then pcall(computer.shutdown, true) end
-            return
-        elseif userExit or okLoop then
+        if state._pendingReboot or state._pendingUpdateUrl then
+            if handlePendingRebootOrUpdate(state) then return end
+            userExit = false
+            okLoop = false
+            errLoop = "remote update aborted"
+        end
+        if userExit or okLoop then
             print("Universal Control worker stopped cleanly (all bundled outputs OFF).")
             return
         else
@@ -356,12 +393,13 @@ local function runGUI()
             pcall(component.gpu.setForeground, 0xFFFFFF)
         end
         term.clear()
-        if state._pendingReboot then
-            print("GTNH Universal Control rebooting per remote request (all bundled outputs OFF).")
-            pcall(os.sleep, 0.15)
-            if computer.shutdown then pcall(computer.shutdown, true) end
-            return
-        elseif userExit or okLoop then
+        if state._pendingReboot or state._pendingUpdateUrl then
+            if handlePendingRebootOrUpdate(state) then return end
+            userExit = false
+            okLoop = false
+            errLoop = "remote update aborted"
+        end
+        if userExit or okLoop then
             print("GTNH Universal Control stopped cleanly (all bundled outputs OFF).")
             return
         else
