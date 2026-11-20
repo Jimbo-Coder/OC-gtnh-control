@@ -357,7 +357,7 @@ function UI:renderHeader()
         { lbl = "DTPF",  p = peers.dtpf,  win = 60,  tab = TAB_DTPF },
         { lbl = "UNIV",  p = peers.univ,  win = 60,  tab = TAB_UNIVERSAL },
         { lbl = "GORGE", p = peers.gorge, win = 60,  tab = TAB_GORGE },
-        { lbl = "PUMP",  p = peers.pump,  win = 180, tab = TAB_PUMP },
+        { lbl = "PUMP",  p = peers.pump,  win = 240, tab = TAB_PUMP },
         { lbl = "STK",   p = peers.stock, win = 60,  tab = TAB_STOCK },
     }) do
         local okP = peerOn(pd.p, pd.win)
@@ -426,7 +426,7 @@ function UI:renderOverviewTab()
     local peerOnline = 0
     local peerMap = {
         { key = "dtpf", win = 60 },
-        { key = "pump", win = 180 },
+        { key = "pump", win = 240 },
         { key = "univ", win = 60 },
         { key = "gorge", win = 60 },
         { key = "stock", win = 60 },
@@ -449,10 +449,141 @@ function UI:renderOverviewTab()
     self:drawText(122, 11, padOrTrunc(string.format("Last Scan  : %.2fs | AE Items:%d",
         tonumber(hub.lastScanDurSec) or 0, tonumber(hub.lastItemsCount) or 0), 35), COLORS.muted, COLORS.panelBg)
 
-    -- Bottom Left: Active Crafting CPUs (x=2, y=14, w=78, h=34)
-    self:drawFrame(2, 14, 78, 34, COLORS.border, COLORS.panelBg, "round")
-    self:drawText(4, 14, " ◈ BUSY CRAFTING CPUs ", COLORS.accent, COLORS.panelBg)
-    self:drawButton(67, 14, "[All CPUs]", COLORS.cyan, COLORS.btnBg, function()
+    -- Row 2: 6-Block OC Subsystems Health Strip (y=14..21)
+    local function peerMeta(p, win)
+        local seen = (p ~= nil and p.addr ~= nil and (tonumber(p.lastSeen) or -1000) > 0)
+        local age = seen and math.max(0, math.floor((now - (tonumber(p.lastSeen) or 0)) + 0.5)) or nil
+        local online = seen and (age < win)
+        local rec = math.floor(tonumber(p and p.recoveryAttempts) or 0)
+        return online, seen, age, rec
+    end
+
+    local dtpfOn, dtpfSeen, dtpfAge, dtpfRec = peerMeta(peers.dtpf, 60)
+    local dtpfSt = (peers.dtpf and peers.dtpf.status) or {}
+    local dtpfUp, dtpfTot, dtpfMinD = 0, #(dtpfSt.units or {}), nil
+    for _, u in ipairs(dtpfSt.units or {}) do
+        if type(u) == "table" and u.online and u.enabled ~= false then
+            dtpfUp = dtpfUp + 1
+            local disc = tonumber(u.discountPct) or 0
+            if not dtpfMinD or disc < dtpfMinD then dtpfMinD = disc end
+        end
+    end
+
+    local stkOn, stkSeen, stkAge, stkRec = peerMeta(peers.stock, 60)
+    local stkSt = (peers.stock and peers.stock.status) or {}
+    local stkPerf = (type(stkSt.perf) == "table") and stkSt.perf or {}
+
+    local pmpOn, pmpSeen, pmpAge, pmpRec = peerMeta(peers.pump, 240)
+    local pmpSt = (peers.pump and peers.pump.status) or {}
+    local pmpAct, pmpTot = 0, #(pmpSt.pumps or {})
+    for _, pm in ipairs(pmpSt.pumps or {}) do
+        if type(pm) == "table" and pm.active then pmpAct = pmpAct + 1 end
+    end
+    local pmpLow, pmpOk, pmpThr = 0, 0, (tonumber(pmpSt.threshold) or 0.95)
+    for _, fl in pairs(type(pmpSt.fluids) == "table" and pmpSt.fluids or {}) do
+        if type(fl) == "table" and (tonumber(fl.target) or 0) > 0 then
+            local eff = tonumber(fl.total) or ((tonumber(fl.meAmount) or 0) + (tonumber(fl.queued) or 0))
+            if eff < pmpThr * tonumber(fl.target) then pmpLow = pmpLow + 1 else pmpOk = pmpOk + 1 end
+        end
+    end
+
+    local grgOn, grgSeen, grgAge, grgRec = peerMeta(peers.gorge, 60)
+    local grgSt = (peers.gorge and peers.gorge.status) or {}
+    local grgGf = (type(grgSt.godforge) == "table") and grgSt.godforge or {}
+
+    local unvOn, unvSeen, unvAge, unvRec = peerMeta(peers.univ, 60)
+    local unvSt = (peers.univ and peers.univ.status) or {}
+
+    local freeKB = math.floor((tonumber(hub.freeMem) or 0) / 1024)
+    local totKB = math.floor((tonumber(hub.totalMem) or 0) / 1024)
+    local subCards = {
+        {
+            key = "ae2", title = "AE2 MAIN", tab = TAB_CPUS, tabLbl = "CPUs", x = 2, w = 25,
+            online = true, seen = true, rec = 0,
+            tagTxt = self.cfg.exportPaused and "PAUSED" or "ACTIVE",
+            line1 = string.format("CPUs: %d/%d busy", tonumber(cpus.busyCount) or 0, tonumber(cpus.total) or 0),
+            line2 = string.format("RAM : %d/%dK", freeKB, totKB),
+            line3 = string.format("Br:%s TPS:%s", hub.bridgeConnected and "ON" or "NO", tps.online and string.format("%.1f", tps.tps or 20) or "--"),
+        },
+        {
+            key = "dtpf", title = "DTPF", tab = TAB_DTPF, tabLbl = "DTPF", x = 28, w = 25,
+            online = dtpfOn, seen = dtpfSeen, rec = dtpfRec,
+            tagTxt = dtpfSeen and (dtpfSt.armed and "ARMED" or "PAUSED") or "WAIT",
+            line1 = dtpfSeen and string.format("Units:%d/%d D:%s", dtpfUp, dtpfTot, dtpfMinD and string.format("%.0f%%", dtpfMinD) or "--") or "Waiting DTPF",
+            line2 = dtpfSeen and ("DTR  :" .. UI.formatNumber(dtpfSt.dtrStock or 0, "L")) or "OC Mesh :4205",
+            line3 = dtpfAge and string.format("Age:%ds Rec:%d", dtpfAge, dtpfRec) or "No beacon yet",
+        },
+        {
+            key = "stock", title = "STOCK", tab = TAB_STOCK, tabLbl = "Stock", x = 54, w = 25,
+            online = stkOn, seen = stkSeen, rec = stkRec,
+            tagTxt = stkSeen and (stkSt.armed and "ARMED" or "PAUSED") or "WAIT",
+            line1 = stkSeen and string.format("Rules:%d/%d", tonumber(stkSt.enabledRules) or 0, tonumber(stkSt.totalRules) or 0) or "Waiting Stock",
+            line2 = stkSeen and string.format("Lo:%d Cr:%d Er:%d", tonumber(stkSt.lowCount) or 0, tonumber(stkSt.craftingCount) or 0, tonumber(stkSt.errorCount) or 0) or "OC Mesh :4205",
+            line3 = stkAge and string.format("%.1fms Age:%ds", tonumber(stkPerf.lastCycleMs) or 0, stkAge) or "No beacon yet",
+        },
+        {
+            key = "pump", title = "PUMP", tab = TAB_PUMP, tabLbl = "Pump", x = 80, w = 25,
+            online = pmpOn, seen = pmpSeen, rec = pmpRec,
+            tagTxt = pmpSeen and tostring(pmpSt.state or (pmpAct > 0 and "RUN" or "IDLE")):upper() or "WAIT",
+            line1 = pmpSeen and string.format("Pumps:%d/%d on", pmpAct, pmpTot) or "Waiting Pump",
+            line2 = pmpSeen and string.format("Lo:%d OK:%d fl", pmpLow, pmpOk) or "OC Mesh :4205",
+            line3 = pmpAge and string.format("Age:%ds Rec:%d", pmpAge, pmpRec) or "180s cycle",
+        },
+        {
+            key = "gorge", title = "GODFORGE", tab = TAB_GORGE, tabLbl = "Gorge", x = 106, w = 25,
+            online = grgOn, seen = grgSeen, rec = grgRec,
+            tagTxt = grgSeen and (grgSt.armed and "ARMED" or "PAUSED") or "WAIT",
+            line1 = grgSeen and string.format("Ex:%d act Cyc:%d", tonumber(grgSt.activeCount) or 0, tonumber(grgSt.completedCycles) or 0) or "Waiting Gorge",
+            line2 = grgSeen and string.format("GF:%s LSC:%.0f%%", grgGf.active and "ON" or "OFF", tonumber(grgSt.lscPct) or 0) or "OC Mesh :4205",
+            line3 = grgAge and string.format("Er:%d Age:%ds", tonumber(grgSt.errorCount) or 0, grgAge) or "No beacon yet",
+        },
+        {
+            key = "univ", title = "UNIVERSAL", tab = TAB_UNIVERSAL, tabLbl = "Univ", x = 132, w = 27,
+            online = unvOn, seen = unvSeen, rec = unvRec,
+            tagTxt = unvSeen and (unvSt.armed and "ARMED" or "PAUSED") or "WAIT",
+            line1 = unvSeen and string.format("Pool:%d act Q:%d", tonumber(unvSt.activePools) or 0, tonumber(unvSt.queuedSlices) or 0) or "Waiting Univ",
+            line2 = unvSeen and string.format("Done:%d Stl:%d", tonumber(unvSt.completedBatches) or 0, tonumber(unvSt.stalledCount) or 0) or "OC Mesh :4205",
+            line3 = unvAge and string.format("Pre:%d Age:%ds", tonumber(unvSt.preemptions) or 0, unvAge) or "No beacon yet",
+        },
+    }
+
+    for _, sc in ipairs(subCards) do
+        local isStale = sc.seen and (not sc.online)
+        local bdrCol = sc.online and COLORS.green or (isStale and COLORS.red or COLORS.border)
+        local hdrCol = sc.online and COLORS.green or (isStale and COLORS.red or COLORS.muted)
+        local badgeTxt = sc.online and "[ON ]" or (isStale and "[STL]" or "[OFF]")
+        local badgeFg = sc.online and COLORS.green or (isStale and COLORS.red or COLORS.muted)
+        local badgeBg = sc.online and COLORS.darkGreen or (isStale and COLORS.darkRed or COLORS.btnBg)
+        self:drawFrame(sc.x, 14, sc.w, 8, bdrCol, COLORS.panelBg, "round")
+        self:drawText(sc.x + 2, 14, " ◈ " .. sc.title .. " ", hdrCol, COLORS.panelBg)
+        local endB = self:drawButton(sc.x + 2, 15, badgeTxt, badgeFg, badgeBg, function()
+            self.tab = sc.tab
+            self.tabScroll = 0
+        end)
+        self:drawText(endB + 1, 15, padOrTrunc(sc.tagTxt, sc.x + sc.w - endB - 3), isStale and COLORS.red or COLORS.accent, COLORS.panelBg)
+        self:drawText(sc.x + 2, 16, padOrTrunc(sc.line1, sc.w - 3), sc.online and COLORS.fg or (isStale and COLORS.yellow or COLORS.muted), COLORS.panelBg)
+        self:drawText(sc.x + 2, 17, padOrTrunc(sc.line2, sc.w - 3), COLORS.cyan, COLORS.panelBg)
+        self:drawText(sc.x + 2, 18, padOrTrunc(sc.line3, sc.w - 3), COLORS.muted, COLORS.panelBg)
+        if isStale and self.cb.onMeshRecover then
+            local wx = self:drawButton(sc.x + 2, 20, "[Wake]", COLORS.yellow, COLORS.amberBg, function()
+                self.statusMsg = tostring(self.cb.onMeshRecover(sc.key) or "Wake sent.")
+            end)
+            self:drawButton(wx + 1, 20, "[" .. sc.tabLbl .. "]", COLORS.cyan, COLORS.btnBg, function()
+                self.tab = sc.tab
+                self.tabScroll = 0
+            end)
+        else
+            self:drawButton(sc.x + 2, 20, "[Open " .. sc.tabLbl .. "]", COLORS.cyan, COLORS.btnBg, function()
+                self.tab = sc.tab
+                self.tabScroll = 0
+            end)
+        end
+    end
+
+    -- Bottom Left: Active Crafting CPUs (x=2, y=23, w=78, h=25)
+    self:drawFrame(2, 23, 78, 25, COLORS.border, COLORS.panelBg, "round")
+    self:drawText(4, 23, " ◈ BUSY CRAFTING CPUs ", COLORS.accent, COLORS.panelBg)
+    self:drawButton(67, 23, "[All CPUs]", COLORS.cyan, COLORS.btnBg, function()
         self.tab = TAB_CPUS
     end)
 
@@ -462,13 +593,13 @@ function UI:renderOverviewTab()
         if c.busy then busyRows[#busyRows + 1] = c end
     end
     if #busyRows == 0 then
-        self:drawText(4, 17, string.format("All %d Crafting CPUs are currently IDLE.", tonumber(cpus.total) or #cpuList), COLORS.muted, COLORS.panelBg)
+        self:drawText(4, 26, string.format("All %d Crafting CPUs are currently IDLE.", tonumber(cpus.total) or #cpuList), COLORS.muted, COLORS.panelBg)
     else
-        self:drawText(4, 16, padOrTrunc(string.format("%-14s %-34s %-12s %s", "CPU", "Crafting Output", "Count", "Stor/Co"), 74), COLORS.muted, COLORS.panelBg)
-        self:drawText(4, 17, string.rep("─", 74), COLORS.border, COLORS.panelBg)
-        for idx = 1, math.min(12, #busyRows) do
+        self:drawText(4, 25, padOrTrunc(string.format("%-14s %-34s %-12s %s", "CPU", "Crafting Output", "Count", "Stor/Co"), 74), COLORS.muted, COLORS.panelBg)
+        self:drawText(4, 26, string.rep("─", 74), COLORS.border, COLORS.panelBg)
+        for idx = 1, math.min(9, #busyRows) do
             local c = busyRows[idx]
-            local ry = 17 + idx * 2
+            local ry = 26 + idx * 2
             local bg = (idx % 2 == 0) and COLORS.rowAltBg or COLORS.panelBg
             self:fillRect(3, ry, 76, 1, " ", COLORS.fg, bg)
             local rowTxt = string.format("%-14s %-34s %-12s %s/%d",
@@ -483,15 +614,15 @@ function UI:renderOverviewTab()
         end
     end
 
-    -- Bottom Right: Live Activity Log (x=81, y=14, w=78, h=34)
-    self:drawFrame(81, 14, 78, 34, COLORS.border, COLORS.panelBg, "round")
-    self:drawText(83, 14, " ◈ LIVE ACTIVITY & EXPORT LOG ", COLORS.accent, COLORS.panelBg)
+    -- Bottom Right: Live Activity Log (x=81, y=23, w=78, h=25)
+    self:drawFrame(81, 23, 78, 25, COLORS.border, COLORS.panelBg, "round")
+    self:drawText(83, 23, " ◈ LIVE ACTIVITY & EXPORT LOG ", COLORS.accent, COLORS.panelBg)
     local logs = hub.logs or {}
-    local visLog = 29
+    local visLog = 20
     local maxScroll = math.max(0, #logs - visLog)
     self.logScroll = math.max(0, math.min(maxScroll, self.logScroll))
     if #logs == 0 then
-        self:drawText(83, 17, "Waiting for first export / mesh event...", COLORS.muted, COLORS.panelBg)
+        self:drawText(83, 26, "Waiting for first export / mesh event...", COLORS.muted, COLORS.panelBg)
     else
         for i = 1, math.min(visLog, #logs - self.logScroll) do
             local e = logs[#logs - (self.logScroll + i - 1)]
@@ -501,7 +632,7 @@ function UI:renderOverviewTab()
                     or ((e.tag == "MESH") and COLORS.cyan
                     or ((e.tag == "OUT") and COLORS.green or COLORS.fg)))
                 local line = string.format("[%s] %.0fs %s", tostring(e.tag or "LOG"), tonumber(e.t) or 0, tostring(e.msg or ""))
-                self:drawText(83, 15 + i, padOrTrunc(line, 74), col, COLORS.panelBg)
+                self:drawText(83, 24 + i, padOrTrunc(line, 74), col, COLORS.panelBg)
             end
         end
     end

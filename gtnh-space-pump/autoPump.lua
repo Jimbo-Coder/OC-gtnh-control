@@ -104,6 +104,21 @@ local function logMsg(msg)
   if #statusLogs > 16 then table.remove(statusLogs, 1) end
 end
 
+local WAKE_MSG = 'GTNH_WAKE'
+local lastMainnetSeen = nil
+local lastMainnetWakeAt = -1000
+
+local function configureModemWake(m)
+  if m and type(m.setWakeMessage) == 'function' then
+    local needWake = true
+    if type(m.getWakeMessage) == 'function' then
+      local okWk, curWk = pcall(m.getWakeMessage)
+      if okWk and curWk == WAKE_MSG then needWake = false end
+    end
+    if needWake then pcall(m.setWakeMessage, WAKE_MSG, true) end
+  end
+end
+
 local function getMeshModem()
   if not enableMesh then return nil, nil end
   local firstModem, wirelessModem = nil, nil
@@ -118,6 +133,7 @@ local function getMeshModem()
           isW = okW and (rW == true)
         end
         if isW and m.setStrength then pcall(m.setStrength, 400) end
+        configureModemWake(m)
         if not firstModem then firstModem = m end
         if isW and not wirelessModem then wirelessModem = m end
       end
@@ -131,9 +147,11 @@ local function getMeshModem()
       isW = okW and (rW == true)
     end
     if isW and m.setStrength then pcall(m.setStrength, 400) end
+    configureModemWake(m)
     firstModem = m
   end
   local tunnel = (component.isAvailable('tunnel') and component.tunnel) or nil
+  configureModemWake(tunnel)
   return wirelessModem or firstModem, tunnel
 end
 
@@ -260,6 +278,11 @@ local function writeStatus(stateName, cycleNum)
     local payload = buildStatusPayload(stateName, cycleNum)
     if okSer and (component.isAvailable('modem') or component.isAvailable('tunnel')) then
       sendMeshPacket(mainnetAddr, mainnetViaTunnel, 'PUMP_STATUS', serializeMeshTable(payload))
+      local upNow = computer.uptime()
+      if lastMainnetSeen and (upNow - lastMainnetSeen) >= 240 and (upNow - lastMainnetWakeAt) >= 60 then
+        lastMainnetWakeAt = upNow
+        sendMeshPacket(mainnetAddr, mainnetViaTunnel, WAKE_MSG, 'pump')
+      end
     end
   end)
 end
@@ -322,17 +345,20 @@ local function handleMeshMessage(localAddr, sender, port, msgType, reqId, rawPay
     mainnetAddr = sender
     mainnetViaTunnel = isTunnel
     meshAckSeen = true
+    lastMainnetSeen = computer.uptime()
     return true
-  elseif msgType == 'MESH_MAINNET_HELLO' then
+  elseif msgType == 'MESH_MAINNET_HELLO' or msgType == WAKE_MSG then
     mainnetAddr = sender
     mainnetViaTunnel = isTunnel
     meshAckSeen = true
+    lastMainnetSeen = computer.uptime()
     writeStatus(lastStateName, lastCycleNum)
     return true
   elseif msgType == 'PUMP_CMD' then
     mainnetAddr = sender
     mainnetViaTunnel = isTunnel
     meshAckSeen = true
+    lastMainnetSeen = computer.uptime()
     if reqId ~= nil and tostring(reqId) ~= '' then
       if tostring(reqId) == lastHandledReqId then return true end
       lastHandledReqId = tostring(reqId)
@@ -608,62 +634,70 @@ local main = thread.create(function()
 
   -- THE LOOP
   while true do
-    drainModemEvents()
-    wakeRequested = false
-    if reloadRequested then
-      reloadRequested = false
-      reloadConfigFromDisk()
-      n = 1
-    end
-
-    if refreshRequested then
-      refreshRequested = false
-      -- Finish tracked batches before replacing the pump list; otherwise
-      -- their predicted production would disappear from accounting.
-      for _, pump in ipairs(pumps) do
-        pump.module.setWorkAllowed(false)
-        while pump.module.isMachineActive() do meshSleep(2) end
+    local okCycle, cycleErr = xpcall(function()
+      drainModemEvents()
+      wakeRequested = false
+      if reloadRequested then
+        reloadRequested = false
+        reloadConfigFromDisk()
+        n = 1
       end
+
+      if refreshRequested then
+        refreshRequested = false
+        -- Finish tracked batches before replacing the pump list; otherwise
+        -- their predicted production would disappear from accounting.
+        for _, pump in ipairs(pumps) do
+          pump.module.setWorkAllowed(false)
+          while pump.module.isMachineActive() do meshSleep(2) end
+        end
+        pumps = {}
+        findPumps()
+        logMsg('Pump list refreshed (' .. #pumps .. ' found)')
+      end
+
+      -- A disconnected elevator should not cause a tight ME polling loop.
+      if #pumps == 0 then
+        logMsg('No pumps detected; retrying in 10 seconds')
+        writeStatus('no_pumps', n)
+        interruptibleSleep(10)
+        findPumps()
+      else
+        -- Update Fluid Amounts
+        local lowFluids = updateFluids()
+        if next(lowFluids) ~= nil then
+          if n % 5 == 1 then printDashboard() end
+
+          -- Update Pump Settings
+          updatePumps(lowFluids)
+          writeStatus('pumping', n)
+          n = n + 1
+
+        elseif n > 0 then
+          -- Reset Pump Settings
+          for _, pump in ipairs(pumps) do
+            pump.fluid, pump.amount, pump.batchSec, pump.ratePerSec = nil, 0, 0, 0
+          end
+
+          -- Nothing to Update, Sleep 3 Minutes
+          printDashboard()
+          print('autoPump: Sleeping...\n')
+          writeStatus('sleeping', n)
+          interruptibleSleep(180)
+          n = 0
+
+        else
+          -- n == 0 and demand remains satisfied: keep status fresh across sleep cycles.
+          writeStatus('sleeping', 0)
+          interruptibleSleep(180)
+        end
+      end
+    end, debug.traceback)
+    if not okCycle then
+      logMsg('Pump fault (retrying in 5s): ' .. tostring(cycleErr):sub(1, 140))
+      interruptibleSleep(5)
       pumps = {}
       findPumps()
-      logMsg('Pump list refreshed (' .. #pumps .. ' found)')
-    end
-
-    -- A disconnected elevator should not cause a tight ME polling loop.
-    if #pumps == 0 then
-      logMsg('No pumps detected; retrying in 10 seconds')
-      writeStatus('no_pumps', n)
-      interruptibleSleep(10)
-      findPumps()
-    else
-      -- Update Fluid Amounts
-      local lowFluids = updateFluids()
-      if next(lowFluids) ~= nil then
-        if n % 5 == 1 then printDashboard() end
-
-        -- Update Pump Settings
-        updatePumps(lowFluids)
-        writeStatus('pumping', n)
-        n = n + 1
-
-      elseif n > 0 then
-        -- Reset Pump Settings
-        for _, pump in ipairs(pumps) do
-          pump.fluid, pump.amount, pump.batchSec, pump.ratePerSec = nil, 0, 0, 0
-        end
-
-        -- Nothing to Update, Sleep 3 Minutes
-        printDashboard()
-        print('autoPump: Sleeping...\n')
-        writeStatus('sleeping', n)
-        interruptibleSleep(180)
-        n = 0
-
-      else
-        -- n == 0 and demand remains satisfied: keep status fresh across sleep cycles.
-        writeStatus('sleeping', 0)
-        interruptibleSleep(180)
-      end
     end
   end
 end)

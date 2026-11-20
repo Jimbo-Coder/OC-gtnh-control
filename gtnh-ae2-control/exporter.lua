@@ -1349,6 +1349,58 @@ local function inspectMainnetForMaint(interface, itemsReq)
     }
 end
 
+local function formatPeerBrief(name, tbl)
+    local st = tbl and tbl.status
+    if type(st) ~= "table" then
+        return (tbl and (tbl.lastSeen or -1000) > 0) and "Connected" or "Standby"
+    end
+    if name == "dtpf" then
+        local units = type(st.units) == "table" and st.units or {}
+        local onN, minD = 0, nil
+        for i = 1, #units do
+            local u = units[i]
+            if type(u) == "table" and u.online and u.enabled ~= false then
+                onN = onN + 1
+                local d = tonumber(u.discountPct) or 0
+                if not minD or d < minD then minD = d end
+            end
+        end
+        return string.format("%s · %d/%d%s", st.armed and "ARM" or "OFF", onN, #units,
+            minD and string.format(" · %.0f%%", minD) or "")
+    elseif name == "stock" then
+        local errN = tonumber(st.errorCount) or 0
+        local lowN = tonumber(st.lowCount) or 0
+        local enN = tonumber(st.enabledRules) or 0
+        if errN > 0 then
+            return string.format("%s · %dr · %d err", st.armed and "ARM" or "OFF", enN, errN)
+        elseif lowN > 0 then
+            return string.format("%s · %dr · %d low", st.armed and "ARM" or "OFF", enN, lowN)
+        end
+        return string.format("%s · %dr · ok", st.armed and "ARM" or "OFF", enN)
+    elseif name == "pump" then
+        local pumps = type(st.pumps) == "table" and st.pumps or {}
+        local act = 0
+        for _, p in ipairs(pumps) do if type(p) == "table" and p.active then act = act + 1 end end
+        local low = 0
+        local thr = tonumber(st.threshold) or 0.95
+        for _, fl in pairs(type(st.fluids) == "table" and st.fluids or {}) do
+            if type(fl) == "table" and (tonumber(fl.target) or 0) > 0 then
+                local tot = tonumber(fl.total) or ((tonumber(fl.meAmount) or 0) + (tonumber(fl.queued) or 0))
+                if tot < thr * tonumber(fl.target) then low = low + 1 end
+            end
+        end
+        return (act > 0) and string.format("%d/%d on · %d low", act, #pumps, low)
+            or string.format("%s · %d low", tostring(st.state or "idle"), low)
+    elseif name == "gorge" then
+        return string.format("%s · %d ex · %.0f%%", st.armed and "ARM" or "OFF",
+            tonumber(st.activeCount) or 0, tonumber(st.lscPct) or 0)
+    elseif name == "univ" then
+        return string.format("%s · %dp · %dq", st.armed and "ARM" or "OFF",
+            tonumber(st.activePools) or 0, tonumber(st.queuedSlices) or 0)
+    end
+    return "Online"
+end
+
 local function buildMeshHealth(now)
     now = now or uptimeNow()
     local specs = {
@@ -1367,6 +1419,7 @@ local function buildMeshHealth(now)
             seen = seen,
             ageSec = seen and math.max(0, math.floor((now - p.lastSeen) + 0.5)) or nil,
             recoveries = math.floor(tonumber(p.recoveryAttempts) or 0),
+            brief = formatPeerBrief(k, p),
         }
     end
     return out
@@ -1433,8 +1486,8 @@ local function checkMeshWatchdog(upNow, dbUrl, writeLineFn)
         lastHealthInfluxAt = upNow
         local freeKB = math.floor((computer.freeMemory and computer.freeMemory() or 0) / 1024)
         local line = string.format(
-            "oc_health ae2_ok=1i,dtpf_ok=%di,stock_ok=%di,pump_ok=%di,gorge_ok=%di,online_peers=%di,recoveries=%di,free_mem_kb=%di",
-            flags.dtpf or 0, flags.stock or 0, flags.pump or 0, flags.gorge or 0,
+            "oc_health ae2_ok=1i,dtpf_ok=%di,stock_ok=%di,pump_ok=%di,gorge_ok=%di,univ_ok=%di,online_peers=%di,recoveries=%di,free_mem_kb=%di",
+            flags.dtpf or 0, flags.stock or 0, flags.pump or 0, flags.gorge or 0, flags.univ or 0,
             onlinePeers, totalRecoveries, freeKB
         )
         postInflux(dbUrl, line .. "\n")
@@ -2441,6 +2494,24 @@ local function main()
                 else
                     logMsg("WRN", "No Wireless Modem or Linked Card available.")
                 end
+            end,
+            onMeshRecover = function(targetRole)
+                local role = tostring(targetRole or "all"):lower()
+                local peerMap = { dtpf = dtpfMesh, stock = stockMesh, pump = pumpMesh, gorge = gorgeMesh, univ = univMesh }
+                local now = uptimeNow()
+                local woken = {}
+                for rName, pTbl in pairs(peerMap) do
+                    if role == "all" or role == rName then
+                        pTbl.recoveryAttempts = (pTbl.recoveryAttempts or 0) + 1
+                        pTbl.lastRecoveryAt = now
+                        sendMeshPacket(pTbl.addr, pTbl.viaTunnel, WAKE_MSG, rName)
+                        woken[#woken + 1] = rName
+                    end
+                end
+                sendMeshPacket(nil, false, "MESH_MAINNET_HELLO", "gui_recover")
+                emitMeshHelloIfOnline(writeBridgeLine)
+                logMsg("MESH", "Sent " .. WAKE_MSG .. " recovery signal to: " .. table.concat(woken, ","))
+                return "Sent " .. WAKE_MSG .. " to " .. table.concat(woken, ", ")
             end,
             onCancelCpu = function(targetName)
                 if not interface or not interface.getCpus then

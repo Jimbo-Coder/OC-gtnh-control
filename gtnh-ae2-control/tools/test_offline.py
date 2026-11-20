@@ -696,6 +696,7 @@ for _, p in ipairs(posts) do joinedInflux[#joinedInflux + 1] = p.body end
 local allInflux = table.concat(joinedInflux, "\n")
 assert(allInflux:find("godforge_control ", 1, true), "Missing godforge_control InfluxDB line")
 assert(allInflux:find("oc_health ", 1, true), "Missing oc_health InfluxDB watchdog telemetry")
+assert(allInflux:find("univ_ok=", 1, true), "oc_health missing univ_ok field")
 assert(allInflux:find("pump_ok=1i", 1, true), "Space Pump (240s threshold) remained healthy during 75s step")
 assert(allInflux:find("active_exoticizers=1i,completed_cycles=5i,errors=0i,gf_online=1i,gf_active=1i,gf_work_allowed=1i,gf_rings=3i,gf_connected=4i,gf_upgrades=12i,lsc_pct=62.50", 1, true),
     "Bad godforge_control fields: " .. allInflux)
@@ -707,6 +708,7 @@ assert(allBridge:find('"meshUniv":true', 1, true), "Ping missing meshUniv=true")
 assert(allBridge:find('"meshGorge":true', 1, true), "Ping missing meshGorge=true")
 assert(allBridge:find('"meshStock":true', 1, true), "Ping missing meshStock=true")
 assert(allBridge:find('"meshHealth"', 1, true), "Ping/mesh_recover missing meshHealth table")
+assert(allBridge:find('"brief"', 1, true), "meshHealth missing brief summary field")
 assert(allBridge:find('"woken"', 1, true), "mesh_recover reply missing woken list")
 assert(allBridge:find('"armed":false', 1, true), "univ_action pause reply missing armed=false")
 assert(allBridge:find('"mode":"magmatter"', 1, true), "gorge_action set_mode reply missing mode")
@@ -790,6 +792,12 @@ for t = 1, 9 do
     ui3.tab = t
     ui3:render()
 end
+ui3.tab = 1
+ui3:render()
+ui3:handleTouch(30, 15, 0) -- Click DTPF overview tile badge -> switches to TAB_DTPF (4)
+assertEq(ui3.tab, 4, "Overview DTPF tile badge switches to TAB_DTPF")
+ui3.tab = 1
+ui3:render()
 ui3.logModalActive = true
 ui3:render()
 ui3.logModalActive = false
