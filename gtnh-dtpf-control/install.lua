@@ -72,7 +72,10 @@ local function resolveRepoAndBranch(args)
     end
     if not repo or repo == "" then repo = DEFAULT_REPO end
     if not branch or branch == "" then branch = DEFAULT_BRANCH end
-    repo = tostring(repo):gsub("^https?://github%.com/", ""):gsub("/+$", "")
+    repo = tostring(repo):gsub("/+$", "")
+    if not repo:match("^https?://") then
+        repo = repo:gsub("^https?://github%.com/", "")
+    end
     return repo, branch
 end
 
@@ -251,6 +254,11 @@ local function runInstaller(args)
                 io.stderr:write("ERROR: Usage: install --local <sourceDir> [owner/repo] [branch]\n")
                 return false, "missing local source directory"
             end
+        elseif a == "--url" then
+            idx = idx + 1
+            optRepo = tostring(args[idx] or ""):gsub("/+$", "")
+        elseif a == "--local-bridge" then
+            optRepo = "http://127.0.0.1:8765/oc-raw"
         elseif a == "--repo" then
             idx = idx + 1
             optRepo = tostring(args[idx] or "")
@@ -287,7 +295,9 @@ local function runInstaller(args)
         return false, "no internet card"
     end
     local repo, branch = resolveRepoAndBranch(repoArgs)
-    local baseUrl = string.format("https://raw.githubusercontent.com/%s/%s/", repo, branch)
+    local baseUrl = repo:match("^https?://")
+        and (repo:gsub("/+$", "") .. "/")
+        or string.format("https://raw.githubusercontent.com/%s/%s/", repo, branch)
 
     print("=== GTNH DTPF AUTOMATION INSTALLER ===")
     print(string.format("Source : %s", localDir and ("local:" .. localDir) or string.format("%s (%s/%s)", repo, branch, SUBDIR)))

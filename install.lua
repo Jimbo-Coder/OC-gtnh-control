@@ -121,6 +121,14 @@ local function saveManifest(m)
     return writeWholeFile(MANIFEST_PATH, serialization.serialize(m))
 end
 
+local function isHttpUrl(s)
+    return type(s) == "string" and (s:match("^https?://") ~= nil)
+end
+
+local function normalizeBaseUrl(url)
+    return tostring(url or ""):gsub("/+$", "")
+end
+
 local function runSubInstaller(spec, manifest, localDir, extraFlags)
     local subBody, err
     local passArgs = {}
@@ -137,8 +145,13 @@ local function runSubInstaller(spec, manifest, localDir, extraFlags)
         if not internet then
             return false, "Internet Card required (or use --local <dir>)"
         end
-        local url = string.format("https://raw.githubusercontent.com/%s/%s/%s/install.lua",
-            manifest.repo, manifest.branch, spec.subdir)
+        local url
+        if isHttpUrl(manifest.repo) then
+            url = string.format("%s/%s/install.lua", normalizeBaseUrl(manifest.repo), spec.subdir)
+        else
+            url = string.format("https://raw.githubusercontent.com/%s/%s/%s/install.lua",
+                manifest.repo, manifest.branch, spec.subdir)
+        end
         subBody, err = fetchUrl(internet, url)
     end
     if not subBody then
@@ -151,10 +164,15 @@ local function runSubInstaller(spec, manifest, localDir, extraFlags)
         return false, synErr
     end
 
-    passArgs[#passArgs + 1] = "--repo"
-    passArgs[#passArgs + 1] = manifest.repo
-    passArgs[#passArgs + 1] = "--branch"
-    passArgs[#passArgs + 1] = manifest.branch
+    if isHttpUrl(manifest.repo) then
+        passArgs[#passArgs + 1] = "--url"
+        passArgs[#passArgs + 1] = normalizeBaseUrl(manifest.repo)
+    else
+        passArgs[#passArgs + 1] = "--repo"
+        passArgs[#passArgs + 1] = manifest.repo
+        passArgs[#passArgs + 1] = "--branch"
+        passArgs[#passArgs + 1] = manifest.branch
+    end
     for _, f in ipairs(extraFlags) do
         passArgs[#passArgs + 1] = f
     end
@@ -183,6 +201,11 @@ local function main(args)
         elseif a == "--local" then
             idx = idx + 1
             localDir = tostring(args[idx] or ""):gsub("/+$", "")
+        elseif a == "--url" then
+            idx = idx + 1
+            if args[idx] then manifest.repo = normalizeBaseUrl(args[idx]) end
+        elseif a == "--local-bridge" then
+            manifest.repo = "http://127.0.0.1:8765/oc-raw"
         elseif a == "--repo" then
             idx = idx + 1
             if args[idx] then manifest.repo = tostring(args[idx]) end

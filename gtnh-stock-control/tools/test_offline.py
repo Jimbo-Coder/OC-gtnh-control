@@ -787,10 +787,10 @@ do
 
     local pSt = Scheduler.newState()
     Scheduler.syncHardware(pCfg, pSt)
-    -- Cycle 1 (all OK): 1 bulk getFluidsInNetwork, 0 getFluidInNetwork, 0 finalOutput!
+    -- Cycle 1 (all OK): 3 due fluids < 25 -> O(1) getFluidInNetwork, 0 bulk getFluidsInNetwork, 0 finalOutput!
     Scheduler.step(pCfg, pSt, 1000.0)
-    assertEq(mCalls.getFluids, 1, "Bulk fluid sweep used once for >= 3 due fluids")
-    assertEq(mCalls.getFluid, 0, "Zero individual getFluidInNetwork calls during bulk sweep")
+    assertEq(mCalls.getFluids, 0, "Zero bulk fluid sweep when < 25 due fluids")
+    assertEq(mCalls.getFluid, 3, "O(1) getFluidInNetwork used for 3 due fluids")
     assertEq(mCalls.finalOut, 0, "Zero finalOutput() calls on idle cycle")
     assertEq(Scheduler.nextWakeupDelay(pCfg, pSt, 1000.0), 25, "Adaptive idlePollSec=25s active after idle sweep")
 
@@ -980,6 +980,177 @@ do
     assertEq(sw2, 0, "Stock stale Mainnet wake rate-limited within 60s")
 end
 
+-- TEST 8i: Adaptive >= 25 bulk fluid threshold, ae2fc:fluid_drop unwrap, deleteRule purge, claims trimming & deferred reboot ACK
+do
+    -- 1. >= 25 due fluids triggers single bulk getFluidsInNetwork() sweep
+    local bFluidCalls, bFluidsCalls = 0, 0
+    local bMe = {
+        getCpus = function() return {} end,
+        getFluidInNetwork = function(nm) bFluidCalls = bFluidCalls + 1; return { name = nm, amount = 5000 } end,
+        getFluidsInNetwork = function()
+            bFluidsCalls = bFluidsCalls + 1
+            local list = {}
+            for i = 1, 25 do list[i] = { name = "bf" .. i, label = "BF " .. i, amount = 5000 } end
+            return list
+        end,
+    }
+    local bComp = {
+        list = function(ctype)
+            local done = false
+            return function()
+                if ctype == "me_controller" and not done then done = true; return "me-b25" end
+                return nil
+            end
+        end,
+        proxy = function(a) return (a == "me-b25") and bMe or nil end,
+    }
+    local bCfg = Scheduler.defaultConfig({ armed = true, maxConcurrentCrafts = 4, maxDispatchPerCycle = 2 })
+    for i = 1, 25 do
+        Scheduler.upsertRule(bCfg, { id = "bf" .. i, type = "fluid", name = "bf" .. i, target = 1000, batch = 100, priority = 3 })
+    end
+    local bSt = Scheduler.newState()
+    Scheduler.syncHardware(bCfg, bSt, bComp)
+    Scheduler.step(bCfg, bSt, 1000.0, bComp)
+    assertEq(bFluidsCalls, 1, "25 due fluids trigger single bulk getFluidsInNetwork()")
+    assertEq(bFluidCalls, 0, "0 individual getFluidInNetwork() calls during >=25 bulk sweep")
+
+    -- 2. ae2fc:fluid_drop busy CPU unwrap + physical level_maintainer fluid resolution + deleteRule state purge
+    local fMe = {
+        getFluidsInNetwork = function()
+            return { { name = "molten.copper", label = "Molten Copper", amount = 5000 } }
+        end,
+        getCpus = function()
+            return {
+                {
+                    name = "CPU-FluidDrop",
+                    busy = true,
+                    cpu = {
+                        finalOutput = function()
+                            return {
+                                name = "ae2fc:fluid_drop",
+                                size = 1000,
+                                label = "drop of Molten Copper",
+                                fluid = { name = "molten.copper", label = "Molten Copper" },
+                                damage = 0,
+                            }
+                        end,
+                    },
+                },
+            }
+        end,
+    }
+    local fMaint = {
+        getSlot = function(slot)
+            if slot == 1 then
+                return {
+                    isFluid = true,
+                    name = "ae2fc:fluid_drop",
+                    label = "drop of Molten Copper",
+                    quantity = 64000,
+                    batch = 1000,
+                    isEnable = true,
+                }
+            end
+            return nil
+        end,
+    }
+    local fComp = {
+        list = function(ctype)
+            local done = false
+            return function()
+                if not done and (ctype == "me_controller" or ctype == "level_maintainer") then
+                    done = true
+                    return (ctype == "me_controller") and "me-fd" or "lm-fd"
+                end
+                return nil
+            end
+        end,
+        proxy = function(a)
+            if a == "me-fd" then return fMe end
+            if a == "lm-fd" then return fMaint end
+            return nil
+        end,
+    }
+    local fCfg = Scheduler.defaultConfig({})
+    local fSt = Scheduler.newState()
+    Scheduler.syncHardware(fCfg, fSt, fComp)
+    local cpuSnap = Hardware.inspectCpus(fMe, nil, { fetchOutputs = true })
+    assertEq(cpuSnap.busyByKey["fluid:molten.copper:0"], "CPU-FluidDrop", "ae2fc:fluid_drop busy CPU unwrapped to fluid:molten.copper:0")
+    assertEq(cpuSnap.busyByLabel["Molten Copper"], "CPU-FluidDrop", "ae2fc:fluid_drop stripped 'drop of ' for busyByLabel")
+    local physRows = Hardware.scanPhysicalMaintainers(fComp, fSt, fCfg)
+    assertEq(#physRows, 1, "Physical maintainer fluid row scanned")
+    assertEq(physRows[1].type, "fluid", "Physical fluid slot keeps fluid type")
+    assertEq(physRows[1].name, "molten.copper", "Physical fluid label resolved to AE2 registry fluid name")
+    assertEq(physRows[1].target, 64000, "Physical fluid slot preserves target quantity")
+
+    -- 3. deleteRule purges _ruleTrack, _ruleCache, _pendingJobs + oversized STOCK_CLAIMS tail-trim retains DTPF entries
+    local cCfg = Scheduler.defaultConfig({ armed = true })
+    local cSt = Scheduler.newState()
+    cSt._ruleTrack["del1"] = { lastState = "LOW" }
+    cSt._ruleCache["del1"] = { stock = 5 }
+    cSt._pendingJobs["del1"] = { pendingUntil = 999 }
+    Scheduler.upsertRule(cCfg, { id = "del1", type = "item", name = "minecraft:stone", damage = 0, label = "Stone", target = 10, batch = 1 })
+    assert(Scheduler.deleteRule(cCfg, "del1", cSt), "deleteRule returns true")
+    assertEq(cSt._ruleTrack["del1"], nil, "deleteRule purged _ruleTrack")
+    assertEq(cSt._ruleCache["del1"], nil, "deleteRule purged _ruleCache")
+    assertEq(cSt._pendingJobs["del1"], nil, "deleteRule purged _pendingJobs")
+
+    for i = 1, 220 do
+        Scheduler.upsertRule(cCfg, {
+            id = "gen_" .. i, type = "item", name = "gregtech:gt.block.very_long_filler_name_" .. i,
+            damage = i, label = "Filler Item " .. i, target = 1000, batch = 64, priority = 50,
+        })
+    end
+    Scheduler.upsertRule(cCfg, {
+        id = "dtpf_rt", type = "item", name = "gregtech:gt.metaitem.01",
+        damage = 32415, label = "Raw Tesseract", target = 500, batch = 16, priority = 50,
+    })
+    cSt.dtpfPeer = {
+        maintKeys = {},
+        passiveKeys = { ["item:gregtech:gt.metaitem.01:32415"] = true },
+    }
+    cSt._dtpfClaimsDirty = true
+    local claimsPackets = {}
+    local clComp = {
+        list = function(ctype)
+            local done = false
+            return function()
+                if ctype == "modem" and not done then done = true; return "mod-cl" end
+                return nil
+            end
+        end,
+        proxy = function(a)
+            if a ~= "mod-cl" then return nil end
+            return {
+                isOpen = function() return true end, open = function() return true end,
+                isWireless = function() return true end, getStrength = function() return 400 end, setStrength = function() return 400 end,
+                getWakeMessage = function() return "GTNH_WAKE" end, setWakeMessage = function() return "GTNH_WAKE" end,
+                send = function(t, port, mType, payload)
+                    claimsPackets[#claimsPackets + 1] = { t = t, mType = mType, payload = payload }
+                    return true
+                end,
+                broadcast = function(port, mType, payload)
+                    claimsPackets[#claimsPackets + 1] = { t = "*", mType = mType, payload = payload }
+                    return true
+                end,
+            }
+        end,
+    }
+    Hardware.pushMeshMetrics(cCfg, cSt, 200.0, clComp, true)
+    local rawClaims = nil
+    for _, p in ipairs(claimsPackets) do
+        if p.mType == "STOCK_CLAIMS" then rawClaims = p.payload end
+    end
+    assert(type(rawClaims) == "string" and #rawClaims > 0 and #rawClaims <= 5500, "Oversized STOCK_CLAIMS trimmed <= 5500 bytes (got " .. tostring(rawClaims and #rawClaims) .. ")")
+    local decClaims = serialization.unserialize(rawClaims)
+    assert(type(decClaims) == "table" and type(decClaims.keys) == "table", "Trimmed STOCK_CLAIMS still deserializes cleanly")
+    local hasDtpfClaim = false
+    for _, k in ipairs(decClaims.keys) do
+        if k == "i:gregtech:gt.metaitem.01:32415" then hasDtpfClaim = true end
+    end
+    assert(hasDtpfClaim, "Trimmed STOCK_CLAIMS prioritizes retaining DTPF catalog rule ahead of filler rules")
+end
+
 -- TEST 9: CLI (--check, --bench, --off)
 local mainSrc = __py_read_file(__STOCK_ROOT .. "/main.lua")
 local function runCli(arg)
@@ -989,6 +1160,48 @@ end
 runCli("--check")
 runCli("--bench")
 runCli("--off")
+
+-- TEST 9b: Deferred reboot transmits STOCK_REPLY before computer.shutdown(true)
+do
+    local evLib = require("event")
+    local compLib = require("computer")
+    local orderLog = {}
+    local rbtPullInjected = false
+    local origList, origProxy = component.list, component.proxy
+    local origPull, origShutdown = evLib.pull, compLib.shutdown
+    local rbtModem = {
+        isOpen = function() return true end, open = function() return true end,
+        isWireless = function() return true end, getStrength = function() return 400 end, setStrength = function() return 400 end,
+        getWakeMessage = function() return "GTNH_WAKE" end, setWakeMessage = function() return "GTNH_WAKE" end,
+        send = function(t, port, mType, reqId, body)
+            if mType == "STOCK_REPLY" then orderLog[#orderLog + 1] = "STOCK_REPLY:" .. tostring(reqId) end
+            return true
+        end,
+        broadcast = function() return true end,
+    }
+    component.list = function(ctype)
+        local done = false
+        return function()
+            if ctype == "modem" and not done then done = true; return "mod-rbt" end
+            return nil
+        end
+    end
+    component.proxy = function(a) return (a == "mod-rbt") and rbtModem or origProxy(a) end
+    compLib.shutdown = function(rbt) orderLog[#orderLog + 1] = "SHUTDOWN:" .. tostring(rbt) end
+    evLib.pull = function()
+        if not rbtPullInjected then
+            rbtPullInjected = true
+            return "modem_message", "mod-rbt", "ae2-addr", 4205, 10, "STOCK_CMD", "req-rbt-1",
+                serialization.serialize({ op = "stock_action", action = "reboot" })
+        end
+        return nil
+    end
+    runCli("--headless")
+    component.list, component.proxy = origList, origProxy
+    evLib.pull, compLib.shutdown = origPull, origShutdown
+    assertEq(orderLog[1], "STOCK_REPLY:req-rbt-1", "STOCK_REPLY sent BEFORE computer.shutdown(true)")
+    assertEq(orderLog[2], "SHUTDOWN:true", "computer.shutdown(true) fired after worker exit")
+end
 return "OK"
 """
             res = host.exec_lua(lua_suite, "stock_test_suite")

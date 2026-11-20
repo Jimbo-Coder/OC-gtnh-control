@@ -2104,6 +2104,14 @@ local function inspectMainnetCpusAndStocks(proxy, itemsReq)
                         if fin.label and fin.label ~= "" then
                             busyByLabel[fin.label] = busyByLabel[fin.label] or cpu.name
                         end
+                        if fin.name == "ae2fc:fluid_drop" or type(fin.fluid) == "table" then
+                            local fl = type(fin.fluid) == "table" and fin.fluid or nil
+                            local dLbl = tostring((fl and fl.label) or fin.label or ""):gsub("^drop of ", "")
+                            if dLbl ~= "" then busyByLabel[dLbl] = busyByLabel[dLbl] or cpu.name end
+                            if fl and fl.name and fl.name ~= "" then
+                                busyByKey["fluid:" .. fl.name .. ":0"] = busyByKey["fluid:" .. fl.name .. ":0"] or cpu.name
+                            end
+                        end
                         if fin.name and fin.name ~= "" then
                             local fType = (fin.maxSize == nil) and "fluid" or "item"
                             local k = fType .. ":" .. fin.name .. ":" .. tostring(fType == "item" and (tonumber(fin.damage) or 0) or 0)

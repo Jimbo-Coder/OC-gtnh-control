@@ -324,11 +324,16 @@ function Scheduler.upsertRule(cfg, spec)
     return cr, #cfg.rules, true
 end
 
-function Scheduler.deleteRule(cfg, id)
+function Scheduler.deleteRule(cfg, id, state)
     if not cfg or type(cfg.rules) ~= "table" then return false end
     for i = 1, #cfg.rules do
         if cfg.rules[i] and cfg.rules[i].id == id then
             table.remove(cfg.rules, i)
+            if state then
+                if state._ruleTrack then state._ruleTrack[id] = nil end
+                if state._ruleCache then state._ruleCache[id] = nil end
+                if state._pendingJobs then state._pendingJobs[id] = nil end
+            end
             return true
         end
     end
@@ -447,7 +452,7 @@ function Scheduler.applyDtpfHandoffAck(cfg, state, ackTbl)
     local remove = (ackTbl.remove == true)
     for _, rid in ipairs(ids) do
         if remove then
-            if Scheduler.deleteRule(cfg, rid) then
+            if Scheduler.deleteRule(cfg, rid, state) then
                 changed = changed + 1
             end
         else
@@ -656,8 +661,10 @@ function Scheduler.step(cfg, state, nowSec, compLib, opts)
         end
     end
 
+    local hasO1Fluid = (ae ~= nil and type(ae.getFluidInNetwork) == "function")
+    local bulkFluidThreshold = hasO1Fluid and 25 or 1
     local fluidFallbackRef = {}
-    if ae and not opts.dryRun and not opts.cachedOnly and dueFluids >= 3 and type(ae.getFluidsInNetwork) == "function" then
+    if ae and not opts.dryRun and not opts.cachedOnly and dueFluids >= bulkFluidThreshold and type(ae.getFluidsInNetwork) == "function" then
         fluidFallbackRef = Hardware.fetchFluidStockMap(ae, counter) or fluidFallbackRef
     end
     local busyByKey = cpuSnap.busyByKey or {}
@@ -1134,7 +1141,7 @@ function Scheduler.executeRpcTable(cfg, state, cmd, compLib, onMutate)
             mutated = true
         end
         if type(p.deleteRuleId) == "string" and p.deleteRuleId ~= "" then
-            Scheduler.deleteRule(cfg, p.deleteRuleId)
+            Scheduler.deleteRule(cfg, p.deleteRuleId, state)
             mutated = true
         end
         if type(p.toggleRuleId) == "string" and p.toggleRuleId ~= "" then
@@ -1150,7 +1157,7 @@ function Scheduler.executeRpcTable(cfg, state, cmd, compLib, onMutate)
         if err then return { id = id, ok = false, error = err } end
         mutated = true
     elseif op == "delete_rule" then
-        if not Scheduler.deleteRule(cfg, cmd.ruleId or cmd.id) then
+        if not Scheduler.deleteRule(cfg, cmd.ruleId or cmd.id, state) then
             return { id = id, ok = false, error = "Rule not found" }
         end
         mutated = true
@@ -1174,7 +1181,7 @@ function Scheduler.executeRpcTable(cfg, state, cmd, compLib, onMutate)
             Scheduler.clearBackoffs(state)
             state._forcePollNow = true
         elseif act == "import_maintainers" then
-            local slots = Hardware.scanPhysicalMaintainers(compLib, state)
+            local slots = Hardware.scanPhysicalMaintainers(compLib, state, cfg)
             state.physicalMaintainers = slots
             local imp = Scheduler.importPhysicalSlots(cfg, slots, {
                 includeDisabled = false,
@@ -1184,7 +1191,7 @@ function Scheduler.executeRpcTable(cfg, state, cmd, compLib, onMutate)
             mutated = (imp.added > 0 or imp.updated > 0)
             Scheduler.pushLog(state, "out", string.format("Imported %d new (%d upd, %d skip) from physical maintainers.", imp.added, imp.updated, imp.skipped), "OUT")
         elseif act == "import_non_dtpf" then
-            local slots = Hardware.scanPhysicalMaintainers(compLib, state)
+            local slots = Hardware.scanPhysicalMaintainers(compLib, state, cfg)
             state.physicalMaintainers = slots
             local imp = Scheduler.importPhysicalSlots(cfg, slots, {
                 includeDisabled = false,

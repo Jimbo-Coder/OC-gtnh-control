@@ -77,12 +77,14 @@ end
 
 local function runInstaller(args)
     args = args or {}
-    local localDir, optRepo, optBranch = nil, nil, nil
+    local localDir, optRepo, optBranch, optUrl = nil, nil, nil, nil
     local isUpdate, optYes, optNoPrompt, optAutostart = false, false, false, nil
     local idx = 1
     while idx <= #args do
         local a = tostring(args[idx])
         if a == "--local" then idx = idx + 1; localDir = tostring(args[idx] or ""):gsub("/+$", "")
+        elseif a == "--url" then idx = idx + 1; optUrl = tostring(args[idx] or ""):gsub("/+$", "")
+        elseif a == "--local-bridge" then optUrl = "http://127.0.0.1:8765/oc-raw"
         elseif a == "--repo" then idx = idx + 1; optRepo = tostring(args[idx] or "")
         elseif a == "--branch" then idx = idx + 1; optBranch = tostring(args[idx] or "")
         elseif a == "--update" then isUpdate = true
@@ -111,9 +113,20 @@ local function runInstaller(args)
 
     local saved = readWholeFile(REPO_META_PATH)
     local sRepo, sBranch = saved and saved:match("^([^\r\n]+)\r?\n?([^\r\n]*)")
-    local repo = (optRepo and optRepo ~= "") and optRepo or ((sRepo and sRepo ~= "") and sRepo or DEFAULT_REPO)
+    local rawSrc = (optUrl and optUrl ~= "") and optUrl
+        or ((optRepo and optRepo ~= "") and optRepo
+        or ((sRepo and sRepo ~= "") and sRepo or DEFAULT_REPO))
     local branch = (optBranch and optBranch ~= "") and optBranch or ((sBranch and sBranch ~= "") and sBranch or DEFAULT_BRANCH)
-    local url = string.format("https://raw.githubusercontent.com/%s/%s/%s/autoPump.lua", repo, branch, SUBDIR)
+    local baseUrl
+    local repoMeta = rawSrc
+    if rawSrc:match("^https?://") then
+        local clean = rawSrc:gsub("/+$", "")
+        repoMeta = clean
+        baseUrl = (clean:sub(-#SUBDIR) == SUBDIR) and (clean .. "/") or (clean .. "/" .. SUBDIR .. "/")
+    else
+        baseUrl = string.format("https://raw.githubusercontent.com/%s/%s/%s/", rawSrc, branch, SUBDIR)
+    end
+    local url = baseUrl .. "autoPump.lua"
 
     print("=== GTNH SPACE PUMP INSTALLER ===")
     local body, err
@@ -135,7 +148,11 @@ local function runInstaller(args)
     end
 
     writeWholeFile(DEST_PATH, body)
-    writeWholeFile(REPO_META_PATH, repo .. "\n" .. branch .. "\n")
+    local instBody = localDir and readWholeFile(filesystem.concat(localDir, "install.lua")) or select(1, fetchUrl(internet, baseUrl .. "install.lua"))
+    if instBody and load(instBody, "@install_pump.lua", "t") then
+        writeWholeFile("/home/install_pump.lua", instBody)
+    end
+    writeWholeFile(REPO_META_PATH, repoMeta .. "\n" .. branch .. "\n")
     print(string.format("[OK 1/1] %s (%d bytes)", DEST_PATH, #body))
 
     local existingShrc = readWholeFile(SHRC_PATH) or ""

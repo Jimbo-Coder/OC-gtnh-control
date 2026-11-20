@@ -16,7 +16,23 @@ for i = 1, #cliArgs do
     local a = tostring(cliArgs[i] or "")
     if a == "--headless" or a == "headless" then
         forceHeadless = true
-        break
+    elseif a == "--update" or a == "update" then
+        local instPath = "/home/install_ae2.lua"
+        local src = nil
+        local f = io.open(instPath, "r")
+        if f then src = f:read("*a"); f:close() end
+        if not src then
+            io.stderr:write("ERROR: /home/install_ae2.lua not found. Re-run install.lua once to enable --update.\n")
+            return
+        end
+        local chunk, err = load(src, "=" .. instPath)
+        if not chunk then
+            io.stderr:write("ERROR: Invalid /home/install_ae2.lua: " .. tostring(err) .. "\n")
+            return
+        end
+        local extra = { "--update" }
+        for j = i + 1, #cliArgs do extra[#extra + 1] = cliArgs[j] end
+        return chunk(table.unpack(extra))
     end
 end
 
@@ -1253,6 +1269,14 @@ local function inspectMainnetForMaint(interface, itemsReq)
                         if fin.label and fin.label ~= "" then
                             busyByLabel[fin.label] = busyByLabel[fin.label] or cpu.name
                         end
+                        if fin.name == "ae2fc:fluid_drop" or type(fin.fluid) == "table" then
+                            local fl = type(fin.fluid) == "table" and fin.fluid or nil
+                            local dLbl = tostring((fl and fl.label) or fin.label or ""):gsub("^drop of ", "")
+                            if dLbl ~= "" then busyByLabel[dLbl] = busyByLabel[dLbl] or cpu.name end
+                            if fl and fl.name and fl.name ~= "" then
+                                busyByKey["fluid:" .. fl.name .. ":0"] = busyByKey["fluid:" .. fl.name .. ":0"] or cpu.name
+                            end
+                        end
                         if fin.name and fin.name ~= "" then
                             local fType = (fin.maxSize == nil) and "fluid" or "item"
                             local k = fType .. ":" .. fin.name .. ":" .. tostring(fType == "item" and (tonumber(fin.damage) or 0) or 0)
@@ -1481,7 +1505,6 @@ local function checkMeshWatchdog(upNow, dbUrl, writeLineFn)
     end
     if changed then
         emitMeshHelloIfOnline(writeLineFn)
-        uiDirty = true
     end
     if dbUrl and (changed or (upNow - lastHealthInfluxAt) >= 30) then
         lastHealthInfluxAt = upNow
@@ -1493,6 +1516,7 @@ local function checkMeshWatchdog(upNow, dbUrl, writeLineFn)
         )
         postInflux(dbUrl, line .. "\n")
     end
+    return changed
 end
 
 local function handleMeshModemEvent(interface, writeLineFn, localAddr, sender, port, msgType, arg1, arg2)
@@ -1828,7 +1852,7 @@ local function callMeshRpc(interface, writeLineFn, peer, msgType, payloadTbl, re
             local isTunnel = (port == 0 and tunnel ~= nil)
             if (port == MESH_PORT or isTunnel) and mType == replyType and tostring(a1) == reqId then
                 if peer then
-                    local freshWindow = (replyType == "PUMP_REPLY") and 180 or 60
+                    local freshWindow = (replyType == "PUMP_REPLY") and PUMP_STALE_SEC or PEER_STALE_SEC
                     local wasFresh = isMeshFresh(peer, freshWindow)
                     peer.addr = sAddr
                     peer.viaTunnel = isTunnel
@@ -1877,11 +1901,12 @@ local function handleBridgeCommand(sockWriteLine, interface, cmd)
             totalMem = computer.totalMemory and computer.totalMemory() or 0,
             uptime = computer.uptime and computer.uptime() or 0,
             lastItemScanSec = lastItemScanSec,
-            meshDtpf = isMeshFresh(dtpfMesh, 60),
-            meshPump = isMeshFresh(pumpMesh, 180),
-            meshUniv = isMeshFresh(univMesh, 60),
-            meshGorge = isMeshFresh(gorgeMesh, 60),
-            meshStock = isMeshFresh(stockMesh, 60),
+            meshDtpf = isMeshFresh(dtpfMesh, PEER_STALE_SEC),
+            meshPump = isMeshFresh(pumpMesh, PUMP_STALE_SEC),
+            meshUniv = isMeshFresh(univMesh, PEER_STALE_SEC),
+            meshGorge = isMeshFresh(gorgeMesh, PEER_STALE_SEC),
+            meshStock = isMeshFresh(stockMesh, PEER_STALE_SEC),
+            meshHealth = buildMeshHealth(uptimeNow()),
         })
     elseif op == "cpus" then
         if not interface then
@@ -1897,11 +1922,11 @@ local function handleBridgeCommand(sockWriteLine, interface, cmd)
             freeMem = computer.freeMemory and computer.freeMemory() or 0,
             totalMem = computer.totalMemory and computer.totalMemory() or 0,
             lastItemScanSec = lastItemScanSec,
-            meshDtpf = isMeshFresh(dtpfMesh, 60),
-            meshPump = isMeshFresh(pumpMesh, 180),
-            meshUniv = isMeshFresh(univMesh, 60),
-            meshGorge = isMeshFresh(gorgeMesh, 60),
-            meshStock = isMeshFresh(stockMesh, 60),
+            meshDtpf = isMeshFresh(dtpfMesh, PEER_STALE_SEC),
+            meshPump = isMeshFresh(pumpMesh, PUMP_STALE_SEC),
+            meshUniv = isMeshFresh(univMesh, PEER_STALE_SEC),
+            meshGorge = isMeshFresh(gorgeMesh, PEER_STALE_SEC),
+            meshStock = isMeshFresh(stockMesh, PEER_STALE_SEC),
         })
     elseif op == "item_stocks" then
         if not interface then
@@ -2145,7 +2170,7 @@ local function handleBridgeCommand(sockWriteLine, interface, cmd)
         end
         return reply({ ok = false, error = "Empty DTPF mesh response" })
     elseif op == "pump_state" then
-        if pumpMesh.status and not cmd.force and (uptimeNow() - (pumpMesh.statusUptime or -1000)) < 190 then
+        if pumpMesh.status and not cmd.force and (uptimeNow() - (pumpMesh.statusUptime or -1000)) < PUMP_STALE_SEC then
             return reply({
                 ok = true,
                 meshRouted = true,
@@ -2416,11 +2441,12 @@ local function main()
                     freeMem = computer.freeMemory and computer.freeMemory() or 0,
                     totalMem = computer.totalMemory and computer.totalMemory() or 0,
                     lastItemScanSec = lastItemScanSec,
-                    meshDtpf = isMeshFresh(dtpfMesh, 60),
-                    meshPump = isMeshFresh(pumpMesh, 180),
-                    meshUniv = isMeshFresh(univMesh, 60),
-                    meshGorge = isMeshFresh(gorgeMesh, 60),
-                    meshStock = isMeshFresh(stockMesh, 60),
+                    meshDtpf = isMeshFresh(dtpfMesh, PEER_STALE_SEC),
+                    meshPump = isMeshFresh(pumpMesh, PUMP_STALE_SEC),
+                    meshUniv = isMeshFresh(univMesh, PEER_STALE_SEC),
+                    meshGorge = isMeshFresh(gorgeMesh, PEER_STALE_SEC),
+                    meshStock = isMeshFresh(stockMesh, PEER_STALE_SEC),
+                    meshHealth = buildMeshHealth(now),
                 }))
             end
         end
@@ -2799,7 +2825,9 @@ local function main()
             if config.enableMesh ~= false and (upNow - lastWatchdogAt) >= 15 then
                 lastWatchdogAt = upNow
                 local wdDbUrl = (not config.exportPaused and config.dbURL) and (config.dbURL .. (config.itemDB or "mainnet")) or nil
-                checkMeshWatchdog(upNow, wdDbUrl, writeBridgeLine)
+                if checkMeshWatchdog(upNow, wdDbUrl, writeBridgeLine) then
+                    uiDirty = true
+                end
             end
 
             if (not config.exportPaused) and config.enableItems and interface and (config.allItemsMode == 1 or config.allItemsMode == 3) and os.time() > lastAllItemsTime + config.allItemsInterval then

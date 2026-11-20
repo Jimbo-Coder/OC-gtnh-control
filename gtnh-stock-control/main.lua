@@ -134,16 +134,9 @@ end
 
 local function makeRpcDispatcher(cfg, state)
     return function(cmd)
-        local res = Scheduler.executeRpcTable(cfg, state, cmd, nil, function(c)
+        return Scheduler.executeRpcTable(cfg, state, cmd, nil, function(c)
             saveConfig(c)
         end)
-        if state._pendingReboot then
-            saveConfig(cfg)
-            if computer.shutdown then
-                pcall(computer.shutdown, true)
-            end
-        end
-        return res
     end
 end
 
@@ -262,7 +255,7 @@ local function runWorker()
                     local timeout = math.max(0.05, deadline - computer.uptime())
                     local evTbl = { event.pull(timeout) }
                     local _, stopReq = dispatchEvent(cfg, state, evTbl, nil, rpcFn)
-                    if stopReq then
+                    if stopReq or state._pendingReboot then
                         running = false
                         userExit = true
                         break
@@ -273,7 +266,12 @@ local function runWorker()
         end, debug.traceback)
 
         pcall(saveConfig, cfg)
-        if userExit then
+        if state._pendingReboot then
+            print("GTNH Stock Maintainer rebooting per remote request...")
+            pcall(os.sleep, 0.15)
+            if computer.shutdown then pcall(computer.shutdown, true) end
+            return
+        elseif userExit then
             print("GTNH Stock Maintainer worker stopped cleanly.")
             return
         elseif not okLoop then
@@ -342,7 +340,7 @@ local function runGUI()
 
                 local evTbl = { event.pull(waitSec) }
                 local evDirty, stopReq = dispatchEvent(cfg, state, evTbl, ui, rpcFn)
-                if stopReq then
+                if stopReq or state._pendingReboot then
                     savePending = true
                     userExit = true
                     ui.running = false
@@ -379,7 +377,12 @@ local function runGUI()
             pcall(component.gpu.setForeground, 0xFFFFFF)
         end
         term.clear()
-        if userExit or okLoop then
+        if state._pendingReboot then
+            print("GTNH Stock Maintainer rebooting per remote request...")
+            pcall(os.sleep, 0.15)
+            if computer.shutdown then pcall(computer.shutdown, true) end
+            return
+        elseif userExit or okLoop then
             print("GTNH Stock Maintainer stopped cleanly.")
             return
         else

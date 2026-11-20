@@ -1,4 +1,27 @@
 -- GTNH 2.9 Space Pumping (Fox, samsonsin, San32)
+local cliArgs = { ... }
+for i = 1, #cliArgs do
+  local a = tostring(cliArgs[i] or '')
+  if a == '--update' or a == 'update' then
+    local instPath = '/home/install_pump.lua'
+    local src = nil
+    local f = io.open(instPath, 'r')
+    if f then src = f:read('*a'); f:close() end
+    if not src then
+      io.stderr:write('ERROR: /home/install_pump.lua not found. Re-run install.lua once to enable --update.\n')
+      return
+    end
+    local chunk, err = load(src, '=' .. instPath)
+    if not chunk then
+      io.stderr:write('ERROR: Invalid /home/install_pump.lua: ' .. tostring(err) .. '\n')
+      return
+    end
+    local extra = { '--update' }
+    for j = i + 1, #cliArgs do extra[#extra + 1] = cliArgs[j] end
+    return chunk(table.unpack(extra))
+  end
+end
+
 local component = require('component')
 local thread = require('thread')
 local event = require('event')
@@ -6,12 +29,35 @@ local term = require('term')
 local filesystem = require('filesystem')
 local computer = require('computer')
 local okSer, serialization = pcall(require, 'serialization')
-local me = component.me_controller
 local pumps = {}
 local refreshRequested = false
 local reloadRequested = false
 local wakeRequested = false
+local rebootRequested = false
 local statusLogs = {}
+local cachedMe = nil
+local cachedModem = nil
+local cachedTunnel = nil
+
+local function getMeProxy()
+  if cachedMe and cachedMe.getFluidsInNetwork then return cachedMe end
+  for _, ctype in ipairs({ 'me_controller', 'me_interface', 'fluid_interface' }) do
+    if component.isAvailable(ctype) and component[ctype] then
+      cachedMe = component[ctype]
+      return cachedMe
+    end
+    if component.list then
+      for addr in component.list(ctype, true) do
+        local p = component.proxy(addr)
+        if p and p.getFluidsInNetwork then
+          cachedMe = p
+          return cachedMe
+        end
+      end
+    end
+  end
+  return nil
+end
 
 local SELF_PATH = '/home/autoPump.lua'
 local OVERRIDES_PATH = '/home/pump_overrides.lua'
@@ -119,40 +165,55 @@ local function configureModemWake(m)
   end
 end
 
-local function getMeshModem()
+local function getMeshModem(forceRefresh)
   if not enableMesh then return nil, nil end
+  if (not forceRefresh) and (cachedModem ~= nil or cachedTunnel ~= nil) then
+    return cachedModem or nil, cachedTunnel or nil
+  end
   local firstModem, wirelessModem = nil, nil
+  local function prepModem(m)
+    if not m then return end
+    local needOpen = true
+    if type(m.isOpen) == 'function' then
+      local okO, isO = pcall(m.isOpen, MESH_PORT)
+      if okO and isO == true then needOpen = false end
+    end
+    if needOpen and m.open then pcall(m.open, MESH_PORT) end
+    local isW = false
+    if m.isWireless then
+      local okW, rW = pcall(m.isWireless)
+      isW = okW and (rW == true)
+    end
+    if isW and m.setStrength then
+      local needStr = true
+      if type(m.getStrength) == 'function' then
+        local okG, curStr = pcall(m.getStrength)
+        if okG and tonumber(curStr) and tonumber(curStr) >= 400 then needStr = false end
+      end
+      if needStr then pcall(m.setStrength, 400) end
+    end
+    configureModemWake(m)
+    return isW
+  end
   if component.list then
     for addr in component.list('modem', true) do
       local m = component.proxy(addr)
       if m then
-        if m.open then pcall(m.open, MESH_PORT) end
-        local isW = false
-        if m.isWireless then
-          local okW, rW = pcall(m.isWireless)
-          isW = okW and (rW == true)
-        end
-        if isW and m.setStrength then pcall(m.setStrength, 400) end
-        configureModemWake(m)
+        local isW = prepModem(m)
         if not firstModem then firstModem = m end
         if isW and not wirelessModem then wirelessModem = m end
       end
     end
   elseif component.isAvailable('modem') and component.modem then
     local m = component.modem
-    if m.open then pcall(m.open, MESH_PORT) end
-    local isW = false
-    if m.isWireless then
-      local okW, rW = pcall(m.isWireless)
-      isW = okW and (rW == true)
-    end
-    if isW and m.setStrength then pcall(m.setStrength, 400) end
-    configureModemWake(m)
+    prepModem(m)
     firstModem = m
   end
   local tunnel = (component.isAvailable('tunnel') and component.tunnel) or nil
   configureModemWake(tunnel)
-  return wirelessModem or firstModem, tunnel
+  cachedModem = (wirelessModem or firstModem) or false
+  cachedTunnel = tunnel or false
+  return cachedModem or nil, cachedTunnel or nil
 end
 
 local function sendMeshPacket(targetAddr, viaTunnel, msgType, ...)
@@ -403,16 +464,22 @@ local function handleMeshMessage(localAddr, sender, port, msgType, reqId, rawPay
         refreshRequested = true
       elseif act == 'reload' then
         reloadRequested = true
+      elseif act == 'reboot' then
+        rebootRequested = true
+        wakeRequested = true
+        logMsg('Reboot requested via OC mesh')
+        replyCmd({ ok = true, rebooting = true })
+        return true
       else
         replyCmd({ ok = false, error = 'Invalid action: ' .. act })
         return true
       end
       replyCmd({ ok = true, queuedAction = act, status = buildStatusPayload(lastStateName, lastCycleNum) })
     elseif op == 'reboot' then
+      rebootRequested = true
+      wakeRequested = true
       logMsg('Reboot requested via OC mesh')
       replyCmd({ ok = true, rebooting = true })
-      os.sleep(0.05)
-      if computer.shutdown then pcall(computer.shutdown, true) end
     else
       replyCmd({ ok = false, error = 'Unknown op: ' .. tostring(op) })
     end
@@ -434,7 +501,7 @@ end
 
 local function meshSleep(totalSec)
   local rem = tonumber(totalSec) or 1
-  while rem > 0 do
+  while rem > 0 and not rebootRequested do
     drainModemEvents()
     local step = math.min(1, rem)
     os.sleep(step)
@@ -446,8 +513,13 @@ end
 local function interruptibleSleep(totalSec)
   local now = computer.uptime()
   local deadline = now + totalSec
+  local lastHbAt = now
   while now < deadline do
-    if wakeRequested or reloadRequested or refreshRequested then return true end
+    if wakeRequested or reloadRequested or refreshRequested or rebootRequested then return true end
+    if (now - lastHbAt) >= 90 then
+      lastHbAt = now
+      writeStatus(lastStateName, lastCycleNum)
+    end
     local step = math.min(1.5, math.max(0.05, deadline - now))
     if event and event.pull then
       local ev, lAddr, sAddr, port, _, msgType, reqId, raw = event.pull(step, 'modem_message')
@@ -459,13 +531,14 @@ local function interruptibleSleep(totalSec)
     end
     now = computer.uptime()
   end
-  return wakeRequested or reloadRequested or refreshRequested
+  return wakeRequested or reloadRequested or refreshRequested or rebootRequested
 end
 
 local function findPumps()
+  if not component.list then return end
   for address in component.list('gt_machine') do
     local module = component.proxy(address)
-    local name = module.getName()
+    local name = module and module.getName and module.getName()
 
     if name == "projectmodulepumpt1" then
       table.insert(pumps, {module=module, address=address, name=name, tier=1, threads=1, mult=4, priority=1, fluid=nil, amount=0, batchSec=0, ratePerSec=0})
@@ -481,6 +554,8 @@ local function findPumps()
 end
 
 local function updateFluids()
+  local meProxy = getMeProxy()
+  if not meProxy then error('ME controller/interface unavailable') end
 
   -- Reset Everything to Zero
   local lowFluids = {}
@@ -490,7 +565,7 @@ local function updateFluids()
   end
 
   -- Update Fluids from ME Network
-  for _, fluid in ipairs(me.getFluidsInNetwork()) do
+  for _, fluid in ipairs(meProxy.getFluidsInNetwork()) do
     if master[fluid.label] ~= nil then
       local sz = fluid.size or fluid.amount or 0
       master[fluid.label].meAmount = sz
@@ -636,6 +711,7 @@ local main = thread.create(function()
   while true do
     local okCycle, cycleErr = xpcall(function()
       drainModemEvents()
+      if rebootRequested then return end
       wakeRequested = false
       if reloadRequested then
         reloadRequested = false
@@ -693,8 +769,23 @@ local main = thread.create(function()
         end
       end
     end, debug.traceback)
+    if rebootRequested then
+      if meshListenerId and event and event.ignore then
+        pcall(event.ignore, 'modem_message', meshListenerId)
+        meshListenerId = nil
+      end
+      for _, pump in ipairs(pumps) do
+        pcall(pump.module.setWorkAllowed, false)
+      end
+      os.sleep(0.15)
+      if computer.shutdown then pcall(computer.shutdown, true) end
+      return
+    end
     if not okCycle then
       logMsg('Pump fault (retrying in 5s): ' .. tostring(cycleErr):sub(1, 140))
+      cachedMe = nil
+      cachedModem = nil
+      cachedTunnel = nil
       interruptibleSleep(5)
       pumps = {}
       findPumps()

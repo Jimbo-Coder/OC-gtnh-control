@@ -559,6 +559,18 @@ component._register("me-1", "me_controller", {
                   cancel = function() return true end,
               } },
             { name = "CPU-Beta", storage = 16384, coprocessors = 2, busy = false, cpu = {} },
+            { name = "CPU-Gamma", storage = 16384, coprocessors = 2, busy = true,
+              cpu = {
+                  finalOutput = function()
+                      return {
+                          name = "ae2fc:fluid_drop",
+                          label = "drop of Water",
+                          fluid = { name = "water", label = "Water" },
+                          size = 500,
+                      }
+                  end,
+                  cancel = function() return true end,
+              } },
         }
     end,
     getItemInNetwork = function(filter)
@@ -670,7 +682,7 @@ assert(o1ItemCalls >= 1 and o1FluidCalls >= 1, "inspectMainnetForMaint must use 
 assertEq(legacyItemsCalls, 0, "inspectMainnetForMaint must NOT scan getItemsInNetwork when O(1) exists")
 assertEq(legacyFluidsCalls, 0, "inspectMainnetForMaint must NOT scan getFluidsInNetwork when O(1) exists")
 
-local sawStockToDtpf, sawDtpfToStock, sawHandoffToDtpf, sawHandoffAckToStock, sawWakeHelloReply, sawWatchdogWake, sawMaintAckO1 = false, false, false, false, false, false, false
+local sawStockToDtpf, sawDtpfToStock, sawHandoffToDtpf, sawHandoffAckToStock, sawWakeHelloReply, sawWatchdogWake, sawMaintAckO1, sawMaintFluidDrop = false, false, false, false, false, false, false, false
 local sawGorgeReboot, sawUnivReboot = false, false
 for _, pkt in ipairs(sentPackets) do
     if pkt.addr == "dtpf-addr" and pkt.t == "STOCK_CLAIMS" and pkt.p1 == "claims-from-stock" then sawStockToDtpf = true end
@@ -692,8 +704,13 @@ for _, pkt in ipairs(sentPackets) do
         if ackTbl and ackTbl.stocks and ackTbl.stocks.r1 == 777 and ackTbl.stocks.r2 == 12345 then
             sawMaintAckO1 = true
         end
+        if ackTbl and ackTbl.busyByKey and ackTbl.busyByKey["fluid:water:0"] == "CPU-Gamma"
+            and ackTbl.busyByLabel and ackTbl.busyByLabel["Water"] == "CPU-Gamma" then
+            sawMaintFluidDrop = true
+        end
     end
 end
+assertEq(rawget(_G, "uiDirty"), nil, "checkMeshWatchdog must not leak global uiDirty")
 assert(sawStockToDtpf, "Exporter must relay STOCK_CLAIMS -> dtpf-addr")
 assert(sawDtpfToStock, "Exporter must relay DTPF_CLAIMS -> stock-addr")
 assert(sawHandoffToDtpf, "Exporter must relay DTPF_HANDOFF -> dtpf-addr")
@@ -703,6 +720,7 @@ assert(sawWatchdogWake, "Watchdog must send GTNH_WAKE to stale peers (>60s) with
 assert(sawGorgeReboot, "Bridge gorge_reboot RPC must send GORGE_CMD reboot")
 assert(sawUnivReboot, "Bridge univ_reboot RPC must send UNIV_CMD reboot")
 assert(sawMaintAckO1, "MESH_MAINT_ACK did not return O(1) stocks r1=777, r2=12345")
+assert(sawMaintFluidDrop, "inspectMainnetForMaint must unwrap ae2fc:fluid_drop into busyByKey and busyByLabel")
 
 local joinedInflux = {}
 for _, p in ipairs(posts) do joinedInflux[#joinedInflux + 1] = p.body end
@@ -1062,6 +1080,7 @@ rawset(_G, "__HELD_OBJECTS", { cfg3, hub3, ui3 })
                     assert(__py_exists("/home/exporter.lua"), "Missing /home/exporter.lua")
                     assert(__py_exists("/home/ae2_ui.lua"), "Missing /home/ae2_ui.lua")
                     assert(__py_exists("/home/config.lua"), "Missing /home/config.lua")
+                    assert(__py_exists("/home/install_ae2.lua"), "Missing /home/install_ae2.lua for --update")
 
                     local fCfg = io.open("/home/config.lua", "w"); fCfg:write("return { customAe = 88 }"); fCfg:close()
                     local fOv = io.open("/home/config_overrides.lua", "w"); fOv:write("{exportPaused=true}"); fOv:close()
@@ -1071,6 +1090,34 @@ rawset(_G, "__HELD_OBJECTS", { cfg3, hub3, ui3 })
                     assert(c2:find("customAe = 88", 1, true), "Update overwrote /home/config.lua!")
                     local o2 = io.open("/home/config_overrides.lua", "r"):read("*a")
                     assert(o2:find("exportPaused=true", 1, true), "Update overwrote /home/config_overrides.lua!")
+
+                    -- Verify --local-bridge fetches from http://127.0.0.1:8765/oc-raw/gtnh-ae2-control/...
+                    local comp = require("component")
+                    local fetchedUrls = {}
+                    comp._register("inet-1", "internet", {
+                        request = function(url)
+                            fetchedUrls[#fetchedUrls + 1] = url
+                            local rel = url:match("^http://127%.0%.0%.1:8765/oc%-raw/(.+)$")
+                            if not rel then return nil, "unexpected URL: " .. tostring(url) end
+                            local body = __py_read_file(__MONOREPO_ROOT .. "/" .. rel)
+                            if not body then return nil, "404: " .. tostring(rel) end
+                            local sent = false
+                            return {
+                                finishConnect = function() return true end,
+                                read = function() if not sent then sent = true; return body end return nil end,
+                                response = function() return 200 end,
+                                close = function() end,
+                            }
+                        end,
+                    })
+                    assert(inst("--local-bridge", "--update", "--yes"), "AE2 --local-bridge --update failed")
+                    local sawLocalExporterUrl = false
+                    for _, u in ipairs(fetchedUrls) do
+                        if u == "http://127.0.0.1:8765/oc-raw/gtnh-ae2-control/exporter.lua" then sawLocalExporterUrl = true end
+                    end
+                    assert(sawLocalExporterUrl, "Expected --local-bridge to fetch /oc-raw/gtnh-ae2-control/exporter.lua")
+                    local c3 = io.open("/home/config.lua", "r"):read("*a")
+                    assert(c3:find("customAe = 88", 1, true), "--local-bridge --update overwrote /home/config.lua!")
 
                     local rootInst = assert(loadfile(__MONOREPO_ROOT .. "/install.lua"))
                     assert(rootInst("--local", __MONOREPO_ROOT, "ae2", "--yes", "--no-autostart"), "Monorepo install ae2 failed")

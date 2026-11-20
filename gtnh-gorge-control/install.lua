@@ -59,7 +59,10 @@ local function resolveRepoAndBranch(repoArg, branchArg)
     end
     if not repo or repo == "" then repo = DEFAULT_REPO end
     if not branch or branch == "" then branch = DEFAULT_BRANCH end
-    repo = tostring(repo):gsub("^https?://github%.com/", ""):gsub("/+$", "")
+    repo = tostring(repo):gsub("/+$", "")
+    if not repo:match("^https?://") then
+        repo = repo:gsub("^https?://github%.com/", "")
+    end
     return repo, branch
 end
 
@@ -172,6 +175,8 @@ local function runInstaller(args)
                 io.stderr:write("ERROR: Usage: install --local <sourceDir> [owner/repo] [branch]\n")
                 return false, "missing local source directory"
             end
+        elseif a == "--url" then idx = idx + 1; optRepo = tostring(args[idx] or ""):gsub("/+$", "")
+        elseif a == "--local-bridge" then optRepo = "http://127.0.0.1:8765/oc-raw"
         elseif a == "--repo" then idx = idx + 1; optRepo = tostring(args[idx] or "")
         elseif a == "--branch" then idx = idx + 1; optBranch = tostring(args[idx] or "")
         elseif a == "--update" then isUpdate = true
@@ -202,7 +207,13 @@ local function runInstaller(args)
     end
 
     local repo, branch = resolveRepoAndBranch(optRepo or pos[1], optBranch or pos[2])
-    local baseUrl = string.format("https://raw.githubusercontent.com/%s/%s/%s/", repo, branch, SUBDIR)
+    local baseUrl
+    if repo:match("^https?://") then
+        local clean = repo:gsub("/+$", "")
+        baseUrl = (clean:sub(-#SUBDIR) == SUBDIR) and (clean .. "/") or (clean .. "/" .. SUBDIR .. "/")
+    else
+        baseUrl = string.format("https://raw.githubusercontent.com/%s/%s/%s/", repo, branch, SUBDIR)
+    end
 
     print("=== GTNH GORGE CONTROL INSTALLER ===")
     print(string.format("Source : %s", localDir and ("local:" .. localDir) or string.format("%s (%s/%s)", repo, branch, SUBDIR)))

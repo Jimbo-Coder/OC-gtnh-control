@@ -214,6 +214,17 @@ function Hardware.getAeProxy(cfg, compLib, state)
     return p, disc and disc.aeAddr or nil
 end
 
+local function unwrapFluidDropOutput(fin)
+    if type(fin) ~= "table" then return nil, nil end
+    if fin.name == "ae2fc:fluid_drop" or type(fin.fluid) == "table" then
+        local fl = type(fin.fluid) == "table" and fin.fluid or nil
+        local lbl = tostring((fl and fl.label) or fin.label or ""):gsub("^drop of ", "")
+        local fname = (fl and type(fl.name) == "string" and fl.name ~= "") and fl.name or nil
+        return lbl, fname
+    end
+    return nil, nil
+end
+
 function Hardware.fetchBusyCpuOutputs(cpuSnap, counter)
     if not cpuSnap or cpuSnap._outputsFetched then
         return cpuSnap
@@ -226,17 +237,26 @@ function Hardware.fetchBusyCpuOutputs(cpuSnap, counter)
             if counter then counter.aeCalls = (counter.aeCalls or 0) + 1 end
             local okF, fin = pcall(ref.cpu.finalOutput)
             if okF and type(fin) == "table" then
-                local outLabel = fin.label
+                local dropLbl, dropFname = unwrapFluidDropOutput(fin)
+                local outLabel = (dropLbl and dropLbl ~= "") and dropLbl or fin.label
                 local outCount = math.floor(tonumber(fin.size or fin.amount) or 0)
                 local outKey = nil
                 if fin.label and fin.label ~= "" then
                     busyByLabel[fin.label] = busyByLabel[fin.label] or ref.name
                 end
+                if dropLbl and dropLbl ~= "" then
+                    busyByLabel[dropLbl] = busyByLabel[dropLbl] or ref.name
+                end
+                if dropFname then
+                    outKey = "fluid:" .. dropFname .. ":0"
+                    busyByKey[outKey] = busyByKey[outKey] or ref.name
+                end
                 if fin.name and fin.name ~= "" then
                     local fType = (fin.maxSize == nil) and "fluid" or "item"
                     local dmg = (fType == "item") and math.floor(tonumber(fin.damage) or 0) or 0
-                    outKey = fType .. ":" .. fin.name .. ":" .. tostring(dmg)
-                    busyByKey[outKey] = busyByKey[outKey] or ref.name
+                    local k = fType .. ":" .. fin.name .. ":" .. tostring(dmg)
+                    busyByKey[k] = busyByKey[k] or ref.name
+                    if not outKey then outKey = k end
                 end
                 if ref.idx and cpus[ref.idx] then
                     cpus[ref.idx].outputLabel = outLabel
@@ -713,7 +733,7 @@ function Hardware.readDropSlot(cfg, compLib, state)
     return entry
 end
 
-function Hardware.scanPhysicalMaintainers(compLib, state)
+function Hardware.scanPhysicalMaintainers(compLib, state, cfg)
     local cl = compLib or component
     local slots = {}
     local addrs = {}
@@ -724,19 +744,22 @@ function Hardware.scanPhysicalMaintainers(compLib, state)
     end
     table.sort(addrs)
 
+    local needFluidResolve = false
     for _, addr in ipairs(addrs) do
         for sIdx = 1, 5 do
             local ok, info = callSafe(addr, "getSlot", cl, state, sIdx)
             if ok and type(info) == "table" then
-                local isFl = (info.isFluid == true) or (info.name == "ae2fc:fluid_drop")
+                local isFl = (info.isFluid == true) or (info.name == "ae2fc:fluid_drop") or (info.fluid ~= nil)
                 local fl = type(info.fluid) == "table" and info.fluid or nil
-                local rawName = isFl
-                    and ((fl and fl.name) or tostring(info.label or info.name or ""):gsub("^drop of ", ""))
-                    or tostring(info.name or "")
+                local hasExactFluid = isFl and (fl ~= nil) and (type(fl.name) == "string") and (fl.name ~= "")
                 local rawLbl = isFl
-                    and tostring((fl and fl.label) or info.label or rawName):gsub("^drop of ", "")
-                    or tostring(info.label or rawName)
+                    and tostring((fl and fl.label) or info.label or info.name or ""):gsub("^drop of ", "")
+                    or tostring(info.label or info.name or "")
+                local rawName = isFl
+                    and ((hasExactFluid and fl.name) or rawLbl)
+                    or tostring(info.name or "")
                 if rawName ~= "" then
+                    if isFl and not hasExactFluid then needFluidResolve = true end
                     slots[#slots + 1] = {
                         addr = addr,
                         slot = sIdx,
@@ -749,10 +772,34 @@ function Hardware.scanPhysicalMaintainers(compLib, state)
                         batch = math.max(1, math.floor(tonumber(info.batch) or 1)),
                         enabled = (info.isEnable == true),
                         done = (info.isDone == true),
+                        _unresolvedFluid = (isFl and not hasExactFluid),
                     }
                 end
             end
         end
+    end
+    if needFluidResolve then
+        local ae = Hardware.getAeProxy(cfg, cl, state)
+        if ae and type(ae.getFluidsInNetwork) == "function" then
+            local okF, flList = pcall(ae.getFluidsInNetwork)
+            if okF and type(flList) == "table" then
+                local byLabel, byLower = {}, {}
+                for i = 1, #flList do
+                    local f = flList[i]
+                    if type(f) == "table" and f.name and f.name ~= "" and f.label and f.label ~= "" then
+                        byLabel[f.label] = byLabel[f.label] or f.name
+                        byLower[f.label:lower()] = byLower[f.label:lower()] or f.name
+                    end
+                end
+                for i = 1, #slots do
+                    local s = slots[i]
+                    if s._unresolvedFluid then
+                        s.name = byLabel[s.label] or byLower[s.label:lower()] or s.name
+                    end
+                end
+            end
+        end
+        for i = 1, #slots do slots[i]._unresolvedFluid = nil end
     end
     return slots, #addrs
 end
@@ -923,20 +970,36 @@ local function sendMeshPacket(cl, state, targetAddr, viaTunnel, msgType, ...)
     return false
 end
 
-local function makeCompactClaims(cfg)
-    local keys = {}
+local function makeCompactClaims(cfg, state)
+    local dtpfPeer = state and state.dtpfPeer
+    local mKeys = type(dtpfPeer) == "table" and type(dtpfPeer.maintKeys) == "table" and dtpfPeer.maintKeys or {}
+    local pKeys = type(dtpfPeer) == "table" and type(dtpfPeer.passiveKeys) == "table" and dtpfPeer.passiveKeys or {}
+    local prioEntries, restEntries = {}, {}
     local seen = {}
     for _, r in ipairs((cfg and cfg.rules) or {}) do
         if r and r.enabled ~= false and r.mode ~= "off" and r.name and r.name ~= "" then
-            local ck = (r.type == "fluid")
-                and ("f:" .. r.name)
-                or ("i:" .. r.name .. ":" .. tostring(math.floor(tonumber(r.damage) or 0)))
+            local tp = (r.type == "fluid") and "fluid" or "item"
+            local dmg = (tp == "fluid") and 0 or math.floor(tonumber(r.damage) or 0)
+            local ck = (tp == "fluid") and ("f:" .. r.name) or ("i:" .. r.name .. ":" .. tostring(dmg))
             if not seen[ck] then
                 seen[ck] = true
-                keys[#keys + 1] = ck
-                if #keys >= 220 then break end
+                local fullKey = tp .. ":" .. r.name .. ":" .. tostring(dmg)
+                if mKeys[fullKey] or pKeys[fullKey] then
+                    prioEntries[#prioEntries + 1] = ck
+                else
+                    restEntries[#restEntries + 1] = ck
+                end
             end
         end
+    end
+    local keys = {}
+    for i = 1, #prioEntries do
+        keys[#keys + 1] = prioEntries[i]
+        if #keys >= 220 then break end
+    end
+    for i = 1, #restEntries do
+        if #keys >= 220 then break end
+        keys[#keys + 1] = restEntries[i]
     end
     return { armed = (cfg and cfg.armed == true), keys = keys }
 end
@@ -961,36 +1024,40 @@ function Hardware.pushMeshMetrics(cfg, state, nowSec, compLib, force)
     st._lastMeshAt = nowSec
     st._lastMeshDigest = digest
 
-    -- Build compact top-20 preview (priority: errors/warnings/crafting/low/ok)
-    local preview = {}
+    -- Build compact top-20 preview using 4 priority buckets (avoids sorting full rule list)
     local rList = st.ruleStatuses or {}
-    local ranked = {}
+    local bErr, bWarn, bAct, bOk = {}, {}, {}, {}
     for i = 1, #rList do
         local rs = rList[i]
-        local rank = 4
-        if rs.state == "ERR" then rank = 1
-        elseif rs.warn then rank = 2
-        elseif rs.state == "CRAFT" or rs.state == "LOW" then rank = 3
+        if rs.state == "ERR" then bErr[#bErr + 1] = rs
+        elseif rs.warn then bWarn[#bWarn + 1] = rs
+        elseif rs.state == "CRAFT" or rs.state == "LOW" then bAct[#bAct + 1] = rs
+        else bOk[#bOk + 1] = rs
         end
-        ranked[i] = { rank = rank, rs = rs }
     end
-    table.sort(ranked, function(a, b)
-        if a.rank ~= b.rank then return a.rank < b.rank end
-        return tostring(a.rs.label or "") < tostring(b.rs.label or "")
-    end)
-    for i = 1, math.min(20, #ranked) do
-        local rs = ranked[i].rs
-        preview[i] = {
-            id = rs.id,
-            label = rs.label,
-            type = rs.type,
-            stock = rs.stock,
-            target = rs.target,
-            state = rs.state,
-            cpu = rs.cpu,
-            warn = rs.warn,
-            err = rs.error,
-        }
+    local preview = {}
+    for _, b in ipairs({ bErr, bWarn, bAct, bOk }) do
+        local rem = 20 - #preview
+        if rem <= 0 then break end
+        if #b > 0 then
+            if #b > rem then
+                table.sort(b, function(x, y) return tostring(x.label or "") < tostring(y.label or "") end)
+            end
+            for i = 1, math.min(rem, #b) do
+                local rs = b[i]
+                preview[#preview + 1] = {
+                    id = rs.id,
+                    label = rs.label,
+                    type = rs.type,
+                    stock = rs.stock,
+                    target = rs.target,
+                    state = rs.state,
+                    cpu = rs.cpu,
+                    warn = rs.warn,
+                    err = rs.error,
+                }
+            end
+        end
     end
 
     local pkt = {
@@ -1024,7 +1091,13 @@ function Hardware.pushMeshMetrics(cfg, state, nowSec, compLib, force)
     local viaTunnel = (st._mainnetMeshViaTunnel == true) or (not modem and tunnel ~= nil)
     sendMeshPacket(cl, st, st._mainnetMeshAddr, viaTunnel, "STOCK_METRICS", raw)
 
-    local claimsRaw = serialization.serialize(makeCompactClaims(cfg))
+    local claimsTbl = makeCompactClaims(cfg, st)
+    local claimsRaw = serialization.serialize(claimsTbl)
+    while #claimsRaw > 5500 and #claimsTbl.keys > 0 do
+        local keepN = math.max(0, #claimsTbl.keys - math.max(1, math.floor(#claimsTbl.keys * 0.2)))
+        for i = #claimsTbl.keys, keepN + 1, -1 do claimsTbl.keys[i] = nil end
+        claimsRaw = serialization.serialize(claimsTbl)
+    end
     if force or claimsRaw ~= st._lastClaimsRaw or (nowSec - (st._lastClaimsAt or -100)) >= 15 then
         st._lastClaimsRaw = claimsRaw
         st._lastClaimsAt = nowSec

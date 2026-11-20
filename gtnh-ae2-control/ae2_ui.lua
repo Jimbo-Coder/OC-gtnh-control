@@ -814,7 +814,7 @@ function UI:renderMeshTab()
     end)
 
     -- Card 2: Space Pump Array (x=81, y=5, w=78, h=14)
-    self:renderMeshPeerCard(81, 5, 78, 14, "SPACE PUMP ARRAY", "pump", peers.pump, 180, TAB_PUMP, function(st, bx, by, bw)
+    self:renderMeshPeerCard(81, 5, 78, 14, "SPACE PUMP ARRAY", "pump", peers.pump, 240, TAB_PUMP, function(st, bx, by, bw)
         local pumps = type(st.pumps) == "table" and st.pumps or {}
         local actN, multSum = 0, 0
         for _, p in ipairs(pumps) do
@@ -1178,11 +1178,11 @@ function UI:renderPumpTab()
     local peer = self.hub and self.hub.peers and self.hub.peers.pump
     local st = peer and peer.status or nil
     if type(st) ~= "table" then
-        self:renderPeerOfflineGuide("SPACE ELEVATOR PUMP ORCHESTRATOR", "pump", peer, 180)
+        self:renderPeerOfflineGuide("SPACE ELEVATOR PUMP ORCHESTRATOR", "pump", peer, 240)
         return
     end
     local now = tonumber(self.hub.nowUptime) or 0
-    local fresh = peer.addr and (now - (peer.lastSeen or -1000)) < 180
+    local fresh = peer.addr and (now - (peer.lastSeen or -1000)) < 240
     local pumps = type(st.pumps) == "table" and st.pumps or {}
     local actN, multSum = 0, 0
     for _, p in ipairs(pumps) do
