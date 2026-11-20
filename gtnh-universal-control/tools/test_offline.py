@@ -694,6 +694,16 @@ assertEq(Hardware.handleMeshMessage(mCfg, mState, "m1", "peer1", 4205, "UNIV_CMD
 assertEq(mCfg.armed, true, "UNIV_CMD resume arms")
 assertEq(Hardware.handleMeshMessage(mCfg, mState, "m1", "peer1", 4205, "UNIV_CMD", "r4", serialization.serialize({ action = "force_slice", poolId = 1, color = 2 })), true, "UNIV_CMD force_slice handled")
 assertEq(mState.forceColorByPool[1], 2, "forceColorByPool set to 2")
+local beforeWake = #modemReplies
+assertEq(Hardware.handleMeshMessage(mCfg, mState, "m1", "peer1", 4205, "GTNH_WAKE", "ae2"), true, "GTNH_WAKE handled")
+assertEq(#modemReplies, beforeWake + 1, "GTNH_WAKE triggered immediate UNIV_METRICS push")
+assertEq(modemReplies[#modemReplies][3], "UNIV_METRICS", "GTNH_WAKE sent UNIV_METRICS")
+assertEq(Hardware.handleMeshMessage(mCfg, mState, "m1", "peer1", 4205, "UNIV_CMD", "r-rbt", serialization.serialize({ action = "reboot" })), true, "UNIV_CMD reboot handled")
+assertEq(mState._pendingReboot, true, "UNIV_CMD reboot sets state._pendingReboot")
+local uRbt = serialization.unserialize(modemReplies[#modemReplies][5])
+assertEq(uRbt and uRbt.ok, true, "UNIV_CMD reboot replied ok=true")
+assertEq(uRbt and uRbt.rebooting, true, "UNIV_CMD reboot replied rebooting=true")
+mState._pendingReboot = nil
 
 -- =========================================================================
 -- TEST 9: UI Render All 4 Tabs + Modals, Touch Interactions, --check & --off

@@ -2,7 +2,7 @@
 -- One-line install:
 --   wget -f https://raw.githubusercontent.com/Jimbo-Coder/OC-gtnh-control/main/install.lua /tmp/install.lua && /tmp/install.lua
 -- Direct module install:
---   /tmp/install.lua <dtpf|universal|ae2|pump|gorge> [--yes] [--no-autostart]
+--   /tmp/install.lua <dtpf|universal|ae2|pump|gorge|stock> [--yes] [--no-autostart]
 -- Update all modules installed on this computer:
 --   /tmp/install.lua --update
 

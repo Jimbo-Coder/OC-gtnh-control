@@ -218,7 +218,7 @@ local function runWorker()
                     local timeout = math.max(0.05, deadline - computer.uptime())
                     local evTbl = { event.pull(timeout) }
                     local _, stopReq = dispatchEvent(cfg, state, evTbl, nil)
-                    if stopReq then
+                    if stopReq or state._pendingReboot then
                         running = false
                         userExit = true
                         break
@@ -232,7 +232,12 @@ local function runWorker()
 
         pcall(saveConfig, cfg)
         pcall(persistInflight, state)
-        if userExit then
+        if state._pendingReboot then
+            print("Gorge Control rebooting per remote request...")
+            pcall(os.sleep, 0.15)
+            if computer.shutdown then pcall(computer.shutdown, true) end
+            return
+        elseif userExit then
             print("Gorge Control worker stopped cleanly.")
             return
         elseif not okLoop then
@@ -302,7 +307,7 @@ local function runGUI()
 
                 local evTbl = { event.pull(waitSec) }
                 local evDirty, stopReq = dispatchEvent(cfg, state, evTbl, ui)
-                if stopReq then
+                if stopReq or state._pendingReboot then
                     savePending = true
                     userExit = true
                     ui.running = false
@@ -344,7 +349,12 @@ local function runGUI()
             pcall(component.gpu.setForeground, 0xFFFFFF)
         end
         term.clear()
-        if userExit or okLoop then
+        if state._pendingReboot then
+            print("GTNH Gorge Control rebooting per remote request...")
+            pcall(os.sleep, 0.15)
+            if computer.shutdown then pcall(computer.shutdown, true) end
+            return
+        elseif userExit or okLoop then
             print("GTNH Gorge Control stopped cleanly.")
             return
         else

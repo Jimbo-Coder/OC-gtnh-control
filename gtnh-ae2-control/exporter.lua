@@ -46,6 +46,7 @@ end
 local maxInt = 9223372036854775807
 local AuthHeader = nil
 local needExitFlag = false
+local pendingSelfReboot = false
 local lastItemScanSec = 0
 local uiActive = false
 
@@ -2195,9 +2196,10 @@ local function handleBridgeCommand(sockWriteLine, interface, cmd)
             return reply(res)
         end
         return reply({ ok = false, error = "Empty Universal mesh response" })
-    elseif op == "univ_action" then
+    elseif op == "univ_action" or op == "univ_reboot" then
+        local uAct = (op == "univ_reboot") and "reboot" or cmd.action
         local res = callMeshRpc(interface, sockWriteLine, univMesh, "UNIV_CMD", {
-            action = cmd.action,
+            action = uAct,
             poolId = cmd.poolId or cmd.poolIdx,
             color = cmd.color,
         }, "UNIV_REPLY", 5.0)
@@ -2222,9 +2224,10 @@ local function handleBridgeCommand(sockWriteLine, interface, cmd)
             return reply(res)
         end
         return reply({ ok = false, error = "Empty Gorge mesh response" })
-    elseif op == "gorge_action" then
+    elseif op == "gorge_action" or op == "gorge_reboot" then
+        local gAct = (op == "gorge_reboot") and "reboot" or cmd.action
         local res = callMeshRpc(interface, sockWriteLine, gorgeMesh, "GORGE_CMD", {
-            action = cmd.action,
+            action = gAct,
             exoticizerId = cmd.exoticizerId,
             mode = cmd.mode,
         }, "GORGE_REPLY", 5.0)
@@ -2533,12 +2536,21 @@ local function main()
             end,
             onPeerAction = function(peerKey, action, extra)
                 extra = extra or {}
-                if peerKey == "dtpf" then
+                if peerKey == "ae2" and action == "reboot" then
+                    pcall(saveConfigOverrides)
+                    logMsg("OUT", "Main Brain AE2 reboot requested via GUI.")
+                    pendingSelfReboot = true
+                    needExitFlag = true
+                    if ui then ui.running = false end
+                    return "Rebooting AE2 Main Brain..."
+                elseif peerKey == "dtpf" then
                     local payload
                     if action == "pause" then
                         payload = { op = "dtpf_patch", patch = { armed = false } }
                     elseif action == "resume" then
                         payload = { op = "dtpf_patch", patch = { armed = true } }
+                    elseif action == "reboot" then
+                        payload = { op = "reboot" }
                     elseif action == "maint_sync" or action == "flush_od" or action == "lock_autopull" or action == "poll" then
                         payload = { op = "dtpf_action", action = (action == "poll") and "poll_now" or action }
                     else
@@ -2548,22 +2560,29 @@ local function main()
                     if type(res) == "table" and res.ok then
                         if type(res.units) == "table" then dtpfMesh.status = res end
                         logMsg("MESH", "DTPF action '" .. tostring(action) .. "' acknowledged.")
-                        return "DTPF: " .. tostring(action) .. " OK."
+                        return (action == "reboot") and "DTPF: reboot triggered." or ("DTPF: " .. tostring(action) .. " OK.")
                     end
                     return "DTPF: " .. tostring(type(res) == "table" and res.error or "No response")
                 elseif peerKey == "pump" then
                     if action == "pause" or action == "resume" then
                         return "Space Pump runs on stock targets; use [Wake / Poll] or [Refresh Pumps]."
                     end
-                    local pumpAct = (action == "refresh_pumps" or action == "reload") and action or "wake"
-                    local res = callMeshRpc(interface, writeBridgeLine, pumpMesh, "PUMP_CMD", { op = "action", action = pumpAct }, "PUMP_REPLY", 2.5)
+                    local pumpCmd
+                    local pumpAct = tostring(action)
+                    if action == "reboot" then
+                        pumpCmd = { op = "reboot" }
+                    else
+                        pumpAct = (action == "refresh_pumps" or action == "reload") and action or "wake"
+                        pumpCmd = { op = "action", action = pumpAct }
+                    end
+                    local res = callMeshRpc(interface, writeBridgeLine, pumpMesh, "PUMP_CMD", pumpCmd, "PUMP_REPLY", 2.5)
                     if type(res) == "table" and res.ok then
                         if type(res.status) == "table" then
                             pumpMesh.status = res.status
                             pumpMesh.statusUptime = uptimeNow()
                         end
                         logMsg("MESH", "Space Pump '" .. pumpAct .. "' OK.")
-                        return "Space Pump: " .. pumpAct .. " OK."
+                        return (action == "reboot") and "Space Pump: reboot triggered." or ("Space Pump: " .. pumpAct .. " OK.")
                     end
                     return "Space Pump: " .. tostring(type(res) == "table" and res.error or "No response")
                 elseif peerKey == "univ" then
@@ -2572,7 +2591,7 @@ local function main()
                     if type(res) == "table" and res.ok then
                         if res.armed ~= nil and type(univMesh.status) == "table" then univMesh.status.armed = res.armed end
                         logMsg("MESH", "Universal action '" .. act .. "' OK.")
-                        return "Universal: " .. act .. " OK."
+                        return (action == "reboot") and "Universal: reboot triggered." or ("Universal: " .. act .. " OK.")
                     end
                     return "Universal: " .. tostring(type(res) == "table" and res.error or "No response")
                 elseif peerKey == "gorge" then
@@ -2589,7 +2608,7 @@ local function main()
                             end
                         end
                         logMsg("MESH", "Gorge action '" .. act .. "' OK.")
-                        return "Gorge: " .. act .. " OK."
+                        return (action == "reboot") and "Gorge: reboot triggered." or ("Gorge: " .. act .. " OK.")
                     end
                     return "Gorge: " .. tostring(type(res) == "table" and res.error or "No response")
                 elseif peerKey == "stock" then
@@ -2609,7 +2628,7 @@ local function main()
                             stockMesh.status.armed = res.armed
                         end
                         logMsg("MESH", "Stock Maintainer action '" .. tostring(action) .. "' OK.")
-                        return "Stock: " .. tostring(action) .. " OK."
+                        return (action == "reboot") and "Stock: reboot triggered." or ("Stock: " .. tostring(action) .. " OK.")
                     end
                     return "Stock: " .. tostring(type(res) == "table" and res.error or "No response")
                 end
@@ -2886,6 +2905,13 @@ local function main()
     end
     if not okLoop then
         error(loopErr, 0)
+    end
+    if pendingSelfReboot then
+        pendingSelfReboot = false
+        pcall(os.sleep, 0.1)
+        if computer.shutdown then
+            pcall(computer.shutdown, true)
+        end
     end
 end
 

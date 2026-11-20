@@ -480,6 +480,8 @@ local bridgeIn = {
     '{"id":12,"op":"gorge_action","action":"set_mode","exoticizerId":1,"mode":"magmatter"}\n',
     '{"id":13,"op":"stock_action","action":"retry_errors"}\n',
     '{"id":14,"op":"mesh_recover","role":"dtpf"}\n',
+    '{"id":15,"op":"gorge_reboot"}\n',
+    '{"id":16,"op":"univ_reboot"}\n',
 }
 local openCalls, strCalls, sendCalls = 0, 0, 0
 local o1ItemCalls, o1FluidCalls, legacyItemsCalls, legacyFluidsCalls = 0, 0, 0, 0
@@ -669,6 +671,7 @@ assertEq(legacyItemsCalls, 0, "inspectMainnetForMaint must NOT scan getItemsInNe
 assertEq(legacyFluidsCalls, 0, "inspectMainnetForMaint must NOT scan getFluidsInNetwork when O(1) exists")
 
 local sawStockToDtpf, sawDtpfToStock, sawHandoffToDtpf, sawHandoffAckToStock, sawWakeHelloReply, sawWatchdogWake, sawMaintAckO1 = false, false, false, false, false, false, false
+local sawGorgeReboot, sawUnivReboot = false, false
 for _, pkt in ipairs(sentPackets) do
     if pkt.addr == "dtpf-addr" and pkt.t == "STOCK_CLAIMS" and pkt.p1 == "claims-from-stock" then sawStockToDtpf = true end
     if pkt.addr == "stock-addr" and pkt.t == "DTPF_CLAIMS" and pkt.p1 == "claims-from-dtpf" then sawDtpfToStock = true end
@@ -676,6 +679,14 @@ for _, pkt in ipairs(sentPackets) do
     if pkt.addr == "stock-addr" and pkt.t == "DTPF_HANDOFF_ACK" and pkt.p1 == "dh-1" and pkt.p2 == "ack-payload" then sawHandoffAckToStock = true end
     if pkt.addr == "dtpf-addr" and pkt.t == "MESH_MAINNET_HELLO" and pkt.p1 == "wake_ack" then sawWakeHelloReply = true end
     if pkt.t == "GTNH_WAKE" and (pkt.p1 == "stock" or pkt.p1 == "gorge" or pkt.p1 == "univ") then sawWatchdogWake = true end
+    if pkt.t == "GORGE_CMD" and type(pkt.p2) == "string" then
+        local c = serialization.unserialize(pkt.p2)
+        if type(c) == "table" and c.action == "reboot" then sawGorgeReboot = true end
+    end
+    if pkt.t == "UNIV_CMD" and type(pkt.p2) == "string" then
+        local c = serialization.unserialize(pkt.p2)
+        if type(c) == "table" and c.action == "reboot" then sawUnivReboot = true end
+    end
     if pkt.addr == "dtpf-addr" and pkt.t == "MESH_MAINT_ACK" and pkt.p1 == "req-o1" then
         local ackTbl = serialization.unserialize(pkt.p2)
         if ackTbl and ackTbl.stocks and ackTbl.stocks.r1 == 777 and ackTbl.stocks.r2 == 12345 then
@@ -689,6 +700,8 @@ assert(sawHandoffToDtpf, "Exporter must relay DTPF_HANDOFF -> dtpf-addr")
 assert(sawHandoffAckToStock, "Exporter must relay DTPF_HANDOFF_ACK -> stock-addr")
 assert(sawWakeHelloReply, "Exporter must answer GTNH_WAKE with MESH_MAINNET_HELLO wake_ack")
 assert(sawWatchdogWake, "Watchdog must send GTNH_WAKE to stale peers (>60s) without false-alarming Space Pump")
+assert(sawGorgeReboot, "Bridge gorge_reboot RPC must send GORGE_CMD reboot")
+assert(sawUnivReboot, "Bridge univ_reboot RPC must send UNIV_CMD reboot")
 assert(sawMaintAckO1, "MESH_MAINT_ACK did not return O(1) stocks r1=777, r2=12345")
 
 local joinedInflux = {}
@@ -798,6 +811,18 @@ ui3:handleTouch(30, 15, 0) -- Click DTPF overview tile badge -> switches to TAB_
 assertEq(ui3.tab, 4, "Overview DTPF tile badge switches to TAB_DTPF")
 ui3.tab = 1
 ui3:render()
+-- Verify Overview tile 2-click [Rbt] -> [Sure?] safety on DTPF tile (x=46..50, y=20)
+local beforeRbt = #peerActionsLog
+ui3:handleTouch(48, 20, 0)
+assertEq(ui3.confirmRebootPeer, "dtpf", "1st click on Overview [Rbt] armed confirmRebootPeer=dtpf")
+assertEq(#peerActionsLog, beforeRbt, "1st click must NOT reboot immediately")
+ui3:handleTouch(1, 2, 0) -- Click blank area cancels confirmRebootPeer
+assertEq(ui3.confirmRebootPeer, nil, "Non-reboot touch cleared confirmRebootPeer")
+ui3:handleTouch(48, 20, 0)
+assertEq(ui3.confirmRebootPeer, "dtpf", "Re-armed confirmRebootPeer=dtpf")
+ui3:handleTouch(48, 20, 0)
+assertEq(peerActionsLog[#peerActionsLog], "dtpf:reboot", "2nd click on [Sure?] confirmed dtpf:reboot")
+assertEq(ui3.confirmRebootPeer, nil, "Cleared confirmRebootPeer after reboot confirm")
 ui3.logModalActive = true
 ui3:render()
 ui3.logModalActive = false
@@ -857,6 +882,21 @@ assertEq(ui3.tab, 8, "Key '8' switched to Stock tab")
 ui3:handleTouch(35, 9, 0) -- [Retry Errors]
 assertEq(peerActionsLog[#peerActionsLog], "stock:retry_errors", "Stock Retry Errors clicked")
 
+-- Tab 3 [Reboot] & Tab 9 Setup [Reboot AE2] 2-click tests
+ui3:handleKeyDown(51, 4)
+ui3:handleTouch(34, 16, 0)
+assertEq(ui3.confirmRebootPeer, "dtpf", "Tab 3 armed dtpf reboot")
+ui3:handleTouch(34, 16, 0)
+assertEq(peerActionsLog[#peerActionsLog], "dtpf:reboot", "Tab 3 2nd click confirmed dtpf:reboot")
+ui3:handleKeyDown(57, 10) -- Key '9': Setup
+assertEq(ui3.tab, 9, "Key '9' switched to Setup tab")
+local preAe2Rbt = #peerActionsLog
+ui3:handleTouch(46, 40, 0)
+assertEq(ui3.confirmRebootPeer, "ae2", "Setup 1st click armed ae2 reboot")
+assertEq(#peerActionsLog, preAe2Rbt, "Setup 1st click must NOT reboot AE2")
+ui3:handleTouch(46, 40, 0)
+assertEq(peerActionsLog[#peerActionsLog], "ae2:reboot", "Setup 2nd click triggered ae2:reboot")
+
 -- =====================================================================
 -- TEST 4: Live exporter.lua GUI Integration + Overrides Persistence + Pause Export
 -- =====================================================================
@@ -914,6 +954,32 @@ end
 local reloadCfg = assert(load(__py_read_file("/home/exporter.lua"), "@/home/exporter.lua"))
 reloadCfg("--headless")
 assertEq(#posts, postCountBeforeReload, "Paused export from config_overrides.lua sent 0 InfluxDB POSTs")
+
+-- Exercise live GUI 2-click [Reboot AE2] on Tab 9 -> invokes computer.shutdown(true) cleanly
+do
+    local shutdownArg = "none"
+    local origShutdown = computer.shutdown
+    computer.shutdown = function(rbt) shutdownArg = rbt end
+    local rbtEvs = {
+        { "key_down", "kbd-1", 57, 10 }, -- Tab 9 (Setup)
+        { "touch", "scr-1", 46, 40, 0 }, -- 1st click [Reboot AE2]
+        { "touch", "scr-1", 46, 40, 0 }, -- 2nd click [Confirm Reboot?]
+    }
+    event.pull = function(_, filter)
+        if #rbtEvs > 0 then
+            local ev = rbtEvs[1]
+            if (not filter) or ev[1] == filter then
+                table.remove(rbtEvs, 1)
+                return table.unpack(ev)
+            end
+        end
+        return nil
+    end
+    local rbtChunk = assert(load(__py_read_file("/home/exporter.lua"), "@/home/exporter.lua"))
+    rbtChunk()
+    computer.shutdown = origShutdown
+    assertEq(shutdownArg, true, "GUI 2-click [Reboot AE2] invoked computer.shutdown(true)")
+end
 
 rawset(_G, "__HELD_OBJECTS", { cfg3, hub3, ui3 })
 """

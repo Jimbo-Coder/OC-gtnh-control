@@ -178,171 +178,196 @@ local function runCheck()
 end
 
 local function runWorker()
-    local cfg = loadConfig()
-    local state = Scheduler.newState()
-    Scheduler.loadRatesFile(RATES_CACHE_PATH, state, cfg.maxRecipeCache, BACKUP_RATES_PATH)
-    Scheduler.syncHardware(cfg, state)
-    Hardware.zeroAllManagedPools(cfg, nil, state)
-    Hardware.openMeshPort(cfg)
+    while true do
+        local cfg = loadConfig()
+        local state = Scheduler.newState()
+        Scheduler.loadRatesFile(RATES_CACHE_PATH, state, cfg.maxRecipeCache, BACKUP_RATES_PATH)
+        Scheduler.syncHardware(cfg, state)
+        Hardware.zeroAllManagedPools(cfg, nil, state)
+        Hardware.openMeshPort(cfg)
 
-    print("GTNH Universal Control worker started (" .. (cfg.armed and "ARMED" or "PAUSED") .. "). Ctrl+C to stop.")
-    local running = true
-    local lastRateSave = computer.uptime()
+        print("GTNH Universal Control worker started (" .. (cfg.armed and "ARMED" or "PAUSED") .. "). Ctrl+C to stop.")
+        local running = true
+        local userExit = false
+        local lastRateSave = computer.uptime()
 
-    local okLoop, errLoop = xpcall(function()
-        while running do
-            local now = computer.uptime()
-            state._forcePollNow = false
-            Scheduler.step(cfg, state, now)
-            Hardware.pushMeshMetrics(cfg, state, now)
-            if (now - lastRateSave) >= 60.0 then
-                lastRateSave = now
-                saveConfig(cfg, state)
-                flushRatesIfDirty(state)
-            end
-
-            local deadline = computer.uptime() + Scheduler.nextWakeupDelay(cfg, state, computer.uptime())
-            while running and computer.uptime() < deadline do
-                local cur = computer.uptime()
-                local timeout = math.max(0.05, math.min(deadline - cur, Scheduler.nextWakeupDelay(cfg, state, cur)))
-                local evTbl = { event.pull(timeout) }
-                local _, stopReq = dispatchEvent(cfg, state, evTbl, computer.uptime(), nil)
-                if stopReq then
-                    running = false
-                    break
+        local okLoop, errLoop = xpcall(function()
+            while running do
+                local now = computer.uptime()
+                state._forcePollNow = false
+                Scheduler.step(cfg, state, now)
+                Hardware.pushMeshMetrics(cfg, state, now)
+                if (now - lastRateSave) >= 60.0 then
+                    lastRateSave = now
+                    saveConfig(cfg, state)
+                    flushRatesIfDirty(state)
                 end
-                if state._forcePollNow then
-                    break
+
+                local deadline = computer.uptime() + Scheduler.nextWakeupDelay(cfg, state, computer.uptime())
+                while running and computer.uptime() < deadline do
+                    local cur = computer.uptime()
+                    local timeout = math.max(0.05, math.min(deadline - cur, Scheduler.nextWakeupDelay(cfg, state, cur)))
+                    local evTbl = { event.pull(timeout) }
+                    local _, stopReq = dispatchEvent(cfg, state, evTbl, computer.uptime(), nil)
+                    if stopReq or state._pendingReboot then
+                        running = false
+                        userExit = true
+                        break
+                    end
+                    if state._forcePollNow then
+                        break
+                    end
                 end
             end
+        end, debug.traceback)
+
+        pcall(Hardware.setGuidedSubscriptions, nil, false, nil, state)
+        pcall(Hardware.zeroAllManagedPools, cfg, nil, state)
+        pcall(saveConfig, cfg, state)
+        pcall(flushRatesIfDirty, state)
+        if state._pendingReboot then
+            print("Universal Control rebooting per remote request (all bundled outputs OFF).")
+            pcall(os.sleep, 0.15)
+            if computer.shutdown then pcall(computer.shutdown, true) end
+            return
+        elseif userExit or okLoop then
+            print("Universal Control worker stopped cleanly (all bundled outputs OFF).")
+            return
+        else
+            io.stderr:write("Universal Control worker error (restarting in 2s):\n" .. tostring(errLoop) .. "\n")
+            os.sleep(2)
         end
-    end, debug.traceback)
-
-    pcall(Hardware.setGuidedSubscriptions, nil, false, nil, state)
-    pcall(Hardware.zeroAllManagedPools, cfg, nil, state)
-    pcall(saveConfig, cfg, state)
-    pcall(flushRatesIfDirty, state)
-    if not okLoop then
-        io.stderr:write("Universal Control worker error:\n" .. tostring(errLoop) .. "\n")
-    else
-        print("Universal Control worker stopped cleanly (all bundled outputs OFF).")
     end
 end
 
 local function runGUI()
-    local cfg = loadConfig()
-    local state = Scheduler.newState()
-    Scheduler.loadRatesFile(RATES_CACHE_PATH, state, cfg.maxRecipeCache, BACKUP_RATES_PATH)
-    Scheduler.syncHardware(cfg, state)
-    Hardware.zeroAllManagedPools(cfg, nil, state)
-    Hardware.openMeshPort(cfg)
+    while true do
+        local cfg = loadConfig()
+        local state = Scheduler.newState()
+        Scheduler.loadRatesFile(RATES_CACHE_PATH, state, cfg.maxRecipeCache, BACKUP_RATES_PATH)
+        Scheduler.syncHardware(cfg, state)
+        Hardware.zeroAllManagedPools(cfg, nil, state)
+        Hardware.openMeshPort(cfg)
 
-    local disc = state.discovery or {}
-    if (not disc.hasGpu) or (not disc.hasScreen) then
-        runWorker()
-        return
-    end
-
-    local savePending = false
-    local saveDeadline = 0
-    local lastPeriodicSave = computer.uptime()
-    local function scheduleSave(c)
-        savePending = true
-        saveDeadline = computer.uptime() + 0.35
-        cfg = c or cfg
-    end
-    local function flushSave()
-        if savePending then
-            savePending = false
-            saveConfig(cfg, state)
-            flushRatesIfDirty(state)
+        local disc = state.discovery or {}
+        if (not disc.hasGpu) or (not disc.hasScreen) then
+            runWorker()
+            return
         end
-    end
 
-    local ui = UI.new(cfg, state, scheduleSave)
-
-    local okLoop, errLoop = xpcall(function()
-        ui:render()
-        local lastDigest = Scheduler.renderDigest(cfg, state)
-        Scheduler.step(cfg, state, computer.uptime())
-        local bootDigest = Scheduler.renderDigest(cfg, state)
-        if bootDigest ~= lastDigest then
-            ui:render()
-            lastDigest = bootDigest
+        local savePending = false
+        local saveDeadline = 0
+        local lastPeriodicSave = computer.uptime()
+        local function scheduleSave(c)
+            savePending = true
+            saveDeadline = computer.uptime() + 0.35
+            cfg = c or cfg
         end
-        local nextPoll = computer.uptime() + Scheduler.nextWakeupDelay(cfg, state, computer.uptime())
-
-        while ui.running do
-            local dirty = false
-            local now = computer.uptime()
-            local wakeDelay = Scheduler.nextWakeupDelay(cfg, state, now)
-            local waitSec = math.max(0.05, math.min(nextPoll - now, wakeDelay))
-            if ui.guidedDropActive then
-                waitSec = math.min(waitSec, 0.25)
-            end
-            if state._forcePollNow then
-                waitSec = 0.01
-            end
+        local function flushSave()
             if savePending then
-                waitSec = math.min(waitSec, math.max(0.02, saveDeadline - now))
-            end
-
-            local evTbl = { event.pull(waitSec) }
-            local evDirty, stopReq = dispatchEvent(cfg, state, evTbl, computer.uptime(), ui)
-            if stopReq then
-                savePending = true
-                ui.running = false
-                break
-            end
-            if evDirty then
-                dirty = true
-            end
-
-            local curTime = computer.uptime()
-            if ui.running and (state._forcePollNow == true or curTime >= nextPoll) then
-                state._forcePollNow = false
-                if ui.guidedDropActive and ui:stepGuidedDrop() then
-                    dirty = true
-                end
-                Scheduler.step(cfg, state, curTime)
-                Hardware.pushMeshMetrics(cfg, state, curTime)
-                if (curTime - lastPeriodicSave) >= 60.0 then
-                    lastPeriodicSave = curTime
-                    saveConfig(cfg, state)
-                    flushRatesIfDirty(state)
-                end
-                nextPoll = computer.uptime() + Scheduler.nextWakeupDelay(cfg, state, computer.uptime())
-                local curDigest = Scheduler.renderDigest(cfg, state)
-                if curDigest ~= lastDigest then
-                    dirty = true
-                end
-            end
-
-            if savePending and computer.uptime() >= saveDeadline then
-                flushSave()
-            end
-            if dirty and ui.running then
-                ui:render()
-                lastDigest = Scheduler.renderDigest(cfg, state)
+                savePending = false
+                saveConfig(cfg, state)
+                flushRatesIfDirty(state)
             end
         end
-    end, debug.traceback)
 
-    -- Always force all bundled outputs OFF and clear temporary Guided Drop subscriptions!
-    pcall(Hardware.setGuidedSubscriptions, nil, false, nil, state)
-    pcall(Hardware.zeroAllManagedPools, cfg, nil, state)
-    flushSave()
-    pcall(saveConfig, cfg, state)
-    pcall(flushRatesIfDirty, state)
-    if component.isAvailable("gpu") then
-        pcall(component.gpu.setBackground, 0x000000)
-        pcall(component.gpu.setForeground, 0xFFFFFF)
-    end
-    term.clear()
-    if okLoop then
-        print("GTNH Universal Control stopped cleanly (all bundled outputs OFF).")
-    else
-        io.stderr:write("GTNH Universal Control error:\n" .. tostring(errLoop) .. "\n")
+        local ui = UI.new(cfg, state, scheduleSave)
+        local userExit = false
+
+        local okLoop, errLoop = xpcall(function()
+            ui:render()
+            local lastDigest = Scheduler.renderDigest(cfg, state)
+            Scheduler.step(cfg, state, computer.uptime())
+            local bootDigest = Scheduler.renderDigest(cfg, state)
+            if bootDigest ~= lastDigest then
+                ui:render()
+                lastDigest = bootDigest
+            end
+            local nextPoll = computer.uptime() + Scheduler.nextWakeupDelay(cfg, state, computer.uptime())
+
+            while ui.running do
+                local dirty = false
+                local now = computer.uptime()
+                local wakeDelay = Scheduler.nextWakeupDelay(cfg, state, now)
+                local waitSec = math.max(0.05, math.min(nextPoll - now, wakeDelay))
+                if ui.guidedDropActive then
+                    waitSec = math.min(waitSec, 0.25)
+                end
+                if state._forcePollNow then
+                    waitSec = 0.01
+                end
+                if savePending then
+                    waitSec = math.min(waitSec, math.max(0.02, saveDeadline - now))
+                end
+
+                local evTbl = { event.pull(waitSec) }
+                local evDirty, stopReq = dispatchEvent(cfg, state, evTbl, computer.uptime(), ui)
+                if stopReq or state._pendingReboot then
+                    savePending = true
+                    userExit = true
+                    ui.running = false
+                    break
+                end
+                if evDirty then
+                    dirty = true
+                end
+
+                local curTime = computer.uptime()
+                if ui.running and (state._forcePollNow == true or curTime >= nextPoll) then
+                    state._forcePollNow = false
+                    if ui.guidedDropActive and ui:stepGuidedDrop() then
+                        dirty = true
+                    end
+                    Scheduler.step(cfg, state, curTime)
+                    Hardware.pushMeshMetrics(cfg, state, curTime)
+                    if (curTime - lastPeriodicSave) >= 60.0 then
+                        lastPeriodicSave = curTime
+                        saveConfig(cfg, state)
+                        flushRatesIfDirty(state)
+                    end
+                    nextPoll = computer.uptime() + Scheduler.nextWakeupDelay(cfg, state, computer.uptime())
+                    local curDigest = Scheduler.renderDigest(cfg, state)
+                    if curDigest ~= lastDigest then
+                        dirty = true
+                    end
+                end
+
+                if savePending and computer.uptime() >= saveDeadline then
+                    flushSave()
+                end
+                if dirty and ui.running then
+                    ui:render()
+                    lastDigest = Scheduler.renderDigest(cfg, state)
+                end
+            end
+            if not ui.running then
+                userExit = true
+            end
+        end, debug.traceback)
+
+        -- Always force all bundled outputs OFF and clear temporary Guided Drop subscriptions!
+        pcall(Hardware.setGuidedSubscriptions, nil, false, nil, state)
+        pcall(Hardware.zeroAllManagedPools, cfg, nil, state)
+        flushSave()
+        pcall(saveConfig, cfg, state)
+        pcall(flushRatesIfDirty, state)
+        if component.isAvailable("gpu") then
+            pcall(component.gpu.setBackground, 0x000000)
+            pcall(component.gpu.setForeground, 0xFFFFFF)
+        end
+        term.clear()
+        if state._pendingReboot then
+            print("GTNH Universal Control rebooting per remote request (all bundled outputs OFF).")
+            pcall(os.sleep, 0.15)
+            if computer.shutdown then pcall(computer.shutdown, true) end
+            return
+        elseif userExit or okLoop then
+            print("GTNH Universal Control stopped cleanly (all bundled outputs OFF).")
+            return
+        else
+            io.stderr:write("GTNH Universal Control error (restarting in 2s):\n" .. tostring(errLoop) .. "\n")
+            os.sleep(2)
+        end
     end
 end
 

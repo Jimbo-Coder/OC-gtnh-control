@@ -811,12 +811,22 @@ lscPctVal = 36
 Scheduler.step(cfg5, st5, 12.0)
 assertEq(gfWorkAllowed, true, "LSC >= resume unpauses Godforge")
 
--- Mesh push & GORGE_CMD dispatch
+-- Mesh push, GTNH_WAKE, & GORGE_CMD dispatch
 Hardware.pushMeshMetrics(cfg5, st5, 12.0, nil, true)
 assert(#meshSent >= 1 and meshSent[1].t == "GORGE_METRICS", "Sent GORGE_METRICS over port 4205")
+local beforeWakeCnt = #meshSent
+assertEq(Hardware.handleMeshMessage(cfg5, st5, "mod-1", "ae2-host", 4205, "GTNH_WAKE", "ae2"), true, "GTNH_WAKE handled")
+assertEq(#meshSent, beforeWakeCnt + 1, "GTNH_WAKE triggered immediate GORGE_METRICS push")
+assertEq(meshSent[#meshSent].t, "GORGE_METRICS", "GTNH_WAKE pushed GORGE_METRICS")
 Hardware.handleMeshMessage(cfg5, st5, "mod-1", "ae2-host", 4205, "GORGE_CMD", "req-9", serialization.serialize({ action = "pause" }))
 assertEq(cfg5.armed, false, "GORGE_CMD pause disarmed Gorge")
 assertEq(meshSent[#meshSent].t, "GORGE_REPLY", "Sent GORGE_REPLY")
+Hardware.handleMeshMessage(cfg5, st5, "mod-1", "ae2-host", 4205, "GORGE_CMD", "req-rbt", serialization.serialize({ action = "reboot" }))
+local rbtReply = serialization.unserialize(meshSent[#meshSent].p2)
+assertEq(st5._pendingReboot, true, "GORGE_CMD reboot flagged state._pendingReboot")
+assertEq(rbtReply and rbtReply.ok, true, "GORGE_CMD reboot replied ok=true")
+assertEq(rbtReply and rbtReply.rebooting, true, "GORGE_CMD reboot replied rebooting=true")
+st5._pendingReboot = nil
 
 -- Standalone guard (`extLinkMode == "off"`): ignores incoming Mesh & suppresses push
 local beforeCnt = #meshSent

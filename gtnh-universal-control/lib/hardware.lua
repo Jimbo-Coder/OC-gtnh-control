@@ -9,6 +9,7 @@ local serialization = require("serialization")
 local Hardware = {}
 
 Hardware.MESH_PORT = 4205
+Hardware.WAKE_MSG = "GTNH_WAKE"
 
 -- ProjectRed / OC Bundled Redstone color indices (0..15)
 Hardware.COLORS = {
@@ -971,13 +972,34 @@ local function getMeshTransports(compLib)
         for addr in cl.list("modem", true) do
             local m = cl.proxy(addr)
             if m then
-                if m.open then pcall(m.open, Hardware.MESH_PORT) end
+                local needOpen = true
+                if type(m.isOpen) == "function" then
+                    local okO, isO = pcall(m.isOpen, Hardware.MESH_PORT)
+                    if okO and isO == true then needOpen = false end
+                end
+                if needOpen and m.open then pcall(m.open, Hardware.MESH_PORT) end
+
                 local isW = false
                 if m.isWireless then
                     local okW, rW = pcall(m.isWireless)
                     isW = okW and (rW == true)
                 end
-                if isW and m.setStrength then pcall(m.setStrength, 400) end
+                if isW and m.setStrength then
+                    local needStr = true
+                    if type(m.getStrength) == "function" then
+                        local okG, curStr = pcall(m.getStrength)
+                        if okG and tonumber(curStr) and tonumber(curStr) >= 400 then needStr = false end
+                    end
+                    if needStr then pcall(m.setStrength, 400) end
+                end
+                if type(m.setWakeMessage) == "function" then
+                    local needWake = true
+                    if type(m.getWakeMessage) == "function" then
+                        local okWk, curWk = pcall(m.getWakeMessage)
+                        if okWk and curWk == Hardware.WAKE_MSG then needWake = false end
+                    end
+                    if needWake then pcall(m.setWakeMessage, Hardware.WAKE_MSG, true) end
+                end
                 if not firstModem then firstModem = m end
                 if isW and not wModem then wModem = m end
             end
@@ -988,6 +1010,9 @@ local function getMeshTransports(compLib)
     local ta = cl.list and cl.list("tunnel", true)() or nil
     if ta then
         tunnel, tAddr = cl.proxy(ta), ta
+        if tunnel and type(tunnel.setWakeMessage) == "function" then
+            pcall(tunnel.setWakeMessage, Hardware.WAKE_MSG, true)
+        end
     end
     return modem, tunnel, tAddr
 end
@@ -1081,6 +1106,12 @@ function Hardware.pushMeshMetrics(cfg, state, nowSec, compLib, force)
     end
     local viaTunnel = (Hardware._mainnetMeshViaTunnel == true) or (not modem and tunnel ~= nil)
     sendMeshPacket(cl, Hardware._mainnetMeshAddr, viaTunnel, "UNIV_METRICS", raw)
+    if Hardware._mainnetMeshAddr and Hardware._lastMainnetSeen
+        and (nowSec - Hardware._lastMainnetSeen) >= 90
+        and (nowSec - (Hardware._lastReverseWake or -1000)) >= 60 then
+        Hardware._lastReverseWake = nowSec
+        sendMeshPacket(cl, Hardware._mainnetMeshAddr, viaTunnel, Hardware.WAKE_MSG, "univ_watchdog")
+    end
     return true
 end
 
@@ -1091,19 +1122,22 @@ function Hardware.handleMeshMessage(cfg, state, localAddr, sender, port, msgType
     local isMeshPort = (port == Hardware.MESH_PORT) or (port == 0 and tunnel and tAddr and localAddr == tAddr)
     if not isMeshPort or not sender then return false end
 
-    if msgType == "MESH_MAINNET_HELLO" then
+    local upNow = (computer and computer.uptime and computer.uptime()) or 0
+    if msgType == "MESH_MAINNET_HELLO" or msgType == Hardware.WAKE_MSG then
         Hardware._mainnetMeshAddr = sender
         Hardware._mainnetMeshViaTunnel = (port == 0)
-        local up = (computer and computer.uptime and computer.uptime()) or 0
-        Hardware.pushMeshMetrics(cfg, state, up, cl, true)
+        Hardware._lastMainnetSeen = upNow
+        Hardware.pushMeshMetrics(cfg, state, upNow, cl, true)
         return true
     elseif msgType == "UNIV_ACK" then
         Hardware._mainnetMeshAddr = sender
         Hardware._mainnetMeshViaTunnel = (port == 0)
+        Hardware._lastMainnetSeen = upNow
         return true
     elseif msgType == "UNIV_CMD" then
         Hardware._mainnetMeshAddr = sender
         Hardware._mainnetMeshViaTunnel = (port == 0)
+        Hardware._lastMainnetSeen = upNow
         local cmd = (type(payload) == "string") and serialization.unserialize(payload) or nil
         local reply = { ok = false, error = "Unknown command" }
         if type(cmd) == "table" then
@@ -1142,6 +1176,12 @@ function Hardware.handleMeshMessage(cfg, state, localAddr, sender, port, msgType
                     state._forcePollNow = true
                 end
                 reply = { ok = true }
+            elseif cmd.action == "reboot" then
+                if state then
+                    state._pendingReboot = true
+                    state._forcePollNow = true
+                end
+                reply = { ok = true, rebooting = true }
             end
         end
         sendMeshPacket(cl, sender, (port == 0), "UNIV_REPLY", tostring(reqId or ""), serialization.serialize(reply))

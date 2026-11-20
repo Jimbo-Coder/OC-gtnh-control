@@ -130,6 +130,7 @@ function UI.new(cfg, hubState, callbacks, compLib)
         tabScroll = 0,
         cpuBusyOnly = false,
         confirmCancelCpu = nil,
+        confirmRebootPeer = nil,
         logScroll = 0,
         logModalActive = false,
         logModalScroll = 0,
@@ -564,6 +565,9 @@ function UI:renderOverviewTab()
         self:drawText(sc.x + 2, 16, padOrTrunc(sc.line1, sc.w - 3), sc.online and COLORS.fg or (isStale and COLORS.yellow or COLORS.muted), COLORS.panelBg)
         self:drawText(sc.x + 2, 17, padOrTrunc(sc.line2, sc.w - 3), COLORS.cyan, COLORS.panelBg)
         self:drawText(sc.x + 2, 18, padOrTrunc(sc.line3, sc.w - 3), COLORS.muted, COLORS.panelBg)
+        local isRbtArm = (self.confirmRebootPeer == sc.key)
+        local canRbt = (sc.key == "ae2") or sc.seen
+        local rbtX = sc.x + sc.w - (isRbtArm and 9 or 7)
         if isStale and self.cb.onMeshRecover then
             local wx = self:drawButton(sc.x + 2, 20, "[Wake]", COLORS.yellow, COLORS.amberBg, function()
                 self.statusMsg = tostring(self.cb.onMeshRecover(sc.key) or "Wake sent.")
@@ -577,6 +581,14 @@ function UI:renderOverviewTab()
                 self.tab = sc.tab
                 self.tabScroll = 0
             end)
+            if (not canRbt) and self.cb.onMeshRecover then
+                self:drawButton(sc.x + sc.w - 8, 20, "[Wake]", COLORS.yellow, COLORS.amberBg, function()
+                    self.statusMsg = tostring(self.cb.onMeshRecover(sc.key) or "Wake sent.")
+                end)
+            end
+        end
+        if canRbt and self.cb.onPeerAction then
+            self:drawRebootBtn(rbtX, 20, sc.key, "[Rbt]", "[Sure?]")
         end
     end
 
@@ -751,6 +763,9 @@ function UI:renderMeshPeerCard(x, y, cw, ch, title, peerKey, peer, winSec, targe
             self.statusMsg = tostring(self.cb.onPeerAction(peerKey, "poll") or ("Polled " .. peerKey))
         end
     end) + 2
+    if self.cb.onPeerAction then
+        self:drawRebootBtn(bx, y + ch - 3, peerKey, "[Reboot]", "[Confirm Reboot?]")
+    end
     if targetTab then
         self:drawButton(x + cw - 12, y + ch - 3, "[Open ->]", COLORS.fg, COLORS.btnActiveBg, function()
             self.tab = targetTab
@@ -920,6 +935,12 @@ function UI:renderPeerOfflineGuide(title, installKey, peer, winSec)
         if self.cb.onMeshPing then self.cb.onMeshPing() end
         self.statusMsg = "Broadcast MESH_MAINNET_HELLO beacon."
     end) + 2
+    if self.cb.onMeshRecover then
+        local recRole = (installKey == "universal") and "univ" or installKey
+        bx = self:drawButton(bx, 22, "[Wake Peer]", COLORS.yellow, COLORS.amberBg, function()
+            self.statusMsg = tostring(self.cb.onMeshRecover(recRole) or ("Wake sent to " .. recRole))
+        end) + 2
+    end
     self:drawButton(bx, 22, "[<- Mesh Overview]", COLORS.fg, COLORS.btnBg, function()
         self.tab = TAB_MESH
         self.tabScroll = 0
@@ -932,6 +953,25 @@ function UI:drawOrchestratorBtn(bx, y, label, fg, bg, peerKey, action, extra)
             self.statusMsg = tostring(self.cb.onPeerAction(peerKey, action, extra) or (peerKey .. ":" .. action))
         end
     end) + 2
+end
+
+function UI:drawRebootBtn(bx, y, peerKey, normalLbl, confirmLbl)
+    local isConfirm = (self.confirmRebootPeer == peerKey)
+    local cLbl = confirmLbl or "[Confirm Reboot?]"
+    local lbl = isConfirm and cLbl or (normalLbl or "[Reboot]")
+    local fg = isConfirm and COLORS.fg or COLORS.red
+    local bg = isConfirm and COLORS.darkRed or COLORS.btnBg
+    return self:drawButton(bx, y, lbl, fg, bg, function()
+        if self.confirmRebootPeer == peerKey then
+            self.confirmRebootPeer = nil
+            if self.cb.onPeerAction then
+                self.statusMsg = tostring(self.cb.onPeerAction(peerKey, "reboot") or ("Rebooting " .. tostring(peerKey)))
+            end
+        else
+            self.confirmRebootPeer = peerKey
+            self.statusMsg = string.format("Click %s again to REBOOT %s OC.", cLbl, string.upper(tostring(peerKey)))
+        end
+    end, "reboot") + 2
 end
 
 function UI:renderDtpfTab()
@@ -968,7 +1008,8 @@ function UI:renderDtpfTab()
     bx = self:drawOrchestratorBtn(bx, 9, "[Poll Now]", COLORS.cyan, COLORS.btnBg, "dtpf", "poll")
     bx = self:drawOrchestratorBtn(bx, 9, "[Maint Sync]", COLORS.fg, COLORS.btnBg, "dtpf", "maint_sync")
     bx = self:drawOrchestratorBtn(bx, 9, "[Toggle OD Flush]", COLORS.purple, COLORS.btnBg, "dtpf", "flush_od")
-    self:drawOrchestratorBtn(bx, 9, "[Lock AutoPull]", COLORS.red, COLORS.btnBg, "dtpf", "lock_autopull")
+    bx = self:drawOrchestratorBtn(bx, 9, "[Lock AutoPull]", COLORS.red, COLORS.btnBg, "dtpf", "lock_autopull")
+    self:drawRebootBtn(bx, 9, "dtpf", "[Reboot DTPF]", "[Confirm Reboot?]")
 
     self:drawFrame(2, 13, 157, 35, COLORS.border, COLORS.panelBg, "round")
     self:drawText(4, 13, string.format(" ◈ DTPF UNITS (%d) ", #units), COLORS.accent, COLORS.panelBg)
@@ -1022,7 +1063,8 @@ function UI:renderUniversalTab()
     bx = self:drawOrchestratorBtn(bx, 9, "[Arm All]", COLORS.fg, COLORS.darkGreen, "univ", "resume")
     bx = self:drawOrchestratorBtn(bx, 9, "[Pause All]", COLORS.yellow, COLORS.amberBg, "univ", "pause")
     bx = self:drawOrchestratorBtn(bx, 9, "[Full Scan]", COLORS.cyan, COLORS.btnBg, "univ", "poll")
-    self:drawOrchestratorBtn(bx, 9, "[Clear Stalls]", COLORS.red, COLORS.btnBg, "univ", "clear_stalls")
+    bx = self:drawOrchestratorBtn(bx, 9, "[Clear Stalls]", COLORS.red, COLORS.btnBg, "univ", "clear_stalls")
+    self:drawRebootBtn(bx, 9, "univ", "[Reboot Univ]", "[Confirm Reboot?]")
 
     self:drawFrame(2, 13, 157, 35, COLORS.border, COLORS.panelBg, "round")
     self:drawText(4, 13, string.format(" ◈ MACHINE POOLS & CHANNELS (%d) ", #pools), COLORS.accent, COLORS.panelBg)
@@ -1095,7 +1137,8 @@ function UI:renderGorgeTab()
     bx = self:drawOrchestratorBtn(bx, 10, "[Pause Gorge]", COLORS.yellow, COLORS.amberBg, "gorge", "pause")
     bx = self:drawOrchestratorBtn(bx, 10, "[Unstick All]", COLORS.yellow, COLORS.btnBg, "gorge", "unstick")
     bx = self:drawOrchestratorBtn(bx, 10, "[Retry Errors]", COLORS.purple, COLORS.btnBg, "gorge", "retry_errors")
-    self:drawOrchestratorBtn(bx, 10, "[Poll Now]", COLORS.cyan, COLORS.btnBg, "gorge", "poll")
+    bx = self:drawOrchestratorBtn(bx, 10, "[Poll Now]", COLORS.cyan, COLORS.btnBg, "gorge", "poll")
+    self:drawRebootBtn(bx, 10, "gorge", "[Reboot Gorge]", "[Confirm Reboot?]")
 
     self:drawFrame(2, 14, 157, 34, COLORS.border, COLORS.panelBg, "round")
     self:drawText(4, 14, string.format(" ◈ EXOTICIZER MODULES (%d / 8) ", #exs), COLORS.accent, COLORS.panelBg)
@@ -1174,7 +1217,8 @@ function UI:renderPumpTab()
     local bx = 4
     bx = self:drawOrchestratorBtn(bx, 9, "[Wake / Poll]", COLORS.green, COLORS.darkGreen, "pump", "poll")
     bx = self:drawOrchestratorBtn(bx, 9, "[Refresh Pumps]", COLORS.cyan, COLORS.btnBg, "pump", "refresh_pumps")
-    self:drawOrchestratorBtn(bx, 9, "[Reload Config]", COLORS.yellow, COLORS.btnBg, "pump", "reload")
+    bx = self:drawOrchestratorBtn(bx, 9, "[Reload Config]", COLORS.yellow, COLORS.btnBg, "pump", "reload")
+    self:drawRebootBtn(bx, 9, "pump", "[Reboot Pump]", "[Confirm Reboot?]")
 
     self:drawFrame(2, 13, 157, 35, COLORS.border, COLORS.panelBg, "round")
     self:drawText(4, 13, string.format(" ◈ MANAGED FLUID TARGETS (%d) ", #flRows), COLORS.accent, COLORS.panelBg)
@@ -1228,7 +1272,8 @@ function UI:renderStockTab()
     bx = self:drawOrchestratorBtn(bx, 9, "[Poll Now]", COLORS.cyan, COLORS.btnBg, "stock", "poll")
     bx = self:drawOrchestratorBtn(bx, 9, "[Retry Errors]", COLORS.purple, COLORS.btnBg, "stock", "retry_errors")
     bx = self:drawOrchestratorBtn(bx, 9, "[Import Phys]", COLORS.fg, COLORS.btnBg, "stock", "import_maintainers")
-    self:drawOrchestratorBtn(bx, 9, "[Benchmark]", COLORS.cyan, COLORS.btnBg, "stock", "run_bench")
+    bx = self:drawOrchestratorBtn(bx, 9, "[Benchmark]", COLORS.cyan, COLORS.btnBg, "stock", "run_bench")
+    self:drawRebootBtn(bx, 9, "stock", "[Reboot Stock]", "[Confirm Reboot?]")
 
     self:drawFrame(2, 13, 157, 35, COLORS.border, COLORS.panelBg, "round")
     self:drawText(4, 13, string.format(" ◈ TOP PRIORITY & ACTIVE RULES (%d) ", #rows), COLORS.accent, COLORS.panelBg)
@@ -1310,6 +1355,9 @@ function UI:renderSetupTab()
             self.statusMsg = tostring(self.cb.onResetOverrides() or "Overrides cleared.")
         end
     end)
+    if self.cb.onPeerAction then
+        self:drawRebootBtn(44, ay, "ae2", "[Reboot AE2]", "[Confirm Reboot?]")
+    end
     self:drawText(4, 43, "Changes save immediately to /home/config_overrides.lua (survives updates).", COLORS.muted, COLORS.panelBg)
 
     -- Right Card: Polling Intervals (Seconds)
@@ -1434,8 +1482,9 @@ function UI:handleTouch(x, y, _button)
         end
     end
     if not hit then
-        if self.confirmCancelCpu then
+        if self.confirmCancelCpu or self.confirmRebootPeer then
             self.confirmCancelCpu = nil
+            self.confirmRebootPeer = nil
             self:render()
             return true
         end
@@ -1443,6 +1492,9 @@ function UI:handleTouch(x, y, _button)
     end
     if hit.kind ~= "cancel" then
         self.confirmCancelCpu = nil
+    end
+    if hit.kind ~= "reboot" then
+        self.confirmRebootPeer = nil
     end
     hit.fn()
     if self.running then self:render() end
@@ -1470,10 +1522,12 @@ function UI:handleKeyDown(char, code)
         self.tab = char - 48
         self.tabScroll = 0
         self.confirmCancelCpu = nil
+        self.confirmRebootPeer = nil
     elseif code == 15 or char == 9 then -- Tab cycles 1..9
         self.tab = (self.tab % 9) + 1
         self.tabScroll = 0
         self.confirmCancelCpu = nil
+        self.confirmRebootPeer = nil
     elseif char == 108 or char == 76 then -- 'l'/'L'
         self.logModalActive = not self.logModalActive
     elseif char == 115 or char == 83 then -- 's'/'S'
@@ -1484,6 +1538,7 @@ function UI:handleKeyDown(char, code)
         self.statusMsg = "Broadcast MESH_MAINNET_HELLO beacon."
     elseif char == 114 or char == 82 then -- 'r'/'R'
         self.confirmCancelCpu = nil
+        self.confirmRebootPeer = nil
         self.logModalActive = false
     end
     if self.running then self:render() end

@@ -15,6 +15,7 @@ local Plasmas = require("lib.plasmas")
 local Hardware = {}
 
 Hardware.MESH_PORT = 4205
+Hardware.WAKE_MSG = "GTNH_WAKE"
 Hardware.SIDE_NAMES = {
     [0] = "Down",
     [1] = "Up",
@@ -751,6 +752,14 @@ local function getMeshTransports(compLib, state)
                     end
                     if needStr then pcall(m.setStrength, 400) end
                 end
+                if type(m.setWakeMessage) == "function" then
+                    local needWake = true
+                    if type(m.getWakeMessage) == "function" then
+                        local okW, curW = pcall(m.getWakeMessage)
+                        if okW and curW == Hardware.WAKE_MSG then needWake = false end
+                    end
+                    if needWake then pcall(m.setWakeMessage, Hardware.WAKE_MSG, true) end
+                end
                 if not firstModem then firstModem = m end
                 if isW and not wModem then wModem = m end
             end
@@ -761,6 +770,9 @@ local function getMeshTransports(compLib, state)
     local ta = cl.list and cl.list("tunnel", true)() or nil
     if ta then
         tunnel, tAddr = cl.proxy(ta), ta
+        if tunnel and type(tunnel.setWakeMessage) == "function" then
+            pcall(tunnel.setWakeMessage, Hardware.WAKE_MSG, true)
+        end
     end
     if state then
         state._meshModem = modem or false
@@ -847,6 +859,12 @@ function Hardware.pushMeshMetrics(cfg, state, nowSec, compLib, force)
     }
     local viaTunnel = (state and state._mainnetMeshViaTunnel == true) or (not modem and tunnel ~= nil)
     sendMeshPacket(cl, state, state and state._mainnetMeshAddr, viaTunnel, "GORGE_METRICS", serialization.serialize(pkt))
+    if state and state._mainnetMeshAddr and state._lastMainnetSeen
+        and (nowSec - state._lastMainnetSeen) >= 90
+        and (nowSec - (state._lastReverseWake or -1000)) >= 60 then
+        state._lastReverseWake = nowSec
+        sendMeshPacket(cl, state, state._mainnetMeshAddr, viaTunnel, Hardware.WAKE_MSG, "gorge_watchdog")
+    end
     return true
 end
 
@@ -857,24 +875,27 @@ function Hardware.handleMeshMessage(cfg, state, localAddr, sender, port, msgType
     local isMeshPort = (port == Hardware.MESH_PORT) or (port == 0 and tunnel and tAddr and localAddr == tAddr)
     if not isMeshPort or not sender then return false end
 
-    if msgType == "MESH_MAINNET_HELLO" then
+    local upNow = (computer and computer.uptime and computer.uptime()) or 0
+    if msgType == "MESH_MAINNET_HELLO" or msgType == Hardware.WAKE_MSG then
         if state then
             state._mainnetMeshAddr = sender
             state._mainnetMeshViaTunnel = (port == 0)
+            state._lastMainnetSeen = upNow
         end
-        local up = (computer and computer.uptime and computer.uptime()) or 0
-        Hardware.pushMeshMetrics(cfg, state, up, cl, true)
+        Hardware.pushMeshMetrics(cfg, state, upNow, cl, true)
         return true
     elseif msgType == "GORGE_ACK" then
         if state then
             state._mainnetMeshAddr = sender
             state._mainnetMeshViaTunnel = (port == 0)
+            state._lastMainnetSeen = upNow
         end
         return true
     elseif msgType == "GORGE_CMD" then
         if state then
             state._mainnetMeshAddr = sender
             state._mainnetMeshViaTunnel = (port == 0)
+            state._lastMainnetSeen = upNow
         end
         local cmd = (type(payload) == "string") and serialization.unserialize(payload) or nil
         local reply = { ok = false, error = "Unknown GORGE_CMD" }
@@ -922,6 +943,12 @@ function Hardware.handleMeshMessage(cfg, state, localAddr, sender, port, msgType
                 else
                     reply = { ok = false, error = "Invalid mode (magmatter|gluon|auto)" }
                 end
+            elseif cmd.action == "reboot" then
+                if state then
+                    state._pendingReboot = true
+                    state._forcePollNow = true
+                end
+                reply = { ok = true, rebooting = true }
             end
         end
         sendMeshPacket(cl, state, sender, (port == 0), "GORGE_REPLY", tostring(reqId or ""), serialization.serialize(reply))
