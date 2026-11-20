@@ -35,6 +35,11 @@ function Hardware.resetClusterState()
     Hardware._workers = {}
     Hardware._remoteDtpfStatus = {}
     Hardware._remoteOwner = {}
+    Hardware._lastMainnetSeen = nil
+    Hardware._lastMainnetWakeAt = -1000
+    Hardware._lastClaimsRaw = nil
+    Hardware._lastClaimsSig = nil
+    Hardware._lastClaimsSent = -100
 end
 
 function Hardware.getWorkerCount()
@@ -1961,7 +1966,19 @@ end
 -- Mainnet AE2 Maintainer & In-Game OC Mesh (`MESH_PORT = 4205`) Helpers
 -- ============================================================================
 
+local function configureMeshWake(m, wakeMsg)
+    if m and type(m.setWakeMessage) == "function" then
+        local needWake = true
+        if type(m.getWakeMessage) == "function" then
+            local okWk, curWk = pcall(m.getWakeMessage)
+            if okWk and curWk == wakeMsg then needWake = false end
+        end
+        if needWake then pcall(m.setWakeMessage, wakeMsg, true) end
+    end
+end
+
 local function getMeshTransports(compLib)
+    Hardware.WAKE_MSG = Hardware.WAKE_MSG or "GTNH_WAKE"
     local cl = compLib or component
     local firstModem, firstAddr, wModem, wAddr = nil, nil, nil, nil
     if cl.list then
@@ -1975,6 +1992,7 @@ local function getMeshTransports(compLib)
                     isW = okW and (rW == true)
                 end
                 if isW and m.setStrength then pcall(m.setStrength, 400) end
+                configureMeshWake(m, Hardware.WAKE_MSG)
                 if not firstModem then firstModem, firstAddr = m, addr end
                 if isW and not wModem then wModem, wAddr = m, addr end
             end
@@ -1988,6 +2006,7 @@ local function getMeshTransports(compLib)
             isW = okW and (rW == true)
         end
         if isW and m.setStrength then pcall(m.setStrength, 400) end
+        configureMeshWake(m, Hardware.WAKE_MSG)
         firstModem, firstAddr = m, m.address or "modem"
     end
     local modem, mAddr = wModem or firstModem, wAddr or firstAddr
@@ -1995,6 +2014,7 @@ local function getMeshTransports(compLib)
     local ta = cl.list and cl.list("tunnel", true)() or nil
     if ta then
         tunnel, tAddr = cl.proxy(ta), ta
+        configureMeshWake(tunnel, Hardware.WAKE_MSG)
     end
     return modem, mAddr, tunnel, tAddr
 end
@@ -2098,39 +2118,65 @@ local function inspectMainnetCpusAndStocks(proxy, itemsReq)
     end
 
     local stocks = {}
-    local needFluids = false
-    for i = 1, #(itemsReq or {}) do
-        if itemsReq[i].type == "fluid" then needFluids = true break end
+    local reqs = itemsReq or {}
+    local needFluidFallback = false
+    if not proxy.getFluidInNetwork then
+        for i = 1, #reqs do
+            if reqs[i].type == "fluid" then needFluidFallback = true break end
+        end
     end
-    local fluidAmt = {}
-    if needFluids and proxy.getFluidsInNetwork then
-        local fl = safeCall(proxy, "getFluidsInNetwork")
-        if type(fl) == "table" then
-            for i = 1, #fl do
-                local f = fl[i]
-                if type(f) == "table" and f.name then
-                    fluidAmt[f.name] = (fluidAmt[f.name] or 0) + math.floor(tonumber(f.amount or f.size) or 0)
+    local fluidAmt = nil
+    local function getFluidMap()
+        if fluidAmt then return fluidAmt end
+        fluidAmt = {}
+        if proxy.getFluidsInNetwork then
+            local fl = safeCall(proxy, "getFluidsInNetwork")
+            if type(fl) == "table" then
+                for i = 1, #fl do
+                    local f = fl[i]
+                    if type(f) == "table" and f.name then
+                        fluidAmt[f.name] = (fluidAmt[f.name] or 0) + math.floor(tonumber(f.amount or f.size) or 0)
+                    end
                 end
             end
         end
+        return fluidAmt
     end
+    if needFluidFallback then getFluidMap() end
 
-    for i = 1, #(itemsReq or {}) do
-        local req = itemsReq[i]
+    for i = 1, #reqs do
+        local req = reqs[i]
         if type(req) == "table" and req.id then
             local qty = 0
             if req.type == "fluid" then
-                qty = fluidAmt[req.name or ""] or 0
-            elseif proxy.getItemsInNetwork and req.name and req.name ~= "" then
-                local il = safeCall(proxy, "getItemsInNetwork", {
-                    name = req.name,
-                    damage = tonumber(req.damage) or 0,
-                })
-                if type(il) == "table" then
-                    for j = 1, #il do
-                        local st = il[j]
-                        if type(st) == "table" and (not req.label or req.label == "" or st.label == req.label) then
-                            qty = qty + math.floor(tonumber(st.size or st.amount) or 0)
+                if proxy.getFluidInNetwork and req.name and req.name ~= "" then
+                    local st = safeCall(proxy, "getFluidInNetwork", req.name)
+                    if type(st) == "table" then
+                        qty = math.floor(tonumber(st.amount or st.size) or 0)
+                    else
+                        qty = 0
+                    end
+                else
+                    qty = getFluidMap()[req.name or ""] or 0
+                end
+            elseif req.name and req.name ~= "" then
+                local dmg = tonumber(req.damage) or 0
+                if proxy.getItemInNetwork and req.hasTag ~= true then
+                    -- Table-form O(1) AE2 lookup (avoids empty-NBT tag mismatch on string-form calls)
+                    local st = safeCall(proxy, "getItemInNetwork", { name = req.name, damage = dmg })
+                    if type(st) == "table" and (not req.label or req.label == "" or st.label == req.label) then
+                        qty = math.floor(tonumber(st.size or st.amount) or 0)
+                    else
+                        qty = 0
+                    end
+                elseif proxy.getItemsInNetwork then
+                    local il = safeCall(proxy, "getItemsInNetwork", { name = req.name, damage = dmg })
+                    if type(il) == "table" then
+                        for j = 1, #il do
+                            local st = il[j]
+                            if type(st) == "table" and (not req.label or req.label == "" or st.label == req.label) then
+                                qty = qty + math.floor(tonumber(st.size or st.amount) or 0)
+                            end
                         end
                     end
                 end
@@ -2209,6 +2255,7 @@ local function awaitMeshAck(tunnel, tAddr, reqId, ackType, timeoutSec, maxPulls,
             if okU and type(tbl) == "table" then
                 Hardware._mainnetMeshAddr = sender
                 Hardware._mainnetMeshViaTunnel = (port == 0)
+                Hardware._lastMainnetSeen = meshUptime()
                 return tbl, sender, port
             end
         end
@@ -2373,7 +2420,101 @@ function Hardware.pushMeshMetrics(cfg, runtimeState, nowSec, compLib, force)
     end
     local viaTunnel = (Hardware._mainnetMeshViaTunnel == true) or (not modem and tunnel ~= nil)
     sendMeshPacket(cl, Hardware._mainnetMeshAddr, viaTunnel, "DTPF_METRICS", raw)
+
+    local claims = runtimeState and runtimeState._dtpfClaims
+    if type(claims) == "table" then
+        local mInfo = (type(claims.maintInfo) == "table") and claims.maintInfo or nil
+        local pInfo = (type(claims.passiveInfo) == "table") and claims.passiveInfo or nil
+        local mSigs, pSigs = {}, {}
+        if mInfo then
+            for k, v in pairs(mInfo) do
+                if type(v) == "table" then
+                    mSigs[#mSigs + 1] = tostring(k) .. "=" .. tostring(v.tgt or 0) .. ":" .. tostring(v.m or "")
+                end
+            end
+            table.sort(mSigs)
+        end
+        if pInfo then
+            for k, v in pairs(pInfo) do
+                if type(v) == "table" then
+                    pSigs[#pSigs + 1] = tostring(k) .. "=" .. tostring(v.tgt or 0) .. ":" .. tostring(v.fv == true)
+                end
+            end
+            table.sort(pSigs)
+        end
+        local sigRaw = serialization.serialize({
+            armed = (cfg and cfg.armed == true),
+            maintEnabled = (cfg and cfg.maintEnabled == true),
+            maintKeys = claims.maintKeys or {},
+            passiveKeys = claims.passiveKeys or {},
+            mSigs = mSigs,
+            pSigs = pSigs,
+        })
+        if force or Hardware._lastClaimsRaw == nil or sigRaw ~= Hardware._lastClaimsSig or (nowSec - (Hardware._lastClaimsSent or -100)) >= 15 then
+            local cPkt = {
+                armed = (cfg and cfg.armed == true),
+                maintEnabled = (cfg and cfg.maintEnabled == true),
+                maintKeys = claims.maintKeys or {},
+                passiveKeys = claims.passiveKeys or {},
+                maintInfo = mInfo,
+                passiveInfo = pInfo,
+            }
+            local cRaw = serialization.serialize(cPkt)
+            if #cRaw > 5500 then
+                local function stripMapLabels(src)
+                    if type(src) ~= "table" then return nil end
+                    local out = {}
+                    for k, v in pairs(src) do
+                        if type(v) == "table" then
+                            local copy = {}
+                            for fk, fv in pairs(v) do
+                                if fk ~= "l" and fk ~= "st" then copy[fk] = fv end
+                            end
+                            out[k] = copy
+                        end
+                    end
+                    return out
+                end
+                cPkt.maintInfo = stripMapLabels(mInfo)
+                cPkt.passiveInfo = stripMapLabels(pInfo)
+                cRaw = serialization.serialize(cPkt)
+            end
+            if #cRaw > 5500 then
+                cPkt.maintInfo = nil
+                cPkt.passiveInfo = nil
+                cRaw = serialization.serialize(cPkt)
+            end
+            Hardware._lastClaimsRaw = cRaw
+            Hardware._lastClaimsSig = sigRaw
+            Hardware._lastClaimsSent = nowSec
+            if #cRaw <= 5500 then
+                sendMeshPacket(cl, nil, viaTunnel, "DTPF_CLAIMS", cRaw)
+            end
+        end
+    end
+    if Hardware._lastMainnetSeen and (nowSec - Hardware._lastMainnetSeen) >= 90 and (nowSec - (Hardware._lastMainnetWakeAt or -1000)) >= 60 then
+        Hardware._lastMainnetWakeAt = nowSec
+        sendMeshPacket(cl, Hardware._mainnetMeshAddr, viaTunnel, Hardware.WAKE_MSG or "GTNH_WAKE", "dtpf")
+    end
     return true
+end
+
+local function decodeClaimKeys(list)
+    local out = {}
+    if type(list) ~= "table" then return out end
+    for i = 1, #list do
+        local s = tostring(list[i] or "")
+        if s ~= "" then
+            if s:sub(1, 2) == "f:" then
+                out["fluid:" .. s:sub(3) .. ":0"] = true
+            elseif s:sub(1, 2) == "i:" then
+                out["item:" .. s:sub(3)] = true
+            else
+                out[s] = true
+            end
+        end
+    end
+    return out
 end
 
 function Hardware.handleMeshMessage(webBridge, localAddr, sender, port, msgType, reqId, payload, compLib)
@@ -2383,19 +2524,39 @@ function Hardware.handleMeshMessage(webBridge, localAddr, sender, port, msgType,
     local isMeshPort = (port == Hardware.MESH_PORT) or (port == 0 and tunnel and tAddr and localAddr == tAddr)
     if not isMeshPort or not sender then return false end
 
-    if msgType == "MESH_MAINNET_HELLO" then
-        Hardware._mainnetMeshAddr = sender
-        Hardware._mainnetMeshViaTunnel = (port == 0)
+    if msgType == "MESH_MAINNET_HELLO" or msgType == "STOCK_HELLO" or msgType == (Hardware.WAKE_MSG or "GTNH_WAKE") then
         local up = (computer and computer.uptime and computer.uptime()) or (_G.computer and _G.computer.uptime and _G.computer.uptime()) or 0
+        if msgType == "MESH_MAINNET_HELLO" or msgType == (Hardware.WAKE_MSG or "GTNH_WAKE") then
+            Hardware._mainnetMeshAddr = sender
+            Hardware._mainnetMeshViaTunnel = (port == 0)
+            Hardware._lastMainnetSeen = up
+        end
         Hardware.pushMeshMetrics(webBridge and webBridge.cfg, webBridge and webBridge.state, up, cl, true)
         return true
+    elseif msgType == "STOCK_CLAIMS" then
+        local rawStr = (type(reqId) == "string" and reqId:sub(1, 1) == "{" and (payload == nil or payload == "")) and reqId or payload
+        local okU, pkt = pcall(serialization.unserialize, tostring(rawStr or ""))
+        if okU and type(pkt) == "table" and webBridge and webBridge.state then
+            local up = (computer and computer.uptime and computer.uptime()) or (_G.computer and _G.computer.uptime and _G.computer.uptime()) or 0
+            webBridge.state.stockPeer = {
+                addr = sender,
+                viaTunnel = (port == 0),
+                lastSeen = up,
+                armed = (pkt.armed == true),
+                keys = decodeClaimKeys(pkt.keys),
+            }
+            return true
+        end
+        return false
     elseif msgType == "DTPF_ACK" then
         Hardware._mainnetMeshAddr = sender
         Hardware._mainnetMeshViaTunnel = (port == 0)
+        Hardware._lastMainnetSeen = (computer and computer.uptime and computer.uptime()) or (_G.computer and _G.computer.uptime and _G.computer.uptime()) or 0
         return true
     elseif msgType == "DTPF_CMD" then
         Hardware._mainnetMeshAddr = sender
         Hardware._mainnetMeshViaTunnel = (port == 0)
+        Hardware._lastMainnetSeen = (computer and computer.uptime and computer.uptime()) or (_G.computer and _G.computer.uptime and _G.computer.uptime()) or 0
         local cmd = (type(payload) == "string") and serialization.unserialize(payload) or nil
         local resTbl
         if type(cmd) == "table" and webBridge and webBridge.executeRpcTable then
@@ -2411,6 +2572,54 @@ function Hardware.handleMeshMessage(webBridge, localAddr, sender, port, msgType,
             local slice = raw:sub((idx - 1) * CHUNK + 1, idx * CHUNK)
             sendMeshPacket(cl, sender, viaTunnel, "DTPF_REPLY", tostring(reqId or ""), idx, total, slice)
         end
+        return true
+    elseif msgType == "DTPF_HANDOFF" then
+        local okU, pkt = pcall(serialization.unserialize, tostring(payload or ""))
+        local acceptedIds, passiveCnt, maintCnt = {}, 0, 0
+        if okU and type(pkt) == "table" and webBridge and webBridge.applyPatch then
+            for _, it in ipairs(pkt.items or {}) do
+                if type(it) == "table" then
+                    if it.kind == "passive" and it.familyId then
+                        local okP = webBridge:applyPatch({
+                            familyId = it.familyId,
+                            enabled = true,
+                            target = tonumber(it.target) or nil,
+                        })
+                        if okP then
+                            acceptedIds[#acceptedIds + 1] = it.ruleId
+                            passiveCnt = passiveCnt + 1
+                        end
+                    elseif it.name and it.name ~= "" then
+                        local okP = webBridge:applyPatch({
+                            maintEnabled = true,
+                            maintRule = {
+                                type = it.type or "item",
+                                name = it.name,
+                                damage = tonumber(it.damage) or 0,
+                                label = it.label or it.name,
+                                target = tonumber(it.target) or 64,
+                                lowThreshold = it.lowThreshold,
+                                batch = tonumber(it.batch) or 1,
+                                mode = it.mode or "auto",
+                            },
+                        })
+                        if okP then
+                            acceptedIds[#acceptedIds + 1] = it.ruleId
+                            maintCnt = maintCnt + 1
+                        end
+                    end
+                end
+            end
+        end
+        local viaTunnel = (port == 0)
+        local ackRaw = serialization.serialize({
+            ok = (#acceptedIds > 0),
+            acceptedIds = acceptedIds,
+            passiveCount = passiveCnt,
+            maintCount = maintCnt,
+            remove = (type(pkt) == "table" and pkt.remove == true),
+        })
+        sendMeshPacket(cl, sender, viaTunnel, "DTPF_HANDOFF_ACK", tostring(reqId or ""), ackRaw)
         return true
     end
     return false

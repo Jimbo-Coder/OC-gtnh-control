@@ -567,6 +567,10 @@ function Scheduler.ensureConfig(cfg)
     cfg.maintEnabled = (cfg.maintEnabled == true)
     cfg.maintFreeCpus = math.max(0, math.floor(tonumber(cfg.maintFreeCpus) or 2))
     cfg.maintPollSec = math.max(5, math.floor(tonumber(cfg.maintPollSec) or 15))
+    if cfg.maintConflictMode ~= "defer" and cfg.maintConflictMode ~= "warn" and cfg.maintConflictMode ~= "ignore" then
+        cfg.maintConflictMode = "defer"
+    end
+    cfg.maintMaxDispatch = math.max(1, math.min(8, math.floor(tonumber(cfg.maintMaxDispatch) or 2)))
     cfg.mainnetAddr = cfg.mainnetAddr or "auto"
     cfg.extLinkMode = (cfg.extLinkMode == "off") and "off" or "auto"
     if type(cfg.maintRules) ~= "table" then
@@ -595,13 +599,19 @@ function Scheduler.ensureConfig(cfg)
                 if rMode ~= "auto" and rMode ~= "always" and rMode ~= "off" then
                     rMode = "auto"
                 end
+                local tgt = math.max(1, math.floor(tonumber(r.target) or 1))
+                local lowThr = tonumber(r.lowThreshold)
+                if lowThr then
+                    lowThr = math.max(1, math.min(tgt, math.floor(lowThr)))
+                end
                 cleanRules[#cleanRules + 1] = {
                     id = r.id or ("rule_" .. tostring(#cleanRules + 1)),
                     type = (r.type == "fluid") and "fluid" or "item",
                     name = r.name,
                     damage = math.max(0, math.floor(tonumber(r.damage) or 0)),
                     label = tostring(r.label or r.name),
-                    target = math.max(1, math.floor(tonumber(r.target) or 1)),
+                    target = tgt,
+                    lowThreshold = lowThr,
                     batch = math.max(1, math.floor(tonumber(r.batch) or 1)),
                     mode = rMode,
                 }
@@ -3751,6 +3761,9 @@ function Scheduler.upsertMaintInput(cfg, spec)
         if spec.target ~= nil and tonumber(spec.target) then
             existing.target = math.max(1, math.floor(tonumber(spec.target)))
         end
+        if spec.lowThreshold ~= nil and tonumber(spec.lowThreshold) then
+            existing.lowThreshold = math.max(1, math.min(existing.target or 1, math.floor(tonumber(spec.lowThreshold))))
+        end
         if spec.batch ~= nil and tonumber(spec.batch) then
             existing.batch = math.max(1, math.floor(tonumber(spec.batch)))
         end
@@ -3758,13 +3771,17 @@ function Scheduler.upsertMaintInput(cfg, spec)
     end
     local defTgt, defBat = Scheduler.defaultMaintTargetBatch(tp, spec.name, spec.amount)
     local mode = (spec.mode == "always" or spec.mode == "off") and spec.mode or "auto"
+    local tgtVal = math.max(1, math.floor(tonumber(spec.target) or defTgt))
+    local lowVal = tonumber(spec.lowThreshold)
+    if lowVal then lowVal = math.max(1, math.min(tgtVal, math.floor(lowVal))) end
     local newRule = {
         id = tp .. ":" .. spec.name .. ":" .. tostring(dmg) .. ":" .. tostring(#cfg.maintRules + 1),
         type = tp,
         name = spec.name,
         damage = dmg,
         label = tostring(fullLbl),
-        target = math.max(1, math.floor(tonumber(spec.target) or defTgt)),
+        target = tgtVal,
+        lowThreshold = lowVal,
         batch = math.max(1, math.floor(tonumber(spec.batch) or defBat)),
         mode = mode,
     }
@@ -3859,15 +3876,27 @@ function Scheduler.stepLevelMaintainer(cfg, runtimeState, ctx, nowSec, opts, pus
     local rules = (cfg and cfg.maintRules) or {}
     local demanded = Scheduler.computeMaintDemandSet(cfg, ctx and ctx.stock)
     local pollSec = math.max(5, tonumber(cfg and cfg.maintPollSec) or 15)
+    local conflictMode = (cfg and cfg.maintConflictMode) or "defer"
+    if conflictMode ~= "defer" and conflictMode ~= "warn" and conflictMode ~= "ignore" then
+        conflictMode = "defer"
+    end
+    local maxDispatch = math.max(1, math.min(8, math.floor(tonumber(cfg and cfg.maintMaxDispatch) or 2)))
     runtimeState._maintTrack = runtimeState._maintTrack or {}
 
     local activeReq = {}
     local ruleDemanded = {}
+    local maintClaimKeys, passiveClaimKeys, seenPassiveKey = {}, {}, {}
+    local passiveInfo = {}
+    local fallbackFluids = (ctx and ctx.stock and ctx.stock.fluids) or {}
+    local fallbackItems = (ctx and ctx.stock and ctx.stock.items) or {}
     for i = 1, #rules do
         local r = rules[i]
         local k = string.format("%s:%s:%d", r.type or "item", r.name or "", tonumber(r.damage) or 0)
         local isDem = (r.mode == "always") or (r.mode == "auto" and demanded[k] == true)
         ruleDemanded[r.id] = isDem
+        if isDem then
+            maintClaimKeys[#maintClaimKeys + 1] = k
+        end
         if r.mode ~= "off" then
             activeReq[#activeReq + 1] = {
                 id = r.id,
@@ -3879,10 +3908,65 @@ function Scheduler.stepLevelMaintainer(cfg, runtimeState, ctx, nowSec, opts, pus
         end
     end
 
+    if cfg then
+        local activeFams = {}
+        if cfg.fallbackEnabled and cfg.fallbackFamilyId then
+            activeFams[cfg.fallbackFamilyId] = true
+        end
+        for _, d in ipairs(cfg.dtpfs or {}) do
+            if d.enabled ~= false and (d.roleOverride == "pinned" or d.roleOverride == "pinned_loop") and d.pinnedFamilyId then
+                activeFams[d.pinnedFamilyId] = true
+            end
+        end
+        for i = 1, #RecipesDB.FAMILIES do
+            local fam = RecipesDB.FAMILIES[i]
+            local rc = cfg.recipes and cfg.recipes[fam.id]
+            if (rc and rc.enabled == true) or activeFams[fam.id] then
+                local po = fam.primaryOutput
+                if po and po.name then
+                    local pk = string.format("%s:%s:%d", po.type or "fluid", po.name, tonumber(po.damage) or 0)
+                    if not seenPassiveKey[pk] then
+                        seenPassiveKey[pk] = true
+                        passiveClaimKeys[#passiveClaimKeys + 1] = pk
+                        local pStk = (po.type == "item")
+                            and (fallbackItems[tostring(po.name) .. ":" .. tostring(tonumber(po.damage) or 0)] or 0)
+                            or (fallbackFluids[po.name] or 0)
+                        passiveInfo[pk] = {
+                            fid = fam.id,
+                            t = po.type or "fluid",
+                            n = po.name,
+                            d = tonumber(po.damage) or 0,
+                            l = fam.name,
+                            tgt = math.floor(tonumber(rc and rc.target) or 0),
+                            stk = math.floor(tonumber(pStk) or 0),
+                            fv = (rc and rc.forever == true) or false,
+                        }
+                    end
+                end
+            end
+        end
+    end
+    runtimeState._dtpfClaims = {
+        maintKeys = maintClaimKeys,
+        passiveKeys = passiveClaimKeys,
+        maintInfo = {},
+        passiveInfo = passiveInfo,
+    }
+
     local sync = runtimeState._lastMaintSync
     local syncAge = nowSec - (runtimeState._lastMaintPollSec or -1000)
     local forceSync = (runtimeState._forceMaintSync == true) or (opts and opts.forceMaintSync == true)
-    if forceSync then runtimeState._forceMaintSync = false end
+    if forceSync then
+        runtimeState._forceMaintSync = false
+        if opts and opts.clearMaintBackoffs then
+            for _, tr in pairs(runtimeState._maintTrack) do
+                if type(tr) == "table" then
+                    tr.failCount = 0
+                    tr.backoffUntil = 0
+                end
+            end
+        end
+    end
 
     local freshSyncOk = false
     local shouldQuery = (not ctx or not ctx.useCache)
@@ -3905,7 +3989,9 @@ function Scheduler.stepLevelMaintainer(cfg, runtimeState, ctx, nowSec, opts, pus
             for fid, why in pairs(sync.failed) do
                 local tr = runtimeState._maintTrack[fid] or {}
                 tr.inFlightUntil = 0
-                tr.backoffUntil = nowSec + 60
+                tr.failCount = (tr.failCount or 0) + 1
+                local waitSec = math.min(300, 30 * (2 ^ math.min(4, tr.failCount - 1)))
+                tr.backoffUntil = nowSec + waitSec
                 tr.lastError = why
                 runtimeState._maintTrack[fid] = tr
             end
@@ -3921,12 +4007,15 @@ function Scheduler.stepLevelMaintainer(cfg, runtimeState, ctx, nowSec, opts, pus
     local busyByKey = sync.busyByKey or {}
     local busyByLabel = sync.busyByLabel or {}
     local syncStocks = sync.stocks or {}
-    local fallbackFluids = (ctx and ctx.stock and ctx.stock.fluids) or {}
-    local fallbackItems = (ctx and ctx.stock and ctx.stock.items) or {}
+
+    local stockPeer = runtimeState.stockPeer
+    local stockPeerOnline = (type(stockPeer) == "table") and ((nowSec - (tonumber(stockPeer.lastSeen) or -1000)) < 60)
+    local stockKeys = (stockPeerOnline and type(stockPeer.keys) == "table") and stockPeer.keys or {}
+    local stockArmed = stockPeerOnline and (stockPeer.armed == true)
 
     local ruleOut = {}
     local lowList = {}
-    local activeCount, craftingCount, lowCount = 0, 0, 0
+    local activeCount, craftingCount, lowCount, overlapCount = 0, 0, 0, 0
 
     for i = 1, #rules do
         local r = rules[i]
@@ -3944,6 +4033,23 @@ function Scheduler.stepLevelMaintainer(cfg, runtimeState, ctx, nowSec, opts, pus
             or ((r.type == "fluid") and (fallbackFluids[r.name] or 0) or (fallbackItems[r.name .. ":" .. tostring(r.damage or 0)] or 0))
         curStock = curStock or 0
 
+        local tgt = math.max(1, tonumber(r.target) or 1)
+        local lowThr = tonumber(r.lowThreshold)
+        if lowThr then
+            lowThr = math.max(1, math.min(tgt, math.floor(lowThr)))
+        else
+            lowThr = tgt
+        end
+
+        local overlapStock = (stockKeys[k] == true)
+        if overlapStock and isDem then
+            overlapCount = overlapCount + 1
+        end
+        local deferredToStock = overlapStock and stockArmed and (conflictMode == "defer")
+        local warnText = (overlapStock and conflictMode ~= "ignore")
+            and (deferredToStock and "Deferred to Stock OC" or "Overlap w/ Stock OC")
+            or nil
+
         local busyCpu = busyByKey[k] or busyByLabel[r.label]
         local inFlight = (not busyCpu) and ((tr.inFlightUntil or 0) > nowSec)
         local inBackoff = ((tr.backoffUntil or 0) > nowSec)
@@ -3958,13 +4064,22 @@ function Scheduler.stepLevelMaintainer(cfg, runtimeState, ctx, nowSec, opts, pus
             if busyCpu then
                 craftingCount = craftingCount + 1
                 tr.inFlightUntil = 0
+                tr.failCount = 0
                 stateStr = "Crafting (" .. tostring(busyCpu) .. ")"
             elseif inFlight then
                 craftingCount = craftingCount + 1
                 stateStr = "Starting..."
+            elseif deferredToStock then
+                stateStr = "Deferred (Stock OC)"
+                if not tr.warnedOverlap and pushEvent then
+                    tr.warnedOverlap = true
+                    runtimeState._maintTrack[r.id] = tr
+                    pushEvent("warn", string.format("Maint overlap: %s deferred to Stock OC", tostring(r.label or r.name)),
+                        { stage = "WARN", minLevel = 1 })
+                end
             elseif not linkOk then
                 stateStr = "No Mainnet Link"
-            elseif curStock < (tonumber(r.target) or 1) then
+            elseif curStock < lowThr then
                 lowCount = lowCount + 1
                 if inBackoff then
                     stateStr = "Wait (" .. tostring(tr.lastError or "Backoff") .. ")"
@@ -3972,12 +4087,21 @@ function Scheduler.stepLevelMaintainer(cfg, runtimeState, ctx, nowSec, opts, pus
                     stateStr = string.format("CPU Reserve (%d/%d free)", freeCpus, freeReserve)
                 else
                     stateStr = cfg.maintEnabled and "Queued" or "Need Batch"
-                    local deficit = ((tonumber(r.target) or 1) - curStock) / math.max(1, tonumber(r.target) or 1)
-                    lowList[#lowList + 1] = { rule = r, deficit = deficit, track = tr }
+                    local deficit = (tgt - curStock) / tgt
+                    lowList[#lowList + 1] = { rule = r, key = k, deficit = deficit, track = tr, outIdx = i }
                 end
             else
                 tr.lastError = nil
+                tr.failCount = 0
                 stateStr = "OK"
+            end
+            if overlapStock and not deferredToStock and conflictMode == "warn" and not tr.warnedOverlap and pushEvent then
+                tr.warnedOverlap = true
+                runtimeState._maintTrack[r.id] = tr
+                pushEvent("warn", string.format("Maint overlap: %s also in Stock OC", tostring(r.label or r.name)),
+                    { stage = "WARN", minLevel = 1 })
+            elseif not overlapStock then
+                tr.warnedOverlap = nil
             end
         end
 
@@ -3985,8 +4109,11 @@ function Scheduler.stepLevelMaintainer(cfg, runtimeState, ctx, nowSec, opts, pus
             id = r.id,
             demanded = isDem,
             stock = curStock,
+            lowThreshold = lowThr,
             stockKnown = linkOk or (curStock > 0),
             craftingCpu = busyCpu,
+            overlapStock = overlapStock,
+            warn = warnText,
             stateStr = stateStr,
         }
     end
@@ -3998,37 +4125,54 @@ function Scheduler.stepLevelMaintainer(cfg, runtimeState, ctx, nowSec, opts, pus
             end
             return tostring(a.rule.id) < tostring(b.rule.id)
         end)
-        local top = lowList[1]
-        local r = top.rule
-        local ack = Hardware.requestMainnetCraft(cfg, r, r.batch)
-        local tr = top.track
-        if ack and ack.ok then
-            tr.inFlightUntil = nowSec + 90
-            tr.lastError = nil
-            runtimeState._maintTrack[r.id] = tr
-            craftingCount = craftingCount + 1
-            for idx = 1, #ruleOut do
-                if ruleOut[idx].id == r.id then
-                    ruleOut[idx].stateStr = (ack.status == "computing") and "Computing..." or "Dispatched"
-                    break
+        local budget = math.min(maxDispatch, math.max(0, freeCpus - freeReserve), #lowList)
+        for dIdx = 1, budget do
+            local top = lowList[dIdx]
+            local r = top.rule
+            local ack = Hardware.requestMainnetCraft(cfg, r, r.batch)
+            local tr = top.track
+            if ack and ack.ok then
+                tr.inFlightUntil = nowSec + 90
+                tr.lastError = nil
+                tr.failCount = 0
+                runtimeState._maintTrack[r.id] = tr
+                craftingCount = craftingCount + 1
+                ruleOut[top.outIdx].stateStr = (ack.status == "computing") and "Computing..." or "Dispatched"
+                if pushEvent then
+                    pushEvent("out", string.format("Maint: +%s %s", fmtCompactLiters(r.batch):gsub("L$", r.type == "fluid" and "L" or ""), r.label),
+                        { stage = "OUT", minLevel = 1 })
                 end
-            end
-            if pushEvent then
-                pushEvent("out", string.format("Maint: +%s %s", fmtCompactLiters(r.batch):gsub("L$", r.type == "fluid" and "L" or ""), r.label),
-                    { stage = "OUT", minLevel = 1 })
-            end
-        else
-            tr.backoffUntil = nowSec + 60
-            tr.lastError = (ack and ack.error) or "Request failed"
-            runtimeState._maintTrack[r.id] = tr
-            for idx = 1, #ruleOut do
-                if ruleOut[idx].id == r.id then
-                    ruleOut[idx].stateStr = "Wait (" .. tostring(tr.lastError) .. ")"
-                    break
-                end
+            else
+                tr.failCount = (tr.failCount or 0) + 1
+                local waitSec = math.min(300, 30 * (2 ^ math.min(4, tr.failCount - 1)))
+                tr.backoffUntil = nowSec + waitSec
+                tr.lastError = (ack and ack.error) or "Request failed"
+                runtimeState._maintTrack[r.id] = tr
+                ruleOut[top.outIdx].stateStr = "Wait (" .. tostring(tr.lastError) .. ")"
             end
         end
     end
+
+    local maintInfo = {}
+    for i = 1, #rules do
+        local r = rules[i]
+        if r and r.mode ~= "off" and type(r.name) == "string" and r.name ~= "" then
+            local k = string.format("%s:%s:%d", r.type or "item", r.name, tonumber(r.damage) or 0)
+            local ro = ruleOut[i] or {}
+            maintInfo[k] = {
+                t = r.type or "item",
+                n = r.name,
+                d = tonumber(r.damage) or 0,
+                l = r.label or r.name,
+                tgt = math.max(1, math.floor(tonumber(r.target) or 1)),
+                bat = math.max(1, math.floor(tonumber(r.batch) or 1)),
+                stk = math.floor(tonumber(ro.stock) or 0),
+                m = r.mode,
+                st = ro.stateStr or "OK",
+            }
+        end
+    end
+    runtimeState._dtpfClaims.maintInfo = maintInfo
 
     runtimeState.maintStatus = {
         enabled = (cfg and cfg.maintEnabled == true),
@@ -4038,6 +4182,10 @@ function Scheduler.stepLevelMaintainer(cfg, runtimeState, ctx, nowSec, opts, pus
         totalCpus = totalCpus,
         freeCpusReserve = freeReserve,
         pollSec = pollSec,
+        conflictMode = conflictMode,
+        maxDispatch = maxDispatch,
+        stockPeerOnline = stockPeerOnline,
+        overlapCount = overlapCount,
         activeCount = activeCount,
         craftingCount = craftingCount,
         lowCount = lowCount,

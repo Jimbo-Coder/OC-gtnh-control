@@ -22,6 +22,7 @@ local MODULES = {
     { key = "ae2",       subdir = "gtnh-ae2-control",       desc = "AE2 Control & Hub (Influx Exporter, Craft Requester & Mesh Gateway)", detect = "/home/exporter.lua" },
     { key = "pump",      subdir = "gtnh-space-pump",        desc = "Space Elevator Pump (Target Fluid Pumping + Optional Mesh)",         detect = "/home/autoPump.lua" },
     { key = "gorge",     subdir = "gtnh-gorge-control",     desc = "Forge of the Gods & Multi-Exoticizer Control (Self-Healing + GUI)",   detect = "/home/gorge/main.lua" },
+    { key = "stock",     subdir = "gtnh-stock-control",     desc = "Mainnet AE2 Stock Maintainer (O(1) Items+Fluids + 160x50 GUI)",       detect = "/home/stock/main.lua" },
 }
 
 local BY_KEY = {}
@@ -240,7 +241,7 @@ local function main(args)
             print(string.format("  [%d] %-10s %s %s", i, m.key, tag, m.desc))
         end
         print("  [u] update     Update all installed modules on this computer")
-        io.write("Select module (1-5 / name / u): ")
+        io.write("Select module (1-6 / name / u): ")
         if io.flush then pcall(io.flush) end
         local line = io.read and io.read() or ""
         line = tostring(line or ""):match("^%s*(.-)%s*$")

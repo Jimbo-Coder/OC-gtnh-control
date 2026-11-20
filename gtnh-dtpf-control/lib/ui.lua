@@ -5451,6 +5451,14 @@ function UI:renderMaintModal()
         self:save("Maintainer Keep Free CPUs -> " .. tostring(self.cfg.maintFreeCpus))
     end) + 1
 
+    local cMode = self.cfg.maintConflictMode or "defer"
+    local cLbl = (cMode == "defer" and "[Stock:Defer]") or (cMode == "warn" and "[Stock:Warn ]") or "[Stock:Ign  ]"
+    bx = self:drawButton(bx, my + 1, cLbl, cMode == "defer" and COLORS.cyan or (cMode == "warn" and COLORS.yellow or COLORS.muted), COLORS.btnBg, function()
+        local nxt = (cMode == "defer" and "warn") or (cMode == "warn" and "ignore") or "defer"
+        self.cfg.maintConflictMode = nxt
+        self:save("Maintainer Stock Overlap Mode -> " .. nxt)
+    end) + 1
+
     local filtAct = (self.maintFilterActive ~= false)
     bx = self:drawButton(bx, my + 1, filtAct and "[Show:Active]" or "[Show:All   ]",
         filtAct and COLORS.cyan or COLORS.fg, COLORS.btnBg, function()
@@ -5468,9 +5476,12 @@ function UI:renderMaintModal()
         self.maintModalActive = false
     end)
 
-    local sub = string.format("Active: %d · Low: %d · Crafting: %d · Free CPUs: %d/%d (> %d reserve) | Tip: Click recipe inputs on Tab 3 to toggle maintenance",
-        mSt.activeCount or 0, mSt.lowCount or 0, mSt.craftingCount or 0, mSt.freeCpus or 0, mSt.totalCpus or 0, freeRes)
-    self:drawText(mx + 2, my + 2, padOrTrunc(sub, mw - 4), COLORS.muted, COLORS.headerBg)
+    local peerInfo = mSt.stockPeerOnline
+        and string.format("StockOC:ON (Overlap:%d)", mSt.overlapCount or 0)
+        or "StockOC:--"
+    local sub = string.format("Active: %d · Low: %d · Crafting: %d · Free CPUs: %d/%d (> %d res) · %s | Tip: Tab 3 inputs toggle rules",
+        mSt.activeCount or 0, mSt.lowCount or 0, mSt.craftingCount or 0, mSt.freeCpus or 0, mSt.totalCpus or 0, freeRes, peerInfo)
+    self:drawText(mx + 2, my + 2, padOrTrunc(sub, mw - 4), (mSt.overlapCount or 0) > 0 and COLORS.yellow or COLORS.muted, COLORS.headerBg)
 
     local hdrY = my + 4
     self:fillRect(mx + 1, hdrY, mw - 2, 1, " ", COLORS.panelBg)
@@ -5533,9 +5544,13 @@ function UI:renderMaintModal()
             self:drawText(mx + 97, y, padOrTrunc(demTxt, 10), demCol, rBg)
 
             local sStr = tostring(sr.stateStr or (mMode == "off" and "Off" or "Idle"))
+            if sr.warn and not sStr:find("Stock", 1, true) then
+                sStr = sStr .. " (" .. tostring(sr.warn) .. ")"
+            end
             local sCol = COLORS.muted
             if sStr == "OK" then sCol = COLORS.green
             elseif sStr:find("Crafting", 1, true) or sStr:find("Starting", 1, true) or sStr:find("Dispatch", 1, true) then sCol = COLORS.cyan
+            elseif sStr:find("Deferred", 1, true) or sStr:find("Overlap", 1, true) then sCol = COLORS.purple
             elseif sStr:find("Wait", 1, true) or sStr:find("No ", 1, true) or sStr:find("CPU", 1, true) then sCol = COLORS.yellow
             end
             self:drawText(mx + 109, y, padOrTrunc(sStr, (mx + mw - 6) - (mx + 109)), sCol, rBg)

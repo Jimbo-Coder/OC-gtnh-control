@@ -396,12 +396,15 @@ function WebBridge:buildSnapshot()
             damage = r.damage or 0,
             label = r.label or r.name,
             target = r.target or 1,
+            lowThreshold = tonumber(r.lowThreshold),
             batch = r.batch or 1,
             mode = r.mode or "auto",
             demanded = (sr.demanded == true),
             stock = sr.stock or 0,
             stockKnown = (sr.stockKnown == true),
             craftingCpu = sr.craftingCpu,
+            overlapStock = (sr.overlapStock == true),
+            warn = sr.warn,
             stateStr = sr.stateStr or (r.mode == "off" and "Off" or "Idle"),
         }
     end
@@ -413,6 +416,10 @@ function WebBridge:buildSnapshot()
         totalCpus = rawMaint.totalCpus or 0,
         freeCpusReserve = rawMaint.freeCpusReserve or tonumber(cfg.maintFreeCpus) or 2,
         pollSec = rawMaint.pollSec or tonumber(cfg.maintPollSec) or 15,
+        conflictMode = rawMaint.conflictMode or cfg.maintConflictMode or "defer",
+        maxDispatch = rawMaint.maxDispatch or tonumber(cfg.maintMaxDispatch) or 2,
+        stockPeerOnline = (rawMaint.stockPeerOnline == true),
+        overlapCount = rawMaint.overlapCount or 0,
         activeCount = rawMaint.activeCount or 0,
         craftingCount = rawMaint.craftingCount or 0,
         lowCount = rawMaint.lowCount or 0,
@@ -447,6 +454,8 @@ function WebBridge:buildSnapshot()
             maintEnabled = (cfg.maintEnabled == true),
             maintFreeCpus = tonumber(cfg.maintFreeCpus) or 2,
             maintPollSec = tonumber(cfg.maintPollSec) or 15,
+            maintConflictMode = cfg.maintConflictMode or "defer",
+            maintMaxDispatch = tonumber(cfg.maintMaxDispatch) or 2,
             mainnetAddr = cfg.mainnetAddr or "auto",
         },
         catalysts = cats,
@@ -543,6 +552,17 @@ function WebBridge:applyPatch(patch)
             changed = true
         end
     end
+    if patch.maintConflictMode == "defer" or patch.maintConflictMode == "warn" or patch.maintConflictMode == "ignore" then
+        cfg.maintConflictMode = patch.maintConflictMode
+        changed = true
+    end
+    if patch.maintMaxDispatch ~= nil then
+        local v = tonumber(patch.maintMaxDispatch)
+        if v then
+            cfg.maintMaxDispatch = math.max(1, math.min(8, math.floor(v)))
+            changed = true
+        end
+    end
     if type(patch.mainnetAddr) == "string" and #patch.mainnetAddr > 0 then
         cfg.mainnetAddr = patch.mainnetAddr
         if self.state then self.state._forceMaintSync = true end
@@ -587,6 +607,10 @@ function WebBridge:applyPatch(patch)
             end
             if rPatch.target ~= nil and tonumber(rPatch.target) then
                 rule.target = math.max(1, math.floor(tonumber(rPatch.target)))
+            end
+            if rPatch.lowThreshold ~= nil then
+                local lt = tonumber(rPatch.lowThreshold)
+                rule.lowThreshold = lt and math.max(1, math.min(rule.target or 1, math.floor(lt))) or nil
             end
             if rPatch.batch ~= nil and tonumber(rPatch.batch) then
                 rule.batch = math.max(1, math.floor(tonumber(rPatch.batch)))

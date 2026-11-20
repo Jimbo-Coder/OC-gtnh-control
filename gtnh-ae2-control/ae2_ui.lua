@@ -14,7 +14,8 @@ local TAB_DTPF      = 4
 local TAB_UNIVERSAL = 5
 local TAB_GORGE     = 6
 local TAB_PUMP      = 7
-local TAB_SETUP     = 8
+local TAB_STOCK     = 8
+local TAB_SETUP     = 9
 
 local COLORS = {
     bg          = 0x0C1117,
@@ -333,7 +334,8 @@ function UI:renderHeader()
         { id = TAB_UNIVERSAL, label = "[5] UNIVERSAL" },
         { id = TAB_GORGE,     label = "[6] GORGE" },
         { id = TAB_PUMP,      label = "[7] PUMP" },
-        { id = TAB_SETUP,     label = "[8] SETUP" },
+        { id = TAB_STOCK,     label = "[8] STOCK" },
+        { id = TAB_SETUP,     label = "[9] SETUP" },
     }
     local tx = 2
     for _, tb in ipairs(tabs) do
@@ -350,12 +352,13 @@ function UI:renderHeader()
     local peers = hub.peers or {}
     local nowU = tonumber(hub.nowUptime) or 0
     local function peerOn(p, win) return p and p.addr ~= nil and (nowU - (p.lastSeen or -1000)) < win end
-    local badgeX = self.w - 42
+    local badgeX = self.w - 50
     for _, pd in ipairs({
         { lbl = "DTPF",  p = peers.dtpf,  win = 60,  tab = TAB_DTPF },
         { lbl = "UNIV",  p = peers.univ,  win = 60,  tab = TAB_UNIVERSAL },
         { lbl = "GORGE", p = peers.gorge, win = 60,  tab = TAB_GORGE },
         { lbl = "PUMP",  p = peers.pump,  win = 180, tab = TAB_PUMP },
+        { lbl = "STK",   p = peers.stock, win = 60,  tab = TAB_STOCK },
     }) do
         local okP = peerOn(pd.p, pd.win)
         badgeX = self:drawButton(badgeX, 2, "[" .. pd.lbl .. (okP and ":ON]" or ":--]"),
@@ -426,6 +429,7 @@ function UI:renderOverviewTab()
         { key = "pump", win = 180 },
         { key = "univ", win = 60 },
         { key = "gorge", win = 60 },
+        { key = "stock", win = 60 },
     }
     for _, pm in ipairs(peerMap) do
         local p = peers[pm.key]
@@ -439,7 +443,7 @@ function UI:renderOverviewTab()
     self:drawText(122, 8, padOrTrunc(string.format("TCP Bridge : %s",
         not self.cfg.enableBridge and "Disabled" or (hub.bridgeConnected and "Connected" or "Connecting")), 35),
         hub.bridgeConnected and COLORS.green or COLORS.muted, COLORS.panelBg)
-    self:drawText(122, 9, padOrTrunc(string.format("Mesh Peers : %d / 4 online (p:%d)",
+    self:drawText(122, 9, padOrTrunc(string.format("Mesh Peers : %d / 5 online (p:%d)",
         peerOnline, tonumber(self.cfg.meshPort) or 4205), 35),
         peerOnline > 0 and COLORS.cyan or COLORS.muted, COLORS.panelBg)
     self:drawText(122, 11, padOrTrunc(string.format("Last Scan  : %.2fs | AE Items:%d",
@@ -634,8 +638,8 @@ end
 function UI:renderMeshTab()
     local peers = (self.hub and self.hub.peers) or {}
 
-    -- Card 1: DTPF Fleet (x=2, y=5, w=77, h=21)
-    self:renderMeshPeerCard(2, 5, 77, 21, "DTPF FLEET CONTROLLER", "dtpf", peers.dtpf, 60, TAB_DTPF, function(st, bx, by, bw)
+    -- Card 1: DTPF Fleet (x=2, y=5, w=77, h=14)
+    self:renderMeshPeerCard(2, 5, 77, 14, "DTPF FLEET CONTROLLER", "dtpf", peers.dtpf, 60, TAB_DTPF, function(st, bx, by, bw)
         local units = type(st.units) == "table" and st.units or {}
         local onN, actN = 0, 0
         for _, u in ipairs(units) do
@@ -644,13 +648,13 @@ function UI:renderMeshTab()
                 if u.active then actN = actN + 1 end
             end
         end
-        self:drawText(bx, by, string.format("Armed: %-5s  Units: %d online / %d active (%d total)  OD: %s",
-            tostring(st.armed == true), onN, actN, #units, st.odActive and "YES" or "NO"),
+        self:drawText(bx, by, padOrTrunc(string.format("Armed: %-5s  Units: %d on / %d act (%d)  OD: %s",
+            tostring(st.armed == true), onN, actN, #units, st.odActive and "YES" or "NO"), bw),
             st.armed and COLORS.green or COLORS.yellow, COLORS.panelBg)
-        self:drawText(bx, by + 2, padOrTrunc(string.format("Total EU/t: %s   Direct: %s   Cat: %s   DTR: %s",
+        self:drawText(bx, by + 1, padOrTrunc(string.format("EU/t: %s  Dir: %s  Cat: %s  DTR: %s",
             UI.formatNumber(st.totalEut or 0), UI.formatNumber(st.directEut or 0),
             UI.formatNumber(st.catEut or 0), UI.formatNumber(st.dtrStock or 0)), bw), COLORS.cyan, COLORS.panelBg)
-        for i = 1, math.min(10, #units) do
+        for i = 1, math.min(5, #units) do
             local u = units[i]
             if type(u) == "table" then
                 local line = string.format("  %-12s %-7s Disc:%4.1f%% Heat:%s %s",
@@ -658,13 +662,13 @@ function UI:renderMeshTab()
                     u.active and "ACTIVE" or (u.online and "IDLE" or "OFF"),
                     tonumber(u.discountPct) or 0, UI.formatNumber(u.coilHeat or 0),
                     padOrTrunc(u.familyId or "idle", 18))
-                self:drawText(bx, by + 3 + i, padOrTrunc(line, bw), u.active and COLORS.green or COLORS.fg, COLORS.panelBg)
+                self:drawText(bx, by + 2 + i, padOrTrunc(line, bw), u.active and COLORS.green or COLORS.fg, COLORS.panelBg)
             end
         end
     end)
 
-    -- Card 2: Space Pump Array (x=81, y=5, w=78, h=21)
-    self:renderMeshPeerCard(81, 5, 78, 21, "SPACE PUMP ARRAY", "pump", peers.pump, 180, TAB_PUMP, function(st, bx, by, bw)
+    -- Card 2: Space Pump Array (x=81, y=5, w=78, h=14)
+    self:renderMeshPeerCard(81, 5, 78, 14, "SPACE PUMP ARRAY", "pump", peers.pump, 180, TAB_PUMP, function(st, bx, by, bw)
         local pumps = type(st.pumps) == "table" and st.pumps or {}
         local actN, multSum = 0, 0
         for _, p in ipairs(pumps) do
@@ -684,60 +688,89 @@ function UI:renderMeshTab()
             end
         end
         table.sort(flRows, function(a, b) return a.label < b.label end)
-        self:drawText(bx, by, string.format("Paused: %-5s  Pumps: %d/%d active  Total Mult: %d",
-            tostring(st.paused == true), actN, #pumps, multSum),
+        self:drawText(bx, by, padOrTrunc(string.format("Paused: %-5s  Pumps: %d/%d active  Total Mult: %d",
+            tostring(st.paused == true), actN, #pumps, multSum), bw),
             st.paused and COLORS.yellow or COLORS.green, COLORS.panelBg)
-        self:drawText(bx, by + 2, string.format("Managed Fluids: %d OK  |  %d Low (thresh %.0f%%)",
-            flOk, flLow, thresh * 100), flLow > 0 and COLORS.yellow or COLORS.cyan, COLORS.panelBg)
-        for i = 1, math.min(10, #flRows) do
+        self:drawText(bx, by + 1, padOrTrunc(string.format("Managed Fluids: %d OK  |  %d Low (thresh %.0f%%)",
+            flOk, flLow, thresh * 100), bw), flLow > 0 and COLORS.yellow or COLORS.cyan, COLORS.panelBg)
+        for i = 1, math.min(5, #flRows) do
             local r = flRows[i]
-            self:drawText(bx, by + 3 + i, padOrTrunc(string.format("  %-24s %s / %s",
+            self:drawText(bx, by + 2 + i, padOrTrunc(string.format("  %-24s %s / %s",
                 r.label, UI.formatNumber(r.eff), UI.formatNumber(r.target)), bw),
                 r.ok and COLORS.fg or COLORS.yellow, COLORS.panelBg)
         end
     end)
 
-    -- Card 3: Universal RS Controller (x=2, y=27, w=77, h=21)
-    self:renderMeshPeerCard(2, 27, 77, 21, "UNIVERSAL RS CONTROLLER", "univ", peers.univ, 60, TAB_UNIVERSAL, function(st, bx, by, bw)
-        self:drawText(bx, by, string.format("Armed: %-5s  Active Pools: %d  Queued: %d  Stalled: %d",
+    -- Card 3: Universal RS Controller (x=2, y=20, w=77, h=14)
+    self:renderMeshPeerCard(2, 20, 77, 14, "UNIVERSAL RS CONTROLLER", "univ", peers.univ, 60, TAB_UNIVERSAL, function(st, bx, by, bw)
+        self:drawText(bx, by, padOrTrunc(string.format("Armed: %-5s  Active Pools: %d  Queued: %d  Stalled: %d",
             tostring(st.armed == true), tonumber(st.activePools) or 0,
-            tonumber(st.queuedSlices) or 0, tonumber(st.stalledCount) or 0),
+            tonumber(st.queuedSlices) or 0, tonumber(st.stalledCount) or 0), bw),
             (tonumber(st.stalledCount) or 0) > 0 and COLORS.yellow or (st.armed and COLORS.green or COLORS.muted), COLORS.panelBg)
-        self:drawText(bx, by + 2, string.format("Completed Batches: %d   Preemptions: %d",
-            tonumber(st.completedBatches) or 0, tonumber(st.preemptions) or 0), COLORS.cyan, COLORS.panelBg)
+        self:drawText(bx, by + 1, padOrTrunc(string.format("Completed Batches: %d   Preemptions: %d",
+            tonumber(st.completedBatches) or 0, tonumber(st.preemptions) or 0), bw), COLORS.cyan, COLORS.panelBg)
         local pools = type(st.pools) == "table" and st.pools or {}
-        for i = 1, math.min(10, #pools) do
+        for i = 1, math.min(5, #pools) do
             local p = pools[i]
             if type(p) == "table" then
                 local line = string.format("  Pool %-14s %-8s %s",
                     padOrTrunc(p.name or ("#" .. i), 14), tostring(p.phase or "IDLE"),
                     padOrTrunc(p.activeLabel or p.activeItem or "-", 28))
-                self:drawText(bx, by + 3 + i, padOrTrunc(line, bw), COLORS.fg, COLORS.panelBg)
+                self:drawText(bx, by + 2 + i, padOrTrunc(line, bw), COLORS.fg, COLORS.panelBg)
             end
         end
     end)
 
-    -- Card 4: Gorge & Exoticizer Rack (x=81, y=27, w=78, h=21)
-    self:renderMeshPeerCard(81, 27, 78, 21, "GORGE & EXOTICIZER RACK", "gorge", peers.gorge, 60, TAB_GORGE, function(st, bx, by, bw)
+    -- Card 4: Gorge & Exoticizer Rack (x=81, y=20, w=78, h=14)
+    self:renderMeshPeerCard(81, 20, 78, 14, "GORGE & EXOTICIZER RACK", "gorge", peers.gorge, 60, TAB_GORGE, function(st, bx, by, bw)
         local gf = type(st.godforge) == "table" and st.godforge or {}
-        self:drawText(bx, by, string.format("Armed: %-5s  Active Ex: %d  Cycles: %d  Errors: %d",
+        self:drawText(bx, by, padOrTrunc(string.format("Armed: %-5s  Active Ex: %d  Cycles: %d  Errors: %d",
             tostring(st.armed == true), tonumber(st.activeCount) or 0,
-            tonumber(st.completedCycles) or 0, tonumber(st.errorCount) or 0),
+            tonumber(st.completedCycles) or 0, tonumber(st.errorCount) or 0), bw),
             (tonumber(st.errorCount) or 0) > 0 and COLORS.red or (st.armed and COLORS.green or COLORS.muted), COLORS.panelBg)
-        self:drawText(bx, by + 2, padOrTrunc(string.format("Godforge: %s  Rings:%s  Conn:%s  LSC:%s",
+        self:drawText(bx, by + 1, padOrTrunc(string.format("Godforge: %s  Rings:%s  Conn:%s  LSC:%s",
             gf.active and "ACTIVE" or (gf.workAllowed == false and "HOLD" or "IDLE"),
             tostring(gf.rings or "-"), tostring(gf.connected or "-"),
             st.lscPct and string.format("%.1f%%", st.lscPct) or "--"), bw), COLORS.cyan, COLORS.panelBg)
         local exs = type(st.exoticizers) == "table" and st.exoticizers or {}
-        for i = 1, math.min(10, #exs) do
+        for i = 1, math.min(5, #exs) do
             local ex = exs[i]
             if type(ex) == "table" then
                 local line = string.format("  %-14s %-9s %-10s Cycles:%d %s",
                     padOrTrunc(ex.name or ("Ex#" .. i), 14), tostring(ex.activeMode or ex.mode or "?"),
                     tostring(ex.phase or "IDLE"), tonumber(ex.cycles) or 0,
                     ex.lastError and ("[" .. ex.lastError .. "]") or "")
-                self:drawText(bx, by + 3 + i, padOrTrunc(line, bw),
+                self:drawText(bx, by + 2 + i, padOrTrunc(line, bw),
                     ex.lastError and COLORS.red or ((ex.phase == "WAIT_END") and COLORS.green or COLORS.fg), COLORS.panelBg)
+            end
+        end
+    end)
+
+    -- Card 5: Mainnet Stock Maintainer (x=2, y=35, w=157, h=13)
+    self:renderMeshPeerCard(2, 35, 157, 13, "MAINNET STOCK MAINTAINER", "stock", peers.stock, 60, TAB_STOCK, function(st, bx, by, bw)
+        local pf = type(st.perf) == "table" and st.perf or {}
+        self:drawText(bx, by, padOrTrunc(string.format(
+            "Armed: %-5s  Rules: %d/%d enabled  OK:%d  Low:%d  Craft:%d  Err:%d  Warn:%d  Free CPUs: %d/%d",
+            tostring(st.armed == true), tonumber(st.enabledRules) or 0, tonumber(st.totalRules) or 0,
+            tonumber(st.okCount) or 0, tonumber(st.lowCount) or 0, tonumber(st.craftingCount) or 0,
+            tonumber(st.errorCount) or 0, tonumber(st.warnCount) or 0,
+            tonumber(st.freeCpus) or 0, tonumber(st.totalCpus) or 0), bw),
+            (tonumber(st.errorCount) or 0) > 0 and COLORS.red or (st.armed and COLORS.green or COLORS.yellow), COLORS.panelBg)
+        self:drawText(bx, by + 1, padOrTrunc(string.format(
+            "Cycle: %.2fms  AE Calls/s: %.2f  Equiv Physical Blocks Saved: %d  Free RAM: %.0f KB",
+            tonumber(pf.lastCycleMs) or 0, tonumber(pf.aeCallsPerSec) or 0,
+            tonumber(pf.equivBlocksSaved) or 0, tonumber(pf.freeMemKB) or 0), bw), COLORS.cyan, COLORS.panelBg)
+        local preview = type(st.rulesPreview) == "table" and st.rulesPreview or {}
+        for i = 1, math.min(4, #preview) do
+            local r = preview[i]
+            if type(r) == "table" then
+                local stTag = tostring(r.state or "LOW")
+                local col = (stTag == "ERR") and COLORS.red or ((stTag == "OK") and COLORS.green or ((stTag == "CRAFT") and COLORS.cyan or COLORS.yellow))
+                local line = string.format("  %-32s [%-5s] %12s / %-12s %-5s %s",
+                    padOrTrunc(r.label or "?", 32), tostring(r.type or "item"),
+                    UI.formatNumber(r.stock or 0), UI.formatNumber(r.target or 0),
+                    stTag, tostring(r.warn or r.err or ""))
+                self:drawText(bx, by + 2 + i, padOrTrunc(line, bw), col, COLORS.panelBg)
             end
         end
     end)
@@ -1034,6 +1067,70 @@ function UI:renderPumpTab()
     end
 end
 
+function UI:renderStockTab()
+    local peer = self.hub and self.hub.peers and self.hub.peers.stock
+    local st = peer and peer.status or nil
+    if type(st) ~= "table" then
+        self:renderPeerOfflineGuide("MAINNET STOCK MAINTAINER", "stock", peer, 60)
+        return
+    end
+    local now = tonumber(self.hub.nowUptime) or 0
+    local fresh = peer.addr and (now - (peer.lastSeen or -1000)) < 60
+    local pf = type(st.perf) == "table" and st.perf or {}
+    local rows = type(st.rulesPreview) == "table" and st.rulesPreview or {}
+
+    self:drawFrame(2, 5, 157, 7, COLORS.border, COLORS.panelBg, "round")
+    self:drawText(4, 5, " ◈ MAINNET STOCK MAINTAINER ", COLORS.accent, COLORS.panelBg)
+    self:drawText(138, 5, fresh and (" ONLINE (" .. UI.formatAge(now, peer.lastSeen) .. ") ") or " STALE ", fresh and COLORS.green or COLORS.yellow, COLORS.panelBg)
+    self:drawText(4, 7, padOrTrunc(string.format(
+        "Armed:%-5s  Rules:%d/%d enabled (OK:%d Low:%d Craft:%d Err:%d Warn:%d)  Free CPUs:%d/%d  Cycle:%.2fms  AE/s:%.2f  Saved:%d blk  RAM:%.0fKB",
+        tostring(st.armed == true), tonumber(st.enabledRules) or 0, tonumber(st.totalRules) or 0,
+        tonumber(st.okCount) or 0, tonumber(st.lowCount) or 0, tonumber(st.craftingCount) or 0,
+        tonumber(st.errorCount) or 0, tonumber(st.warnCount) or 0,
+        tonumber(st.freeCpus) or 0, tonumber(st.totalCpus) or 0,
+        tonumber(pf.lastCycleMs) or 0, tonumber(pf.aeCallsPerSec) or 0,
+        tonumber(pf.equivBlocksSaved) or 0, tonumber(pf.freeMemKB) or 0), 152), COLORS.fg, COLORS.panelBg)
+
+    local bx = 4
+    bx = self:drawOrchestratorBtn(bx, 9, "[Arm]", COLORS.fg, COLORS.darkGreen, "stock", "resume")
+    bx = self:drawOrchestratorBtn(bx, 9, "[Pause]", COLORS.yellow, COLORS.amberBg, "stock", "pause")
+    bx = self:drawOrchestratorBtn(bx, 9, "[Poll Now]", COLORS.cyan, COLORS.btnBg, "stock", "poll")
+    bx = self:drawOrchestratorBtn(bx, 9, "[Retry Errors]", COLORS.purple, COLORS.btnBg, "stock", "retry_errors")
+    bx = self:drawOrchestratorBtn(bx, 9, "[Import Phys]", COLORS.fg, COLORS.btnBg, "stock", "import_maintainers")
+    self:drawOrchestratorBtn(bx, 9, "[Benchmark]", COLORS.cyan, COLORS.btnBg, "stock", "run_bench")
+
+    self:drawFrame(2, 13, 157, 35, COLORS.border, COLORS.panelBg, "round")
+    self:drawText(4, 13, string.format(" ◈ TOP PRIORITY & ACTIVE RULES (%d) ", #rows), COLORS.accent, COLORS.panelBg)
+    self:drawText(4, 15, padOrTrunc(string.format("%-34s %-6s %-14s %-14s %-8s %-9s %-16s %s",
+        "Rule Label", "Type", "In Stock", "Target", "Fill %", "State", "CPU", "Warning / Error"), 152), COLORS.muted, COLORS.panelBg)
+    self:drawText(4, 16, string.rep("─", 152), COLORS.border, COLORS.panelBg)
+
+    local maxShow = 15
+    local maxScroll = math.max(0, #rows - maxShow)
+    self.tabScroll = math.max(0, math.min(maxScroll, self.tabScroll or 0))
+    for i = 1, math.min(maxShow, #rows - self.tabScroll) do
+        local r = rows[self.tabScroll + i]
+        if type(r) == "table" then
+            local ry = 16 + i * 2
+            local bg = (i % 2 == 0) and COLORS.rowAltBg or COLORS.panelBg
+            self:fillRect(3, ry, 155, 1, " ", COLORS.fg, bg)
+            local tgt = math.max(1, tonumber(r.target) or 1)
+            local stk = tonumber(r.stock) or 0
+            local pct = math.min(999.9, (stk / tgt) * 100.0)
+            local unit = (r.type == "fluid") and "L" or ""
+            local stTag = tostring(r.state or "LOW")
+            local stCol = (stTag == "ERR") and COLORS.red or ((stTag == "OK") and COLORS.green or ((stTag == "CRAFT") and COLORS.cyan or COLORS.yellow))
+            local note = tostring(r.warn or r.err or "")
+            self:drawText(4, ry, string.format("%-34s %-6s %-14s %-14s %6.1f%%  %-9s %-16s ",
+                padOrTrunc(r.label or "?", 34), tostring(r.type or "item"),
+                UI.formatNumber(stk, unit), UI.formatNumber(tgt, unit),
+                pct, stTag, padOrTrunc(r.cpu or "-", 16)), stCol, bg)
+            self:drawText(109, ry, padOrTrunc(note, 45),
+                (r.err and COLORS.red) or (r.warn and COLORS.purple or COLORS.muted), bg)
+        end
+    end
+end
+
 function UI:renderSetupTab()
     -- Left Card: Live Exporter Feature Toggles
     self:drawFrame(2, 5, 77, 43, COLORS.border, COLORS.panelBg, "round")
@@ -1182,13 +1279,15 @@ function UI:render()
         self:renderGorgeTab()
     elseif self.tab == TAB_PUMP then
         self:renderPumpTab()
+    elseif self.tab == TAB_STOCK then
+        self:renderStockTab()
     elseif self.tab == TAB_SETUP then
         self:renderSetupTab()
     end
 
     self:drawText(1, self.h - 1, string.rep("─", self.w), COLORS.border, COLORS.bg)
     self:drawText(2, self.h, padOrTrunc(self.statusMsg or "", self.w - 60), COLORS.fg, COLORS.bg)
-    self:drawText(self.w - 57, self.h, "Keys: 1-8 Tabs | S Scan | P Ping | L Log | R Reset | Q Quit", COLORS.muted, COLORS.bg)
+    self:drawText(self.w - 57, self.h, "Keys: 1-9 Tabs | S Scan | P Ping | L Log | R Reset | Q Quit", COLORS.muted, COLORS.bg)
 
     self:renderLogModal()
     self:flush()
@@ -1227,7 +1326,7 @@ function UI:handleScroll(dir)
         self.logScroll = math.max(0, (self.logScroll or 0) + delta)
     elseif self.tab == TAB_CPUS then
         self.cpuScroll = math.max(0, (self.cpuScroll or 0) + delta)
-    elseif self.tab >= TAB_DTPF and self.tab <= TAB_PUMP then
+    elseif self.tab >= TAB_DTPF and self.tab <= TAB_STOCK then
         self.tabScroll = math.max(0, (self.tabScroll or 0) + delta)
     end
     self:render()
@@ -1236,12 +1335,12 @@ end
 function UI:handleKeyDown(char, code)
     if char == 113 or char == 81 then -- 'q'/'Q'
         self.running = false
-    elseif char >= 49 and char <= 56 then -- '1'..'8'
+    elseif char >= 49 and char <= 57 then -- '1'..'9'
         self.tab = char - 48
         self.tabScroll = 0
         self.confirmCancelCpu = nil
-    elseif code == 15 or char == 9 then -- Tab cycles 1..8
-        self.tab = (self.tab % 8) + 1
+    elseif code == 15 or char == 9 then -- Tab cycles 1..9
+        self.tab = (self.tab % 9) + 1
         self.tabScroll = 0
         self.confirmCancelCpu = nil
     elseif char == 108 or char == 76 then -- 'l'/'L'

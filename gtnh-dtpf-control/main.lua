@@ -292,6 +292,8 @@ local function saveConfig(cfg)
     addKV("  ", "maintEnabled", (cfg.maintEnabled == true))
     addKV("  ", "maintFreeCpus", tonumber(cfg.maintFreeCpus) or 2)
     addKV("  ", "maintPollSec", tonumber(cfg.maintPollSec) or 15)
+    addKV("  ", "maintConflictMode", cfg.maintConflictMode or "defer")
+    addKV("  ", "maintMaxDispatch", tonumber(cfg.maintMaxDispatch) or 2)
     addKV("  ", "mainnetAddr", cfg.mainnetAddr or "auto")
     addKV("  ", "uiAnimations", (cfg.uiAnimations ~= false))
     addKV("  ", "coilDisplayMode", (cfg.coilDisplayMode == "temp") and "temp" or "name")
@@ -340,14 +342,18 @@ local function saveConfig(cfg)
         add("  maintRules = {")
         for _, r in ipairs(cfg.maintRules) do
             if type(r) == "table" and type(r.name) == "string" then
+                local lowPart = (tonumber(r.lowThreshold) ~= nil)
+                    and (", lowThreshold = " .. tostring(math.floor(tonumber(r.lowThreshold))))
+                    or ""
                 add(string.format(
-                    "    { id = %q, type = %q, name = %q, damage = %d, label = %q, target = %d, batch = %d, mode = %q },",
+                    "    { id = %q, type = %q, name = %q, damage = %d, label = %q, target = %d%s, batch = %d, mode = %q },",
                     tostring(r.id or r.name),
                     (r.type == "fluid") and "fluid" or "item",
                     tostring(r.name),
                     math.floor(tonumber(r.damage) or 0),
                     tostring(r.label or r.name),
                     math.floor(tonumber(r.target) or 0),
+                    lowPart,
                     math.floor(tonumber(r.batch) or 1000),
                     tostring(r.mode or "auto")
                 ))
@@ -685,21 +691,43 @@ local function runGUI()
         flushPendingSave()
     end
 
-    local okLoop, errLoop = xpcall(runLoop, debug.traceback)
-    webBridge:close()
-    flushPendingSave()
-    if component.isAvailable("gpu") then
-        component.gpu.setBackground(0x000000)
-        component.gpu.setForeground(0xFFFFFF)
-    end
-    term.clear()
-    if okLoop then
-        print("DTPF Automation Controller stopped cleanly.")
-    else
-        io.stderr:write("DTPF Automation Controller error:\n" .. tostring(errLoop) .. "\n")
-    end
-    if runtimeState._pendingReboot and computer.shutdown then
-        pcall(computer.shutdown, true)
+    local consecutiveFaults = 0
+    while true do
+        local okLoop, errLoop = xpcall(runLoop, debug.traceback)
+        flushPendingSave()
+        if okLoop or runtimeState._pendingReboot then
+            webBridge:close()
+            if component.isAvailable("gpu") then
+                component.gpu.setBackground(0x000000)
+                component.gpu.setForeground(0xFFFFFF)
+            end
+            term.clear()
+            if okLoop then
+                print("DTPF Automation Controller stopped cleanly.")
+            else
+                io.stderr:write("DTPF Automation Controller error:\n" .. tostring(errLoop) .. "\n")
+            end
+            if runtimeState._pendingReboot and computer.shutdown then
+                pcall(computer.shutdown, true)
+            end
+            break
+        end
+        consecutiveFaults = consecutiveFaults + 1
+        io.stderr:write(string.format("DTPF Automation Controller fault #%d (restarting cleanly):\n%s\n",
+            consecutiveFaults, tostring(errLoop)))
+        local ev = event.pull(math.min(15, 2 + consecutiveFaults * 2), "interrupted")
+        if ev == "interrupted" then
+            webBridge:close()
+            if component.isAvailable("gpu") then
+                component.gpu.setBackground(0x000000)
+                component.gpu.setForeground(0xFFFFFF)
+            end
+            term.clear()
+            print("DTPF Automation Controller interrupted during recovery.")
+            break
+        end
+        ui.running = true
+        if webBridge and webBridge.ensureStarted then pcall(webBridge.ensureStarted, webBridge) end
     end
 end
 

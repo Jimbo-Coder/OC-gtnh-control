@@ -478,8 +478,11 @@ local bridgeIn = {
     '{"id":10,"op":"ping"}\n',
     '{"id":11,"op":"univ_action","action":"pause"}\n',
     '{"id":12,"op":"gorge_action","action":"set_mode","exoticizerId":1,"mode":"magmatter"}\n',
+    '{"id":13,"op":"stock_action","action":"retry_errors"}\n',
+    '{"id":14,"op":"mesh_recover","role":"dtpf"}\n',
 }
 local openCalls, strCalls, sendCalls = 0, 0, 0
+local o1ItemCalls, o1FluidCalls, legacyItemsCalls, legacyFluidsCalls = 0, 0, 0, 0
 local sentPackets = {}
 local meshEventQueue = {}
 local pullStep = 0
@@ -516,15 +519,23 @@ local function enqueueReply(addr, port, msgType, p1)
         meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", addr or "univ-addr", port, 0, "UNIV_REPLY", p1, serialization.serialize({ ok = true, armed = false }) }
     elseif msgType == "GORGE_CMD" then
         meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", addr or "gorge-addr", port, 0, "GORGE_REPLY", p1, serialization.serialize({ ok = true, mode = "magmatter" }) }
+    elseif msgType == "STOCK_CMD" then
+        local full = serialization.serialize({ ok = true, armed = true, retried = true })
+        local mid = math.floor(#full / 2)
+        meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", addr or "stock-addr", port, 0, "STOCK_REPLY", p1, 1, 2, full:sub(1, mid) }
+        meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", addr or "stock-addr", port, 0, "STOCK_REPLY", p1, 2, 2, full:sub(mid + 1) }
     end
 end
 
+local wakeMsg, wakeSetCalls = nil, 0
 component._register("mod-1", "modem", {
     isOpen = function() return true end,
     open = function() openCalls = openCalls + 1 end,
     isWireless = function() return true end,
     getStrength = function() return 400 end,
     setStrength = function() strCalls = strCalls + 1 end,
+    getWakeMessage = function() return wakeMsg end,
+    setWakeMessage = function(m) wakeSetCalls = wakeSetCalls + 1; wakeMsg = m; return wakeMsg end,
     broadcast = function(port, msgType, p1, p2)
         sendCalls = sendCalls + 1
         sentPackets[#sentPackets + 1] = { port = port, t = msgType, p1 = p1, p2 = p2 }
@@ -548,6 +559,20 @@ component._register("me-1", "me_controller", {
             { name = "CPU-Beta", storage = 16384, coprocessors = 2, busy = false, cpu = {} },
         }
     end,
+    getItemInNetwork = function(filter)
+        o1ItemCalls = o1ItemCalls + 1
+        if type(filter) == "table" and filter.name == "gregtech:gt.metaitem.01" and tonumber(filter.damage) == 100 then
+            return { name = filter.name, damage = 100, size = 777 }
+        end
+        return nil
+    end,
+    getFluidInNetwork = function(flName)
+        o1FluidCalls = o1FluidCalls + 1
+        if flName == "water" then return { name = "water", amount = 12345 } end
+        return nil
+    end,
+    getItemsInNetwork = function() legacyItemsCalls = legacyItemsCalls + 1; return {} end,
+    getFluidsInNetwork = function() legacyFluidsCalls = legacyFluidsCalls + 1; return {} end,
     getAvgPowerInjection = function() return 4000 end,
     getAvgPowerUsage = function() return 1000 end,
     getMaxStoredPower = function() return 200000 end,
@@ -592,6 +617,22 @@ meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", "pump-addr", 4
     pumps = { { active = true, mult = 8 } },
     fluids = { Helium = { label = "Helium", total = 100000, target = 100000 } },
 }) }
+meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", "stock-addr", 4205, 0, "STOCK_METRICS", serialization.serialize({
+    armed = true, totalRules = 12, enabledRules = 10, okCount = 7, lowCount = 2, craftingCount = 1, errorCount = 0, warnCount = 1,
+    freeCpus = 4, totalCpus = 6,
+    perf = { lastCycleMs = 1.4, aeCallsPerSec = 0.8, equivBlocksSaved = 3, freeMemKB = 1800 },
+}) }
+meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", "stock-addr", 4205, 0, "STOCK_CLAIMS", "claims-from-stock" }
+meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", "dtpf-addr", 4205, 0, "DTPF_CLAIMS", "claims-from-dtpf" }
+meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", "stock-addr", 4205, 0, "DTPF_HANDOFF", "dh-1", "handoff-payload" }
+meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", "dtpf-addr", 4205, 0, "DTPF_HANDOFF_ACK", "dh-1", "ack-payload" }
+meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", "dtpf-addr", 4205, 0, "GTNH_WAKE", "dtpf" }
+meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", "dtpf-addr", 4205, 0, "MESH_MAINT_SYNC", "req-o1", serialization.serialize({
+    items = {
+        { id = "r1", type = "item", name = "gregtech:gt.metaitem.01", damage = 100, hasTag = false },
+        { id = "r2", type = "fluid", name = "water" },
+    },
+}) }
 
 -- Enable bridge in config for Test 2
 __py_write_file("/home/config.lua", __py_read_file("/home/config.lua"):gsub("enableBridge = false", "enableBridge = true"))
@@ -607,7 +648,10 @@ event.pull = function(timeout, filter)
     if timeout == 0 then return nil end
     computer._setUptime(computer.uptime() + (tonumber(timeout) or 0.5))
     pullStep = pullStep + 1
-    if pullStep >= 8 then return "interrupted" end
+    if pullStep == 8 then
+        computer._setUptime(computer.uptime() + 75)
+    end
+    if pullStep >= 10 then return "interrupted" end
     return nil
 end
 
@@ -617,20 +661,56 @@ expChunk("--headless")
 -- Assert 0 redundant open() / setStrength() calls because isOpen=true & getStrength=400!
 assertEq(openCalls, 0, "Zero redundant modem.open() calls when already open")
 assertEq(strCalls, 0, "Zero redundant modem.setStrength() calls when >= 400")
+assertEq(wakeMsg, "GTNH_WAKE", "Modem configured with GTNH_WAKE wake message")
+assertEq(wakeSetCalls, 1, "Zero redundant setWakeMessage() calls")
 assert(sendCalls >= 4, "Sent Mesh ACKs/RPCs without re-opening modem")
+assert(o1ItemCalls >= 1 and o1FluidCalls >= 1, "inspectMainnetForMaint must use O(1) getItemInNetwork/getFluidInNetwork")
+assertEq(legacyItemsCalls, 0, "inspectMainnetForMaint must NOT scan getItemsInNetwork when O(1) exists")
+assertEq(legacyFluidsCalls, 0, "inspectMainnetForMaint must NOT scan getFluidsInNetwork when O(1) exists")
+
+local sawStockToDtpf, sawDtpfToStock, sawHandoffToDtpf, sawHandoffAckToStock, sawWakeHelloReply, sawWatchdogWake, sawMaintAckO1 = false, false, false, false, false, false, false
+for _, pkt in ipairs(sentPackets) do
+    if pkt.addr == "dtpf-addr" and pkt.t == "STOCK_CLAIMS" and pkt.p1 == "claims-from-stock" then sawStockToDtpf = true end
+    if pkt.addr == "stock-addr" and pkt.t == "DTPF_CLAIMS" and pkt.p1 == "claims-from-dtpf" then sawDtpfToStock = true end
+    if pkt.addr == "dtpf-addr" and pkt.t == "DTPF_HANDOFF" and pkt.p1 == "dh-1" and pkt.p2 == "handoff-payload" then sawHandoffToDtpf = true end
+    if pkt.addr == "stock-addr" and pkt.t == "DTPF_HANDOFF_ACK" and pkt.p1 == "dh-1" and pkt.p2 == "ack-payload" then sawHandoffAckToStock = true end
+    if pkt.addr == "dtpf-addr" and pkt.t == "MESH_MAINNET_HELLO" and pkt.p1 == "wake_ack" then sawWakeHelloReply = true end
+    if pkt.t == "GTNH_WAKE" and (pkt.p1 == "stock" or pkt.p1 == "gorge" or pkt.p1 == "univ") then sawWatchdogWake = true end
+    if pkt.addr == "dtpf-addr" and pkt.t == "MESH_MAINT_ACK" and pkt.p1 == "req-o1" then
+        local ackTbl = serialization.unserialize(pkt.p2)
+        if ackTbl and ackTbl.stocks and ackTbl.stocks.r1 == 777 and ackTbl.stocks.r2 == 12345 then
+            sawMaintAckO1 = true
+        end
+    end
+end
+assert(sawStockToDtpf, "Exporter must relay STOCK_CLAIMS -> dtpf-addr")
+assert(sawDtpfToStock, "Exporter must relay DTPF_CLAIMS -> stock-addr")
+assert(sawHandoffToDtpf, "Exporter must relay DTPF_HANDOFF -> dtpf-addr")
+assert(sawHandoffAckToStock, "Exporter must relay DTPF_HANDOFF_ACK -> stock-addr")
+assert(sawWakeHelloReply, "Exporter must answer GTNH_WAKE with MESH_MAINNET_HELLO wake_ack")
+assert(sawWatchdogWake, "Watchdog must send GTNH_WAKE to stale peers (>60s) without false-alarming Space Pump")
+assert(sawMaintAckO1, "MESH_MAINT_ACK did not return O(1) stocks r1=777, r2=12345")
 
 local joinedInflux = {}
 for _, p in ipairs(posts) do joinedInflux[#joinedInflux + 1] = p.body end
 local allInflux = table.concat(joinedInflux, "\n")
 assert(allInflux:find("godforge_control ", 1, true), "Missing godforge_control InfluxDB line")
+assert(allInflux:find("oc_health ", 1, true), "Missing oc_health InfluxDB watchdog telemetry")
+assert(allInflux:find("pump_ok=1i", 1, true), "Space Pump (240s threshold) remained healthy during 75s step")
 assert(allInflux:find("active_exoticizers=1i,completed_cycles=5i,errors=0i,gf_online=1i,gf_active=1i,gf_work_allowed=1i,gf_rings=3i,gf_connected=4i,gf_upgrades=12i,lsc_pct=62.50", 1, true),
     "Bad godforge_control fields: " .. allInflux)
+assert(allInflux:find("stock_maintainer armed=1i,total_rules=12i,enabled_rules=10i,ok_count=7i,low_count=2i,crafting_count=1i,error_count=0i,warn_count=1i,cycle_ms=1.40,ae_calls_s=0.80,blocks_saved=3i", 1, true),
+    "Missing/bad stock_maintainer InfluxDB line: " .. allInflux)
 
 local allBridge = table.concat(bridgeWrites, "")
 assert(allBridge:find('"meshUniv":true', 1, true), "Ping missing meshUniv=true")
 assert(allBridge:find('"meshGorge":true', 1, true), "Ping missing meshGorge=true")
+assert(allBridge:find('"meshStock":true', 1, true), "Ping missing meshStock=true")
+assert(allBridge:find('"meshHealth"', 1, true), "Ping/mesh_recover missing meshHealth table")
+assert(allBridge:find('"woken"', 1, true), "mesh_recover reply missing woken list")
 assert(allBridge:find('"armed":false', 1, true), "univ_action pause reply missing armed=false")
 assert(allBridge:find('"mode":"magmatter"', 1, true), "gorge_action set_mode reply missing mode")
+assert(allBridge:find('"retried":true', 1, true), "Chunked STOCK_REPLY missing retried=true")
 
 -- =====================================================================
 -- TEST 3: Full 160x50 GUI Across All 4 Tabs, Log Modal, 2-Click Cancel,
@@ -675,6 +755,7 @@ local hub3 = {
         pump = { addr = "pump-addr", lastSeen = 195, status = { paused = false, threshold = 0.95, pumps = { { active = true, mult = 8 } }, fluids = { Helium = { label = "Helium", total = 100000, target = 100000 } } } },
         univ = { addr = "univ-addr", lastSeen = 197, status = { armed = true, activePools = 2, queuedSlices = 4, stalledCount = 0, completedBatches = 11, preemptions = 1, pools = { { name = "EBF Pool", phase = "ACTIVE", activeLabel = "Chrome Ingot" } } } },
         gorge = { addr = "gorge-addr", lastSeen = 199, status = { armed = true, activeCount = 1, completedCycles = 5, errorCount = 0, lscPct = 62.5, godforge = { active = true, rings = 3, connected = 4 }, exoticizers = { { name = "Ex#1", activeMode = "magmatter", phase = "WAIT_END", cycles = 5 } } } },
+        stock = { addr = "stock-addr", lastSeen = 199, status = { armed = true, totalRules = 12, enabledRules = 10, okCount = 7, lowCount = 2, craftingCount = 1, errorCount = 0, warnCount = 1, freeCpus = 4, totalCpus = 6, perf = { lastCycleMs = 1.4, aeCallsPerSec = 0.8, equivBlocksSaved = 3, freeMemKB = 1800 }, rulesPreview = { { label = "Raw Tesseract", type = "item", stock = 100, target = 1000, state = "LOW", warn = "! DTPF Passive" } } } },
     },
     logs = {
         { t = 190, tag = "OUT", msg = "Exported energy" },
@@ -705,7 +786,7 @@ local ui3 = Ae2UI.new(cfg3, hub3, {
     end,
 })
 
-for t = 1, 8 do
+for t = 1, 9 do
     ui3.tab = t
     ui3:render()
 end
@@ -713,11 +794,11 @@ ui3.logModalActive = true
 ui3:render()
 ui3.logModalActive = false
 
--- Also exercise offline peer guide state glyph safety on Tabs 4..7
+-- Also exercise offline peer guide state glyph safety on Tabs 4..8
 do
     local savedPeers = hub3.peers
-    hub3.peers = { dtpf = {}, pump = {}, univ = {}, gorge = {} }
-    for t = 4, 7 do ui3.tab = t; ui3:render() end
+    hub3.peers = { dtpf = {}, pump = {}, univ = {}, gorge = {}, stock = {} }
+    for t = 4, 8 do ui3.tab = t; ui3:render() end
     hub3.peers = savedPeers
 end
 
@@ -732,13 +813,15 @@ ui3:handleTouch(127, 10, 0)
 assertEq(canceledCpuName, "CPU-Alpha", "2nd click confirmed and canceled CPU-Alpha")
 assertEq(ui3.confirmCancelCpu, nil, "Cleared confirm state after cancel")
 
--- Switch to Tab 3 (Mesh Peers) & click Card 1 [Pause] (x=6, y=23)
+-- Switch to Tab 3 (Mesh Peers) & click Card 1 [Pause] (x=6, y=16) and Card 5 Stock [Pause] (x=6, y=45)
 ui3:handleKeyDown(51, 4)
 assertEq(ui3.tab, 3, "Key '3' switched to OC Mesh Peers tab")
-ui3:handleTouch(6, 23, 0)
+ui3:handleTouch(6, 16, 0)
 assertEq(peerActionsLog[#peerActionsLog], "dtpf:pause", "Peer button clicked dtpf:pause")
+ui3:handleTouch(6, 45, 0)
+assertEq(peerActionsLog[#peerActionsLog], "stock:pause", "Peer button clicked stock:pause")
 
--- Test dedicated orchestrator Tabs 4..7 actions!
+-- Test dedicated orchestrator Tabs 4..8 actions!
 ui3:handleKeyDown(52, 5) -- Key '4': DTPF
 assertEq(ui3.tab, 4, "Key '4' switched to DTPF tab")
 ui3:handleTouch(46, 9, 0) -- [Maint Sync]
@@ -761,6 +844,11 @@ assertEq(ui3.tab, 7, "Key '7' switched to Pump tab")
 ui3:handleTouch(24, 9, 0) -- [Refresh Pumps]
 assertEq(peerActionsLog[#peerActionsLog], "pump:refresh_pumps", "Pump Refresh Pumps clicked")
 
+ui3:handleKeyDown(56, 9) -- Key '8': STOCK
+assertEq(ui3.tab, 8, "Key '8' switched to Stock tab")
+ui3:handleTouch(35, 9, 0) -- [Retry Errors]
+assertEq(peerActionsLog[#peerActionsLog], "stock:retry_errors", "Stock Retry Errors clicked")
+
 -- =====================================================================
 -- TEST 4: Live exporter.lua GUI Integration + Overrides Persistence + Pause Export
 -- =====================================================================
@@ -779,8 +867,8 @@ posts = {}
 local guiEvs = {
     -- Touch header [EXPORT: ON    ] at x=33, y=1 -> pauses exports & saves /home/config_overrides.lua
     { "touch", "scr-1", 33, 1, 0 },
-    -- Key '8' (Setup & Exports tab)
-    { "key_down", "kbd-1", 56, 9 },
+    -- Key '9' (Setup & Exports tab)
+    { "key_down", "kbd-1", 57, 10 },
     -- Touch [+] on itemInterval (y=7, x=126) -> 65 + 5 = 70s & saves /home/config_overrides.lua
     { "touch", "scr-1", 126, 7, 0 },
     -- Key 'Q' to exit cleanly
@@ -870,11 +958,11 @@ rawset(_G, "__HELD_OBJECTS", { cfg3, hub3, ui3 })
                         lsc = { online = true, pct = 50, in5s = 0, out5s = 0, net5s = 0, wirelessStr = "0", wirelessOn = true },
                         tps = { online = true, mspt = 20, tps = 20, chunks = 100, dims = 1 },
                         cpus = { total = 0, busyCount = 0, list = {} },
-                        peers = { dtpf = {}, pump = {}, univ = {}, gorge = {} },
+                        peers = { dtpf = {}, pump = {}, univ = {}, gorge = {}, stock = {} },
                         logs = {},
                     }
                     local u = Ae2UI.new(cfg, hub, {})
-                    for t = 1, 8 do u.tab = t; u:render() end
+                    for t = 1, 9 do u.tab = t; u:render() end
                     rawset(_G, "__PROD_HOLD", { cfg, hub, u })
                     """,
                     "prod_footprint_test",

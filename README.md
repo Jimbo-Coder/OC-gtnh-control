@@ -15,6 +15,7 @@ Each subfolder is **100% self-contained** (no hidden cross-folder runtime depend
 | **AE2 Control** | [`gtnh-ae2-control/`](gtnh-ae2-control/) | Mainnet InfluxDB Exporter, Remote Craft Requester/Canceller & OC Mesh Hub (`port 4205`) | Production |
 | **Space Pump** | [`gtnh-space-pump/`](gtnh-space-pump/) | Space Elevator Fluid Pump target stock controller + optional `port 4205` Mesh (`enableMesh`) | Production |
 | **Gorge Control** | [`gtnh-gorge-control/`](gtnh-gorge-control/) | Unified Forge of the Gods controller + multi-Exoticizer Rack (`Magmatter` + `QGP`) | Production |
+| **Stock Maintainer** | [`gtnh-stock-control/`](gtnh-stock-control/) | Standalone Mainnet AE2 O(1) Level Maintainer (items & fluids, drop-in Transposer, DTPF overlap warnings) | Production |
 
 ---
 
@@ -27,7 +28,7 @@ wget -f https://raw.githubusercontent.com/Jimbo-Coder/OC-gtnh-control/main/insta
 
 Direct install or list:
 ```sh
-/tmp/install.lua universal      # or: dtpf, ae2, pump, gorge
+/tmp/install.lua universal      # or: dtpf, ae2, pump, gorge, stock
 /tmp/install.lua --list
 ```
 
@@ -40,4 +41,4 @@ wget -f https://raw.githubusercontent.com/Jimbo-Coder/OC-gtnh-control/main/insta
 
 ## Upstream Attribution
 
-See [`CREDITS.md`](CREDITS.md) for upstream authors, starter repositories, and references (`UncountablyInfinite`, `Fox / samsonsin / San32`, `Navatusein`, `kuba6000`, `Telling Salamander`, `Vlamonster`, `S4mpsa`).
+See [`CREDITS.md`](CREDITS.md) for upstream authors, starter repositories, and references (`UncountablyInfinite`, `Fox / samsonsin / San32`, `Navatusein`, `kuba6000`, `Telling Salamander`, `Vlamonster`, `S4mpsa`, `DylanTaylor1`, `KaseiFR`).

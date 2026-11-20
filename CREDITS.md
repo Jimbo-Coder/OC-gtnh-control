@@ -6,3 +6,8 @@
 - **`gtnh-space-pump/`** — Built on **Fox**, **samsonsin**, and **San32**'s [`GTNH-OC-Space-Pumping`](https://github.com/samsonsin/GTNH-OC-Space-Pumping) & GTNH Wiki 2.9 guide.
 - **`gtnh-universal-control/`** — Toggle Bus Universal Automation architecture inspired by community builds (**kuba6000**, **Telling Salamander**), alongside OC automation patterns from **Vlamonster** ([`Vlamonster/universal`](https://github.com/Vlamonster/universal)) and **S4mpsa** ([`S4mpsa/InfOS`](https://github.com/S4mpsa/InfOS)).
 - **`gtnh-gorge-control/`** — Multi-Exoticizer IO Port + Drive Transposer design inspired by **Navatusein** ([`Navatusein/GTNH-OC-God-Forge-Control`](https://github.com/Navatusein/GTNH-OC-God-Forge-Control)).
+- **`gtnh-stock-control/`** — Clean-room standalone implementation taking conceptual inspiration and UX/O(1) AE2 patterns from community OpenComputers stock maintainers:
+  - **S4mpsa** (`S4mpsa/InfOS`, [`Programs/Autostocker/`](../references/universal_automation/s4mpsa_infos/Programs/Autostocker/), no explicit license file in upstream repo) — AE2 autostocker pattern.
+  - **NIDAS** (`NIDAS` `autostocker.lua`, [`nidas/`](../references/nidas/)) — Drop-in Transposer slot + interactive configuration UX.
+  - **DylanTaylor1** ([`DylanTaylor1/GTNH-Stocking`](https://github.com/DylanTaylor1/GTNH-Stocking), MIT License) — O(1) AE2 `getItemInNetwork` / `getFluidInNetwork` lookup concepts.
+  - **KaseiFR** ([`KaseiFR/ae2-manager`](https://github.com/KaseiFR/ae2-manager), GPL-3.0 upstream reference; no upstream code copied) — Multi-page/grouped AE2 level-maintaining concepts.

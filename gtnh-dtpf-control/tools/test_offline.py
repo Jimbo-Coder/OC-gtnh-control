@@ -5066,6 +5066,195 @@ do
     for _, s in ipairs(gpu24._calls) do _G.__RENDERED_GPU_CALLS[#_G.__RENDERED_GPU_CALLS + 1] = s end
     assert(#env.maintRules >= #rtInps, "T24 [+ Selected Recipe] maintains all inputs of selected recipe")
 
+    -- T24b: O(1) getItemInNetwork/getFluidInNetwork, hysteresis lowThreshold, exponential backoff, multi-dispatch, and STOCK_CLAIMS overlap
+    local o1Calls = { item = 0, fluid = 0, fullItems = 0, fullFluids = 0 }
+    local o1Dispatched = {}
+    local o1Cpus = {
+        { name = "CPU #1", busy = false, storages = 1048576 },
+        { name = "CPU #2", busy = false, storages = 1048576 },
+        { name = "CPU #3", busy = false, storages = 1048576 },
+        { name = "CPU #4", busy = false, storages = 1048576 },
+    }
+    local o1Fail = false
+    component._register("mainnet-o1", "me_controller", {
+        getItemInNetwork = function(filter)
+            o1Calls.item = o1Calls.item + 1
+            if type(filter) == "table" and filter.name == "custom:hyst" then
+                return { name = "custom:hyst", damage = 0, size = 450, label = "Hyst" } -- below target 500, above lowThreshold 400
+            elseif type(filter) == "table" and filter.name == "custom:low_a" then
+                return { name = "custom:low_a", damage = 0, size = 10, label = "LowA" }
+            end
+            return nil
+        end,
+        getFluidInNetwork = function(fname)
+            o1Calls.fluid = o1Calls.fluid + 1
+            if fname == "exciteddtec" then return { name = "exciteddtec", amount = 5000, label = "DTEC" } end
+            return nil
+        end,
+        getItemsInNetwork = function()
+            o1Calls.fullItems = o1Calls.fullItems + 1
+            return {}
+        end,
+        getFluidsInNetwork = function()
+            o1Calls.fullFluids = o1Calls.fullFluids + 1
+            return {}
+        end,
+        getCpus = function() return o1Cpus end,
+        getCraftable = function(filter, cType)
+            return {
+                getItemStack = function() return { name = filter.name, damage = filter.damage or 0, maxSize = (cType == "fluid") and nil or 64 } end,
+                request = function(amt)
+                    if o1Fail then return nil, "no cpu" end
+                    o1Dispatched[filter.name] = (o1Dispatched[filter.name] or 0) + amt
+                    return { isComputing = function() return false end, hasFailed = function() return false end }
+                end,
+            }
+        end,
+    })
+    env.mainnetAddr = "mainnet-o1"
+    env.maintEnabled = true
+    env.maintFreeCpus = 1
+    env.maintMaxDispatch = 2
+    env.maintConflictMode = "defer"
+    env.maintRules = {
+        { id = "hyst", type = "item", name = "custom:hyst", damage = 0, label = "Hyst", target = 500, lowThreshold = 400, batch = 100, mode = "always" },
+        { id = "lowa", type = "item", name = "custom:low_a", damage = 0, label = "LowA", target = 500, lowThreshold = 200, batch = 150, mode = "always" },
+        { id = "lowb", type = "fluid", name = "exciteddtec", damage = 0, label = "DTEC", target = 100000, lowThreshold = 50000, batch = 20000, mode = "always" },
+    }
+    st24._maintTrack = {}
+    st24._lastMaintSync = nil
+    st24.stockPeer = nil
+    st24._forceMaintSync = true
+    local compMod = require("computer")
+    local baseT = compMod.uptime()
+    Scheduler.step(env, st24, { nowUptime = baseT })
+    assert(o1Calls.item >= 2 and o1Calls.fluid >= 1, "T24b used O(1) getItemInNetwork and getFluidInNetwork")
+    assertEq(o1Calls.fullItems, 0, "T24b avoided full getItemsInNetwork scan")
+    assertEq(o1Calls.fullFluids, 0, "T24b avoided full getFluidsInNetwork scan")
+    assert(o1Dispatched["custom:hyst"] == nil, "T24b hysteresis skipped item above lowThreshold (450 >= 400)")
+    assertEq(o1Dispatched["custom:low_a"], 150, "T24b multi-dispatch crafted LowA")
+    assertEq(o1Dispatched["exciteddtec"], 20000, "T24b multi-dispatch crafted DTEC in same cycle")
+
+    -- Test STOCK_CLAIMS overlap deferral & warn mode
+    o1Dispatched = {}
+    st24._maintTrack = {}
+    local handledClaims = Hardware.handleMeshMessage(wb24, "modem-1", "stock-modem", Hardware.MESH_PORT, "STOCK_CLAIMS",
+        serialization.serialize({ armed = true, keys = { "i:custom:low_a:0", "f:exciteddtec" } }))
+    assert(handledClaims == true, "T24b handleMeshMessage handled STOCK_CLAIMS")
+    st24._forceMaintSync = true
+    Scheduler.step(env, st24, { nowUptime = compMod.uptime() + 1 })
+    assertEq(o1Dispatched["custom:low_a"], nil, "T24b defer mode blocked overlap craft when Stock OC armed")
+    assertEq(o1Dispatched["exciteddtec"], nil, "T24b defer mode blocked fluid overlap craft when Stock OC armed")
+    assertEq(st24.maintStatus.overlapCount, 2, "T24b maintStatus tracks overlapCount")
+    assertEq(st24.maintStatus.stockPeerOnline, true, "T24b maintStatus tracks stockPeerOnline")
+
+    -- Test warn mode emits warning but still dispatches if not busy
+    env.maintConflictMode = "warn"
+    st24._forceMaintSync = true
+    Scheduler.step(env, st24, { nowUptime = compMod.uptime() + 2 })
+    assertEq(o1Dispatched["custom:low_a"], 150, "T24b warn mode allows dispatch with warning")
+
+    -- Test exponential backoff (30s -> 60s -> 120s)
+    env.maintRules = {
+        { id = "exp_fail", type = "item", name = "custom:low_a", damage = 0, label = "LowA", target = 500, batch = 50, mode = "always" },
+    }
+    st24.stockPeer = nil
+    st24._maintTrack = {}
+    o1Fail = true
+    st24._forceMaintSync = true
+    local failT = compMod.uptime() + 100
+    Scheduler.step(env, st24, { nowUptime = failT }) -- fail 1 -> failT + 30
+    assertEq(st24._maintTrack["exp_fail"].failCount, 1, "T24b fail 1 increments failCount")
+    assertEq(st24._maintTrack["exp_fail"].backoffUntil, failT + 30, "T24b fail 1 -> 30s backoff")
+    st24._forceMaintSync = true
+    Scheduler.step(env, st24, { nowUptime = failT + 31 }) -- fail 2 -> +60s
+    assertEq(st24._maintTrack["exp_fail"].failCount, 2, "T24b fail 2 increments failCount")
+    assertEq(st24._maintTrack["exp_fail"].backoffUntil, failT + 91, "T24b fail 2 -> 60s backoff")
+
+    -- Test DTPF_CLAIMS emission via pushMeshMetrics (includes maintInfo + passiveInfo & suppresses stock-only resends)
+    modemSent = {}
+    Hardware._lastClaimsRaw = nil
+    Hardware._lastClaimsSig = nil
+    Hardware.pushMeshMetrics(env, st24, 2100, nil, true)
+    local sentClaimsPkt, claimsRawLen = nil, 0
+    for _, pkt in ipairs(modemSent) do
+        if pkt.args[1] == "DTPF_CLAIMS" then
+            claimsRawLen = #tostring(pkt.args[2] or "")
+            sentClaimsPkt = serialization.unserialize(pkt.args[2])
+        end
+    end
+    assert(sentClaimsPkt ~= nil, "T24b pushMeshMetrics emits DTPF_CLAIMS packet")
+    assert(claimsRawLen <= 5500, "T24b DTPF_CLAIMS packet fits within 5500B MTU: " .. tostring(claimsRawLen))
+    assert(type(sentClaimsPkt.maintInfo) == "table" and next(sentClaimsPkt.maintInfo) ~= nil, "T24b DTPF_CLAIMS includes maintInfo")
+    assert(type(sentClaimsPkt.passiveInfo) == "table" and next(sentClaimsPkt.passiveInfo) ~= nil, "T24b DTPF_CLAIMS includes passiveInfo")
+    local anyK, anyM = next(sentClaimsPkt.maintInfo)
+    assert(anyM.tgt ~= nil and anyM.stk ~= nil and anyM.m ~= nil, "T24b maintInfo has tgt/stk/m fields for " .. tostring(anyK))
+    -- Fluctuating only stk within 15s throttle window must NOT resend DTPF_CLAIMS
+    st24._dtpfClaims.maintInfo[anyK].stk = (tonumber(anyM.stk) or 0) + 12345
+    modemSent = {}
+    Hardware.pushMeshMetrics(env, st24, 2103, nil, false)
+    local resendClaims = false
+    for _, pkt in ipairs(modemSent) do
+        if pkt.args[1] == "DTPF_CLAIMS" then resendClaims = true end
+    end
+    assert(resendClaims == false, "T24b DTPF_CLAIMS suppresses volatile stock-only resends inside 15s window")
+
+    -- Test DTPF_HANDOFF passive + maint rule application & DTPF_HANDOFF_ACK reply
+    modemSent = {}
+    local hReq = {
+        items = {
+            { ruleId = "r_p", kind = "passive", familyId = "astral_titanium_quantum", target = 7500000 },
+            { ruleId = "r_m", kind = "maint", type = "fluid", name = "exciteddt_h", label = "Excited DT-H", target = 500000, batch = 100000 },
+        },
+    }
+    Hardware.handleMeshMessage(wb24, "modem-1", "stock-modem", Hardware.MESH_PORT, "DTPF_HANDOFF", "dh-7", serialization.serialize(hReq))
+    assert(env.recipes.astral_titanium_quantum.enabled == true, "DTPF_HANDOFF enables passive recipe family")
+    assertEq(env.recipes.astral_titanium_quantum.target, 7500000, "DTPF_HANDOFF updates passive target")
+    local handedMaint = Scheduler.findMaintRule(env, "fluid", "exciteddt_h", 0)
+    assert(handedMaint ~= nil and handedMaint.target == 500000, "DTPF_HANDOFF installs DTPF maintRule")
+    local ackPkt = nil
+    for _, pkt in ipairs(modemSent) do
+        if pkt.args[1] == "DTPF_HANDOFF_ACK" and pkt.args[2] == "dh-7" then
+            ackPkt = serialization.unserialize(pkt.args[3])
+        end
+    end
+    assert(ackPkt ~= nil and ackPkt.ok == true, "DTPF_HANDOFF emits DTPF_HANDOFF_ACK with reqId dh-7")
+    assertEq(ackPkt.passiveCount, 1, "DTPF_HANDOFF_ACK counts 1 passive")
+    assertEq(ackPkt.maintCount, 1, "DTPF_HANDOFF_ACK counts 1 maint rule")
+
+    -- Test Hardware.openMeshPort sets GTNH_WAKE, GTNH_WAKE responds with DTPF_METRICS, and stale Mainnet wake is rate-limited
+    local dtpfWakeMsg, dtpfWakeSet = nil, 0
+    component._register("modem-w24", "modem", {
+        isWireless = function() return true end,
+        open = function() return true end,
+        setStrength = function() return 400 end,
+        getWakeMessage = function() return dtpfWakeMsg end,
+        setWakeMessage = function(m) dtpfWakeSet = dtpfWakeSet + 1; dtpfWakeMsg = m; return dtpfWakeMsg end,
+        send = function(addr, port, ...) modemSent[#modemSent + 1] = { addr = addr, port = port, args = { ... } }; return true end,
+        broadcast = function(port, ...) modemSent[#modemSent + 1] = { port = port, args = { ... } }; return true end,
+    })
+    Hardware.openMeshPort()
+    Hardware.openMeshPort()
+    assertEq(dtpfWakeMsg, "GTNH_WAKE", "T24b openMeshPort configures GTNH_WAKE wake message")
+    assertEq(dtpfWakeSet, 1, "T24b openMeshPort does not repeat setWakeMessage once configured")
+    modemSent = {}
+    assert(Hardware.handleMeshMessage(wb24, "modem-w24", "ae2-wake", Hardware.MESH_PORT, "GTNH_WAKE", "dtpf"), "T24b GTNH_WAKE handled")
+    local sawWakeMetrics = false
+    for _, pkt in ipairs(modemSent) do if pkt.args[1] == "DTPF_METRICS" then sawWakeMetrics = true end end
+    assert(sawWakeMetrics == true, "T24b GTNH_WAKE immediately pushed DTPF_METRICS")
+    Hardware._lastMainnetSeen = 1000
+    Hardware._lastMainnetWakeAt = -1000
+    modemSent = {}
+    Hardware.pushMeshMetrics(env, st24, 2200, nil, true)
+    local wakeCnt1 = 0
+    for _, pkt in ipairs(modemSent) do if pkt.args[1] == "GTNH_WAKE" then wakeCnt1 = wakeCnt1 + 1 end end
+    assertEq(wakeCnt1, 1, "T24b stale Mainnet emitted 1 GTNH_WAKE")
+    modemSent = {}
+    Hardware.pushMeshMetrics(env, st24, 2210, nil, true)
+    local wakeCnt2 = 0
+    for _, pkt in ipairs(modemSent) do if pkt.args[1] == "GTNH_WAKE" then wakeCnt2 = wakeCnt2 + 1 end end
+    assertEq(wakeCnt2, 0, "T24b Mainnet GTNH_WAKE suppressed within 60s window")
+
     component.gpu = nil
     Hardware.resetClusterState()
     component._reset()

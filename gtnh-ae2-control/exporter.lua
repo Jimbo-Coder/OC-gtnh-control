@@ -50,12 +50,18 @@ local lastItemScanSec = 0
 local uiActive = false
 
 local MESH_PORT = tonumber(config.meshPort) or 4205
-local dtpfMesh = { addr = nil, viaTunnel = false, lastSeen = -1000, status = nil }
-local pumpMesh = { addr = nil, viaTunnel = false, lastSeen = -1000, status = nil, statusUptime = -1000 }
-local univMesh = { addr = nil, viaTunnel = false, lastSeen = -1000, status = nil }
-local gorgeMesh = { addr = nil, viaTunnel = false, lastSeen = -1000, status = nil }
+local WAKE_MSG = "GTNH_WAKE"
+local PUMP_STALE_SEC = 240
+local PEER_STALE_SEC = 60
+local dtpfMesh = { addr = nil, viaTunnel = false, lastSeen = -1000, status = nil, wasOnline = false, recoveryAttempts = 0, lastRecoveryAt = -1000 }
+local pumpMesh = { addr = nil, viaTunnel = false, lastSeen = -1000, status = nil, statusUptime = -1000, wasOnline = false, recoveryAttempts = 0, lastRecoveryAt = -1000 }
+local univMesh = { addr = nil, viaTunnel = false, lastSeen = -1000, status = nil, wasOnline = false, recoveryAttempts = 0, lastRecoveryAt = -1000 }
+local gorgeMesh = { addr = nil, viaTunnel = false, lastSeen = -1000, status = nil, wasOnline = false, recoveryAttempts = 0, lastRecoveryAt = -1000 }
+local stockMesh = { addr = nil, viaTunnel = false, lastSeen = -1000, status = nil, wasOnline = false, recoveryAttempts = 0, lastRecoveryAt = -1000 }
 local pendingMaintJobs = {}
 local meshReqSeq = 0
+local lastWatchdogAt = -1000
+local lastHealthInfluxAt = -1000
 
 local hubState = {
     freeMem = 0,
@@ -71,7 +77,7 @@ local hubState = {
     lsc = { online = false, pct = 0, net5s = 0, in5s = 0, out5s = 0, wirelessStr = "0", wirelessOn = true },
     tps = { online = false, mspt = 0, tps = 20, chunks = 0, dims = 0 },
     cpus = { list = {}, total = 0, busyCount = 0 },
-    peers = { dtpf = dtpfMesh, pump = pumpMesh, univ = univMesh, gorge = gorgeMesh },
+    peers = { dtpf = dtpfMesh, pump = pumpMesh, univ = univMesh, gorge = gorgeMesh, stock = stockMesh },
     logs = {},
 }
 
@@ -204,7 +210,26 @@ local function configureModemProxy(m)
         end
         if needStr then pcall(m.setStrength, 400) end
     end
+    if type(m.setWakeMessage) == "function" then
+        local needWake = true
+        if type(m.getWakeMessage) == "function" then
+            local okWk, curWk = pcall(m.getWakeMessage)
+            if okWk and curWk == WAKE_MSG then needWake = false end
+        end
+        if needWake then pcall(m.setWakeMessage, WAKE_MSG, true) end
+    end
     return isW
+end
+
+local function configureTunnelWake(t)
+    if t and type(t.setWakeMessage) == "function" then
+        local needWake = true
+        if type(t.getWakeMessage) == "function" then
+            local okWk, curWk = pcall(t.getWakeMessage)
+            if okWk and curWk == WAKE_MSG then needWake = false end
+        end
+        if needWake then pcall(t.setWakeMessage, WAKE_MSG, true) end
+    end
 end
 
 local function getMeshTransports()
@@ -234,6 +259,7 @@ local function getMeshTransports()
         local tAddr = component.list("tunnel", true)()
         if tAddr then tunnel = component.proxy(tAddr) end
     end
+    configureTunnelWake(tunnel)
     cachedMeshModem = modem
     cachedMeshTunnel = tunnel
     meshCacheInit = true
@@ -1075,7 +1101,7 @@ local function findMainnetAE2()
             local okC, cpus = pcall(p.getCpus)
             local nCpus = (okC and type(cpus) == "table") and #cpus or 0
             local nFluids = 0
-            if p.getFluidsInNetwork then
+            if #candidates > 1 and p.getFluidsInNetwork then
                 local okF, fl = pcall(p.getFluidsInNetwork)
                 if okF and type(fl) == "table" then nFluids = #fl end
             end
@@ -1240,41 +1266,52 @@ local function inspectMainnetForMaint(interface, itemsReq)
     end
 
     local stocks = {}
-    local needFluids = false
-    for i = 1, #(itemsReq or {}) do
-        if type(itemsReq[i]) == "table" and itemsReq[i].type == "fluid" then
-            needFluids = true
-            break
-        end
-    end
-    local fluidAmt = {}
-    if needFluids and interface.getFluidsInNetwork then
-        local okFl, fl = pcall(interface.getFluidsInNetwork)
-        if okFl and type(fl) == "table" then
-            for i = 1, #fl do
-                local f = fl[i]
-                if type(f) == "table" and f.name then
-                    fluidAmt[f.name] = (fluidAmt[f.name] or 0) + math.floor(tonumber(f.amount or f.size) or 0)
+    local reqs = itemsReq or {}
+    local fluidAmt = nil
+    local function getFluidFallback()
+        if fluidAmt then return fluidAmt end
+        fluidAmt = {}
+        if interface.getFluidsInNetwork then
+            local okFl, fl = pcall(interface.getFluidsInNetwork)
+            if okFl and type(fl) == "table" then
+                for i = 1, #fl do
+                    local f = fl[i]
+                    if type(f) == "table" and f.name then
+                        fluidAmt[f.name] = (fluidAmt[f.name] or 0) + math.floor(tonumber(f.amount or f.size) or 0)
+                    end
                 end
             end
         end
+        return fluidAmt
     end
-    for i = 1, #(itemsReq or {}) do
-        local req = itemsReq[i]
+    for i = 1, #reqs do
+        local req = reqs[i]
         if type(req) == "table" and req.id then
             local qty = 0
             if req.type == "fluid" then
-                qty = fluidAmt[req.name or ""] or 0
-            elseif interface.getItemsInNetwork and req.name and req.name ~= "" then
-                local okIl, il = pcall(interface.getItemsInNetwork, {
-                    name = req.name,
-                    damage = tonumber(req.damage) or 0,
-                })
-                if okIl and type(il) == "table" then
-                    for j = 1, #il do
-                        local st = il[j]
-                        if type(st) == "table" and (not req.label or req.label == "" or st.label == req.label) then
-                            qty = qty + math.floor(tonumber(st.size or st.amount) or 0)
+                if interface.getFluidInNetwork and req.name and req.name ~= "" then
+                    local okFl, st = pcall(interface.getFluidInNetwork, req.name)
+                    if okFl and type(st) == "table" then
+                        qty = math.floor(tonumber(st.amount or st.size) or 0)
+                    end
+                else
+                    qty = getFluidFallback()[req.name or ""] or 0
+                end
+            elseif req.name and req.name ~= "" then
+                local dmg = tonumber(req.damage) or 0
+                if interface.getItemInNetwork and req.hasTag ~= true then
+                    local okIt, st = pcall(interface.getItemInNetwork, { name = req.name, damage = dmg })
+                    if okIt and type(st) == "table" then
+                        qty = math.floor(tonumber(st.size or st.amount) or 0)
+                    end
+                elseif interface.getItemsInNetwork then
+                    local okIl, il = pcall(interface.getItemsInNetwork, { name = req.name, damage = dmg })
+                    if okIl and type(il) == "table" then
+                        for j = 1, #il do
+                            local st = il[j]
+                            if type(st) == "table" and (not req.label or req.label == "" or st.label == req.label) then
+                                qty = qty + math.floor(tonumber(st.size or st.amount) or 0)
+                            end
                         end
                     end
                 end
@@ -1312,15 +1349,95 @@ local function inspectMainnetForMaint(interface, itemsReq)
     }
 end
 
+local function buildMeshHealth(now)
+    now = now or uptimeNow()
+    local specs = {
+        dtpf = { tbl = dtpfMesh, stale = PEER_STALE_SEC },
+        stock = { tbl = stockMesh, stale = PEER_STALE_SEC },
+        pump = { tbl = pumpMesh, stale = PUMP_STALE_SEC },
+        gorge = { tbl = gorgeMesh, stale = PEER_STALE_SEC },
+        univ = { tbl = univMesh, stale = PEER_STALE_SEC },
+    }
+    local out = {}
+    for k, sp in pairs(specs) do
+        local p = sp.tbl
+        local seen = (p.lastSeen or -1000) > 0
+        out[k] = {
+            online = isMeshFresh(p, sp.stale),
+            seen = seen,
+            ageSec = seen and math.max(0, math.floor((now - p.lastSeen) + 0.5)) or nil,
+            recoveries = math.floor(tonumber(p.recoveryAttempts) or 0),
+        }
+    end
+    return out
+end
+
 local function emitMeshHelloIfOnline(writeLineFn)
     if writeLineFn and json and json.encode then
+        local now = uptimeNow()
         pcall(writeLineFn, json.encode({
             op = "mesh_hello",
-            meshDtpf = isMeshFresh(dtpfMesh, 60),
-            meshPump = isMeshFresh(pumpMesh, 180),
-            meshUniv = isMeshFresh(univMesh, 60),
-            meshGorge = isMeshFresh(gorgeMesh, 60),
+            meshDtpf = isMeshFresh(dtpfMesh, PEER_STALE_SEC),
+            meshPump = isMeshFresh(pumpMesh, PUMP_STALE_SEC),
+            meshUniv = isMeshFresh(univMesh, PEER_STALE_SEC),
+            meshGorge = isMeshFresh(gorgeMesh, PEER_STALE_SEC),
+            meshStock = isMeshFresh(stockMesh, PEER_STALE_SEC),
+            meshHealth = buildMeshHealth(now),
         }))
+    end
+end
+
+local function checkMeshWatchdog(upNow, dbUrl, writeLineFn)
+    if config.enableMesh == false or not okSer then return end
+    local peers = {
+        { name = "dtpf", tbl = dtpfMesh, stale = PEER_STALE_SEC },
+        { name = "stock", tbl = stockMesh, stale = PEER_STALE_SEC },
+        { name = "pump", tbl = pumpMesh, stale = PUMP_STALE_SEC },
+        { name = "gorge", tbl = gorgeMesh, stale = PEER_STALE_SEC },
+        { name = "univ", tbl = univMesh, stale = PEER_STALE_SEC },
+    }
+    local changed = false
+    local onlinePeers, totalRecoveries = 0, 0
+    local flags = {}
+    for i = 1, #peers do
+        local p = peers[i]
+        local t = p.tbl
+        local online = isMeshFresh(t, p.stale)
+        flags[p.name] = online and 1 or 0
+        if online then onlinePeers = onlinePeers + 1 end
+        totalRecoveries = totalRecoveries + (tonumber(t.recoveryAttempts) or 0)
+        if online ~= (t.wasOnline == true) then
+            t.wasOnline = online
+            changed = true
+            if online and (t.recoveryAttempts or 0) > 0 then
+                logMsg("MESH", string.format("[WATCHDOG] %s recovered after %d wake attempt(s).", p.name, t.recoveryAttempts))
+            elseif (not online) and (t.lastSeen or -1000) > 0 then
+                logMsg("ERR", string.format("[WATCHDOG] %s heartbeat stale (>%ds).", p.name, p.stale))
+            end
+        end
+        if (not online) and (t.lastSeen or -1000) > 0 and (upNow - (t.lastRecoveryAt or -1000)) >= 60 then
+            t.recoveryAttempts = (t.recoveryAttempts or 0) + 1
+            totalRecoveries = totalRecoveries + 1
+            t.lastRecoveryAt = upNow
+            changed = true
+            sendMeshPacket(t.addr, t.viaTunnel, WAKE_MSG, p.name)
+            sendMeshPacket(nil, false, "MESH_MAINNET_HELLO", "watchdog")
+            logMsg("ERR", string.format("[WATCHDOG] Sent %s + HELLO to stale peer %s (#%d).", WAKE_MSG, p.name, t.recoveryAttempts))
+        end
+    end
+    if changed then
+        emitMeshHelloIfOnline(writeLineFn)
+        uiDirty = true
+    end
+    if dbUrl and (changed or (upNow - lastHealthInfluxAt) >= 30) then
+        lastHealthInfluxAt = upNow
+        local freeKB = math.floor((computer.freeMemory and computer.freeMemory() or 0) / 1024)
+        local line = string.format(
+            "oc_health ae2_ok=1i,dtpf_ok=%di,stock_ok=%di,pump_ok=%di,gorge_ok=%di,online_peers=%di,recoveries=%di,free_mem_kb=%di",
+            flags.dtpf or 0, flags.stock or 0, flags.pump or 0, flags.gorge or 0,
+            onlinePeers, totalRecoveries, freeKB
+        )
+        postInflux(dbUrl, line .. "\n")
     end
 end
 
@@ -1332,10 +1449,13 @@ local function handleMeshModemEvent(interface, writeLineFn, localAddr, sender, p
     local now = uptimeNow()
     local dbUrl = config.dbURL .. (config.itemDB or "mainnet")
 
-    if msgType == "PUMP_STATUS" and type(arg1) == "string" then
+    if msgType == WAKE_MSG then
+        sendMeshPacket(sender, isTunnel, "MESH_MAINNET_HELLO", "wake_ack")
+        return true
+    elseif msgType == "PUMP_STATUS" and type(arg1) == "string" then
         local okU, st = pcall(serialization.unserialize, arg1)
         if not okU or type(st) ~= "table" then return true end
-        local wasFresh = isMeshFresh(pumpMesh, 180)
+        local wasFresh = isMeshFresh(pumpMesh, PUMP_STALE_SEC)
         pumpMesh.addr = sender
         pumpMesh.viaTunnel = isTunnel
         pumpMesh.lastSeen = now
@@ -1493,6 +1613,61 @@ local function handleMeshModemEvent(interface, writeLineFn, localAddr, sender, p
         postInflux(dbUrl, line .. "\n")
         return true
 
+    elseif msgType == "STOCK_METRICS" and type(arg1) == "string" then
+        local okU, pkt = pcall(serialization.unserialize, arg1)
+        if not okU or type(pkt) ~= "table" then return true end
+        local wasFresh = isMeshFresh(stockMesh, 60)
+        stockMesh.addr = sender
+        stockMesh.viaTunnel = isTunnel
+        stockMesh.lastSeen = now
+        stockMesh.status = pkt
+        sendMeshPacket(sender, isTunnel, "STOCK_ACK", "ok")
+        if not wasFresh then
+            logMsg("MESH", "Stock Maintainer connected on OC Mesh.")
+            emitMeshHelloIfOnline(writeLineFn)
+        end
+        local pf = type(pkt.perf) == "table" and pkt.perf or {}
+        local line = string.format(
+            "stock_maintainer armed=%di,total_rules=%di,enabled_rules=%di,ok_count=%di,low_count=%di,crafting_count=%di,error_count=%di,warn_count=%di,cycle_ms=%.2f,ae_calls_s=%.2f,blocks_saved=%di",
+            pkt.armed and 1 or 0,
+            math.floor(tonumber(pkt.totalRules) or 0),
+            math.floor(tonumber(pkt.enabledRules) or 0),
+            math.floor(tonumber(pkt.okCount) or 0),
+            math.floor(tonumber(pkt.lowCount) or 0),
+            math.floor(tonumber(pkt.craftingCount) or 0),
+            math.floor(tonumber(pkt.errorCount) or 0),
+            math.floor(tonumber(pkt.warnCount) or 0),
+            tonumber(pf.lastCycleMs) or 0,
+            tonumber(pf.aeCallsPerSec) or 0,
+            math.floor(tonumber(pf.equivBlocksSaved) or 0)
+        )
+        postInflux(dbUrl, line .. "\n")
+        return true
+
+    elseif msgType == "STOCK_CLAIMS" and type(arg1) == "string" then
+        if dtpfMesh.addr and (sender ~= dtpfMesh.addr or isTunnel ~= dtpfMesh.viaTunnel) then
+            sendMeshPacket(dtpfMesh.addr, dtpfMesh.viaTunnel, "STOCK_CLAIMS", arg1)
+        end
+        return true
+
+    elseif msgType == "DTPF_CLAIMS" and type(arg1) == "string" then
+        if stockMesh.addr and (sender ~= stockMesh.addr or isTunnel ~= stockMesh.viaTunnel) then
+            sendMeshPacket(stockMesh.addr, stockMesh.viaTunnel, "DTPF_CLAIMS", arg1)
+        end
+        return true
+
+    elseif msgType == "DTPF_HANDOFF" and type(arg1) == "string" then
+        if dtpfMesh.addr and (sender ~= dtpfMesh.addr or isTunnel ~= dtpfMesh.viaTunnel) then
+            sendMeshPacket(dtpfMesh.addr, dtpfMesh.viaTunnel, "DTPF_HANDOFF", arg1, arg2)
+        end
+        return true
+
+    elseif msgType == "DTPF_HANDOFF_ACK" and type(arg1) == "string" then
+        if stockMesh.addr and (sender ~= stockMesh.addr or isTunnel ~= stockMesh.viaTunnel) then
+            sendMeshPacket(stockMesh.addr, stockMesh.viaTunnel, "DTPF_HANDOFF_ACK", arg1, arg2)
+        end
+        return true
+
     elseif msgType == "MESH_MAINT_SYNC" then
         local wasFresh = isMeshFresh(dtpfMesh, 60)
         dtpfMesh.addr = sender
@@ -1608,7 +1783,7 @@ local function callMeshRpc(interface, writeLineFn, peer, msgType, payloadTbl, re
                         emitMeshHelloIfOnline(writeLineFn)
                     end
                 end
-                if replyType == "DTPF_REPLY" then
+                if replyType == "DTPF_REPLY" or replyType == "STOCK_REPLY" then
                     local idx = tonumber(a2) or 1
                     local total = tonumber(a3) or 1
                     if not slices[idx] then gotSlices = gotSlices + 1 end
@@ -1617,7 +1792,7 @@ local function callMeshRpc(interface, writeLineFn, peer, msgType, payloadTbl, re
                     if gotSlices >= expectedTotal then
                         local okU, tbl = pcall(serialization.unserialize, table.concat(slices, "", 1, expectedTotal))
                         if okU and type(tbl) == "table" then return tbl end
-                        return { ok = false, error = "Failed to decode DTPF_REPLY" }
+                        return { ok = false, error = "Failed to decode " .. tostring(replyType) }
                     end
                 else
                     local okU, tbl = pcall(serialization.unserialize, tostring(a2 or ""))
@@ -1652,6 +1827,7 @@ local function handleBridgeCommand(sockWriteLine, interface, cmd)
             meshPump = isMeshFresh(pumpMesh, 180),
             meshUniv = isMeshFresh(univMesh, 60),
             meshGorge = isMeshFresh(gorgeMesh, 60),
+            meshStock = isMeshFresh(stockMesh, 60),
         })
     elseif op == "cpus" then
         if not interface then
@@ -1671,29 +1847,28 @@ local function handleBridgeCommand(sockWriteLine, interface, cmd)
             meshPump = isMeshFresh(pumpMesh, 180),
             meshUniv = isMeshFresh(univMesh, 60),
             meshGorge = isMeshFresh(gorgeMesh, 60),
+            meshStock = isMeshFresh(stockMesh, 60),
         })
     elseif op == "item_stocks" then
         if not interface then
             return reply({ ok = false, error = "No AE2 interface connected" })
         end
         local reqList = type(cmd.items) == "table" and cmd.items or {}
-        local needFluids = false
-        for i = 1, math.min(#reqList, 16) do
-            if type(reqList[i]) == "table" and reqList[i].type == "fluid" then
-                needFluids = true
-                break
-            end
-        end
-        local fluidByLabel = {}
-        if needFluids and interface.getFluidsInNetwork then
-            local okF, fl = pcall(interface.getFluidsInNetwork)
-            if okF and type(fl) == "table" then
-                for _, f in ipairs(fl) do
-                    if type(f) == "table" and f.label then
-                        fluidByLabel[f.label] = (fluidByLabel[f.label] or 0) + math.floor(tonumber(f.amount or f.size or 0) or 0)
+        local fluidByLabel = nil
+        local function getFluidByLabel()
+            if fluidByLabel then return fluidByLabel end
+            fluidByLabel = {}
+            if interface.getFluidsInNetwork then
+                local okF, fl = pcall(interface.getFluidsInNetwork)
+                if okF and type(fl) == "table" then
+                    for _, f in ipairs(fl) do
+                        if type(f) == "table" and f.label then
+                            fluidByLabel[f.label] = (fluidByLabel[f.label] or 0) + math.floor(tonumber(f.amount or f.size or 0) or 0)
+                        end
                     end
                 end
             end
+            return fluidByLabel
         end
         local out = {}
         for i = 1, math.min(#reqList, 16) do
@@ -1702,16 +1877,28 @@ local function handleBridgeCommand(sockWriteLine, interface, cmd)
                 local qty = 0
                 local rType = (reqIt.type == "fluid") and "fluid" or "item"
                 if rType == "fluid" then
-                    qty = fluidByLabel[reqIt.label or ""] or 0
-                elseif interface.getItemsInNetwork and reqIt.name and reqIt.name ~= "" then
-                    local okI, list = pcall(interface.getItemsInNetwork, {
-                        name = reqIt.name,
-                        damage = tonumber(reqIt.damage) or 0,
-                    })
-                    if okI and type(list) == "table" then
-                        for _, st in ipairs(list) do
-                            if type(st) == "table" and (not reqIt.label or reqIt.label == "" or st.label == reqIt.label) then
-                                qty = qty + math.floor(tonumber(st.size or 0) or 0)
+                    if interface.getFluidInNetwork and reqIt.name and reqIt.name ~= "" then
+                        local okF, st = pcall(interface.getFluidInNetwork, reqIt.name)
+                        if okF and type(st) == "table" then
+                            qty = math.floor(tonumber(st.amount or st.size or 0) or 0)
+                        end
+                    else
+                        qty = getFluidByLabel()[reqIt.label or ""] or 0
+                    end
+                elseif reqIt.name and reqIt.name ~= "" then
+                    local dmg = tonumber(reqIt.damage) or 0
+                    if interface.getItemInNetwork and reqIt.hasTag ~= true then
+                        local okI, st = pcall(interface.getItemInNetwork, { name = reqIt.name, damage = dmg })
+                        if okI and type(st) == "table" then
+                            qty = math.floor(tonumber(st.size or st.amount or 0) or 0)
+                        end
+                    elseif interface.getItemsInNetwork then
+                        local okI, list = pcall(interface.getItemsInNetwork, { name = reqIt.name, damage = dmg })
+                        if okI and type(list) == "table" then
+                            for _, st in ipairs(list) do
+                                if type(st) == "table" and (not reqIt.label or reqIt.label == "" or st.label == reqIt.label) then
+                                    qty = qty + math.floor(tonumber(st.size or 0) or 0)
+                                end
                             end
                         end
                     end
@@ -1993,6 +2180,37 @@ local function handleBridgeCommand(sockWriteLine, interface, cmd)
             return reply(res)
         end
         return reply({ ok = false, error = "Empty Gorge mesh response" })
+    elseif op == "stock_state" or op == "stock_patch" or op == "stock_action" or op == "stock_reboot" then
+        local stockOp = (op == "stock_reboot") and "stock_action" or op
+        local stockAct = (op == "stock_reboot") and "reboot" or cmd.action
+        local res = callMeshRpc(interface, sockWriteLine, stockMesh, "STOCK_CMD", {
+            id = cmdId,
+            op = stockOp,
+            patch = cmd.patch,
+            action = stockAct,
+        }, "STOCK_REPLY", 8.0)
+        if type(res) == "table" then
+            res.meshRouted = true
+            return reply(res)
+        end
+        return reply({ ok = false, error = "Empty Stock Maintainer mesh response" })
+    elseif op == "mesh_recover" then
+        local targetRole = tostring(cmd.role or "all"):lower()
+        local peerMap = { dtpf = dtpfMesh, stock = stockMesh, pump = pumpMesh, gorge = gorgeMesh, univ = univMesh }
+        local woken = {}
+        local now = uptimeNow()
+        for rName, pTbl in pairs(peerMap) do
+            if targetRole == "all" or targetRole == rName then
+                pTbl.recoveryAttempts = (pTbl.recoveryAttempts or 0) + 1
+                pTbl.lastRecoveryAt = now
+                sendMeshPacket(pTbl.addr, pTbl.viaTunnel, WAKE_MSG, rName)
+                woken[#woken + 1] = rName
+            end
+        end
+        sendMeshPacket(nil, false, "MESH_MAINNET_HELLO", "recover")
+        table.sort(woken)
+        emitMeshHelloIfOnline(sockWriteLine)
+        return reply({ ok = true, woken = woken, meshHealth = buildMeshHealth(now) })
     elseif op == "reboot" then
         reply({ ok = true, rebooting = true })
         pcall(os.sleep, 0.05)
@@ -2146,6 +2364,7 @@ local function main()
                     meshPump = isMeshFresh(pumpMesh, 180),
                     meshUniv = isMeshFresh(univMesh, 60),
                     meshGorge = isMeshFresh(gorgeMesh, 60),
+                    meshStock = isMeshFresh(stockMesh, 60),
                 }))
             end
         end
@@ -2302,6 +2521,26 @@ local function main()
                         return "Gorge: " .. act .. " OK."
                     end
                     return "Gorge: " .. tostring(type(res) == "table" and res.error or "No response")
+                elseif peerKey == "stock" then
+                    local stockCmd
+                    if action == "pause" then
+                        stockCmd = { op = "stock_action", action = "pause" }
+                    elseif action == "resume" then
+                        stockCmd = { op = "stock_action", action = "arm" }
+                    elseif action == "poll" then
+                        stockCmd = { op = "stock_action", action = "poll_now" }
+                    else
+                        stockCmd = { op = "stock_action", action = tostring(action) }
+                    end
+                    local res = callMeshRpc(interface, writeBridgeLine, stockMesh, "STOCK_CMD", stockCmd, "STOCK_REPLY", 3.5)
+                    if type(res) == "table" and res.ok then
+                        if type(stockMesh.status) == "table" and res.armed ~= nil then
+                            stockMesh.status.armed = res.armed
+                        end
+                        logMsg("MESH", "Stock Maintainer action '" .. tostring(action) .. "' OK.")
+                        return "Stock: " .. tostring(action) .. " OK."
+                    end
+                    return "Stock: " .. tostring(type(res) == "table" and res.error or "No response")
                 end
                 return "Unknown peer."
             end,
@@ -2458,13 +2697,19 @@ local function main()
             end
 
             if config.enableMesh ~= false and (upNow - lastMeshBeaconUptime) >= 20
-                and (not isMeshFresh(dtpfMesh, 60) or not isMeshFresh(pumpMesh, 180)
-                     or not isMeshFresh(univMesh, 60) or not isMeshFresh(gorgeMesh, 60)) then
+                and (not isMeshFresh(dtpfMesh, PEER_STALE_SEC) or not isMeshFresh(pumpMesh, PUMP_STALE_SEC)
+                     or not isMeshFresh(univMesh, PEER_STALE_SEC) or not isMeshFresh(gorgeMesh, PEER_STALE_SEC)
+                     or not isMeshFresh(stockMesh, PEER_STALE_SEC)) then
                 lastMeshBeaconUptime = upNow
                 local m, t = getMeshTransports()
                 if m or t then
                     sendMeshPacket(nil, false, "MESH_MAINNET_HELLO", "beacon")
                 end
+            end
+            if config.enableMesh ~= false and (upNow - lastWatchdogAt) >= 15 then
+                lastWatchdogAt = upNow
+                local wdDbUrl = (not config.exportPaused and config.dbURL) and (config.dbURL .. (config.itemDB or "mainnet")) or nil
+                checkMeshWatchdog(upNow, wdDbUrl, writeBridgeLine)
             end
 
             if (not config.exportPaused) and config.enableItems and interface and (config.allItemsMode == 1 or config.allItemsMode == 3) and os.time() > lastAllItemsTime + config.allItemsInterval then
