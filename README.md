@@ -16,6 +16,7 @@ Each subfolder is **100% self-contained** (no hidden cross-folder runtime depend
 | **Space Pump** | [`gtnh-space-pump/`](gtnh-space-pump/) | Space Elevator Fluid Pump target stock controller + optional `port 4205` Mesh (`enableMesh`) | Production |
 | **Gorge Control** | [`gtnh-gorge-control/`](gtnh-gorge-control/) | Unified Forge of the Gods controller + multi-Exoticizer Rack (`Magmatter` + `QGP`) | Production |
 | **Stock Maintainer** | [`gtnh-stock-control/`](gtnh-stock-control/) | Standalone Mainnet AE2 O(1) Level Maintainer (items & fluids, drop-in Transposer, DTPF overlap warnings) | Production |
+| **QFT Control** | [`gtnh-qft-control/`](gtnh-qft-control/) | Quantum Force Transformer Fleet Controller (focus/plasma safety, recipe input push) | Production |
 
 ---
 
@@ -28,7 +29,7 @@ wget -f https://raw.githubusercontent.com/Jimbo-Coder/OC-gtnh-control/main/insta
 
 Direct install or list:
 ```sh
-/tmp/install.lua universal      # or: dtpf, ae2, pump, gorge, stock
+/tmp/install.lua universal      # or: dtpf, ae2, pump, gorge, stock, qft
 /tmp/install.lua --list
 ```
 
