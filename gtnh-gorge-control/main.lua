@@ -276,14 +276,12 @@ end
 local function runWorker()
     while true do
         disarmShellReviveWatchdog()
-        local cfg, cfgSrc = loadConfig()
+        local cfg = loadConfig()
         local state = Scheduler.newState()
         Scheduler.loadInflight(INFLIGHT_PATH, state, BACKUP_INFLIGHT_PATH)
         local disc = Scheduler.syncHardware(cfg, state)
-        if cfgSrc == "defaults" then
-            local nBound = Scheduler.autoBindDiscovered(cfg, disc)
-            if nBound > 0 then saveConfig(cfg) end
-        end
+        local nBound = Scheduler.autoBindDiscovered(cfg, disc)
+        if nBound > 0 then saveConfig(cfg) end
         Hardware.openMeshPort(cfg, nil, state)
 
         print("GTNH Gorge Control worker started (" .. (cfg.armed and "ARMED" or "PAUSED") .. "). Ctrl+C to stop.")
@@ -345,14 +343,12 @@ end
 local function runGUI()
     while true do
         disarmShellReviveWatchdog()
-        local cfg, cfgSrc = loadConfig()
+        local cfg = loadConfig()
         local state = Scheduler.newState()
         Scheduler.loadInflight(INFLIGHT_PATH, state, BACKUP_INFLIGHT_PATH)
         local disc = Scheduler.syncHardware(cfg, state)
-        if cfgSrc == "defaults" then
-            local nBound = Scheduler.autoBindDiscovered(cfg, disc)
-            if nBound > 0 then saveConfig(cfg) end
-        end
+        local nBound = Scheduler.autoBindDiscovered(cfg, disc)
+        if nBound > 0 then saveConfig(cfg) end
         Hardware.openMeshPort(cfg, nil, state)
 
         local disc = state.discovery or {}

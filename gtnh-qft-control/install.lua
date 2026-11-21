@@ -282,7 +282,7 @@ local function runInstaller(args)
     end
     writeWholeFile(REPO_META_PATH, repo .. "\n" .. branch .. "\n")
     writeWholeFile(BIN_PATH, "local args = { ... }\nlocal c, e = loadfile(\"/home/qft/main.lua\")\nif not c then error(e) end\nreturn c(table.unpack(args))\n")
-    if (not isUpdate) and optAutostart == true then
+    if (not isUpdate) and (optAutostart == true or (optAutostart == nil and optYes)) then
         local sh = readWholeFile(SHRC_PATH) or ""
         if not sh:find("qft", 1, true) then
             writeWholeFile(SHRC_PATH, ((sh ~= "" and sh:sub(-1) ~= "\n") and (sh .. "\n") or sh) .. "qft\n")

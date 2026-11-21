@@ -199,9 +199,11 @@ local function runWorker()
         local cfg = loadConfig()
         local state = Scheduler.newState()
         local disc = Scheduler.syncHardware(cfg, state)
-        if #(cfg.units or {}) == 0 and #(disc.controllers or {}) > 0 then
-            Scheduler.autoBindDiscoveredUnits(cfg, disc)
-            saveConfig(cfg)
+        if #(disc.controllers or {}) > 0 then
+            local added, boundExtra = Scheduler.autoBindDiscoveredUnits(cfg, disc)
+            if (added or 0) > 0 or (boundExtra or 0) > 0 then
+                saveConfig(cfg)
+            end
         end
         Hardware.openMeshPort(cfg, nil, state)
         local userExit = false
@@ -250,9 +252,11 @@ local function runGUI()
         local cfg = loadConfig()
         local state = Scheduler.newState()
         local disc = Scheduler.syncHardware(cfg, state)
-        if #(cfg.units or {}) == 0 and #(disc.controllers or {}) > 0 then
-            Scheduler.autoBindDiscoveredUnits(cfg, disc)
-            saveConfig(cfg)
+        if #(disc.controllers or {}) > 0 then
+            local added, boundExtra = Scheduler.autoBindDiscoveredUnits(cfg, disc)
+            if (added or 0) > 0 or (boundExtra or 0) > 0 then
+                saveConfig(cfg)
+            end
         end
         Hardware.openMeshPort(cfg, nil, state)
         if (not disc.hasGpu) or (not disc.hasScreen) then runWorker(); return end
