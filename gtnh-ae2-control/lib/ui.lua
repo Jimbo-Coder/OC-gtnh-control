@@ -115,6 +115,7 @@ function UI.new(cfg, hubState, callbacks, compLib)
         confirmCancelCpu = nil,
         confirmRebootPeer = nil,
         confirmUpdateKey = nil,
+        updateSource = "local",
         stockSearchQuery = "",
         stockSearchFilter = "ALL",
         stockSearchResults = nil,
@@ -390,6 +391,14 @@ function UI:renderOverviewTab()
     local peers = hub.peers or {}
     local now = tonumber(hub.nowUptime) or 0
 
+    self:drawText(2, 4, "OTA:", COLORS.accent, COLORS.bg)
+    local ox = self:drawFleetOtaRow(7, 4, "ovr_", "ovr_upd_ae2", {
+        allLocal = "[↑ All: Local]", allLocalC = "[Confirm Local?]",
+        allGh = "[↑ All: GitHub]", allGhC = "[Confirm GH?]",
+        brain = "[↻ Brain]", brainC = "[Confirm Brain?]",
+    })
+    self:drawUpdateSourceToggle(ox, 4)
+
     -- 4 KPI Cards across y=5..12 (width ~38 each)
     -- Card 1: AE2 Power & Storage (x=2, w=38)
     self:drawFrame(2, 5, 38, 8, COLORS.border, COLORS.panelBg, "round")
@@ -608,17 +617,23 @@ function UI:renderOverviewTab()
         local isRbtArm = (self.confirmRebootPeer == sc.key)
         local canRbt = (sc.key == "ae2") or sc.seen
         local rbtX = sc.x + sc.w - (isRbtArm and 9 or 7)
+        local updKey = "ovr_card_" .. tostring(sc.key)
+        local isUpdArm = (self.confirmUpdateKey == updKey)
+        local updX = rbtX - (isUpdArm and 5 or 4)
         local compact = (sc.w < 23)
         if isStale and self.cb.onMeshRecover then
             local wx = self:drawButton(sc.x + 2, 20, compact and "[Wk]" or "[Wake]", COLORS.yellow, COLORS.amberBg, function()
                 self.statusMsg = tostring(self.cb.onMeshRecover(sc.key) or "Wake sent.")
             end)
-            self:drawButton(wx + 1, 20, compact and "[Op]" or ("[" .. sc.tabLbl .. "]"), COLORS.cyan, COLORS.btnBg, function()
-                self.tab = sc.tab
-                self.tabScroll = 0
-            end)
+            if not compact then
+                self:drawButton(wx + 1, 20, canRbt and "[Op]" or ("[" .. sc.tabLbl .. "]"), COLORS.cyan, COLORS.btnBg, function()
+                    self.tab = sc.tab
+                    self.tabScroll = 0
+                end)
+            end
         else
-            self:drawButton(sc.x + 2, 20, compact and "[Open]" or ("[Open " .. sc.tabLbl .. "]"), COLORS.cyan, COLORS.btnBg, function()
+            local openLbl = canRbt and (compact and "[Op]" or "[Open]") or (compact and "[Open]" or ("[Open " .. sc.tabLbl .. "]"))
+            self:drawButton(sc.x + 2, 20, openLbl, COLORS.cyan, COLORS.btnBg, function()
                 self.tab = sc.tab
                 self.tabScroll = 0
             end)
@@ -629,6 +644,9 @@ function UI:renderOverviewTab()
             end
         end
         if canRbt and self.cb.onPeerAction then
+            self:drawUpdateBtn(updX, 20, updKey, "[↑]", "[↑?]", function()
+                self:triggerPeerUpdate(sc.key, "Updating " .. tostring(sc.key))
+            end)
             self:drawRebootBtn(rbtX, 20, sc.key, "[Rbt]", "[Sure?]")
         end
     end
@@ -807,7 +825,7 @@ function UI:renderMeshPeerCard(x, y, cw, ch, title, peerKey, peer, winSec, targe
     if self.cb.onPeerAction then
         bx = self:drawRebootBtn(bx, y + ch - 3, peerKey, "[Reboot]", "[Confirm Reboot?]")
         self:drawUpdateBtn(bx, y + ch - 3, "upd_card_" .. tostring(peerKey), "[↑ Upd]", "[Confirm Upd?]", function()
-            self.statusMsg = tostring(self.cb.onPeerAction(peerKey, "update_local", { source = "local" }) or ("Updating " .. tostring(peerKey)))
+            self:triggerPeerUpdate(peerKey, "Updating " .. tostring(peerKey))
         end)
     end
     if targetTab then
@@ -829,24 +847,8 @@ function UI:renderMeshTab()
     local peers = (self.hub and self.hub.peers) or {}
 
     self:drawText(2, 4, "Fleet OTA:", COLORS.accent, COLORS.bg)
-    local fx = 14
-    fx = self:drawUpdateBtn(fx, 4, "mesh_fleet_local", "[↑ Update All: Local]", "[Confirm Local All?]", function()
-        if self.cb.onUpdateFleet then
-            local _, msg = self.cb.onUpdateFleet("local")
-            self.statusMsg = tostring(msg or "Fleet local update dispatched.")
-        end
-    end)
-    fx = self:drawUpdateBtn(fx, 4, "mesh_fleet_github", "[↑ Update All: GitHub]", "[Confirm GH All?]", function()
-        if self.cb.onUpdateFleet then
-            local _, msg = self.cb.onUpdateFleet("github")
-            self.statusMsg = tostring(msg or "Fleet GitHub update dispatched.")
-        end
-    end)
-    self:drawUpdateBtn(fx, 4, "mesh_upd_ae2", "[↻ Update Brain]", "[Confirm Brain?]", function()
-        if self.cb.onPeerAction then
-            self.statusMsg = tostring(self.cb.onPeerAction("ae2", "update_local", { source = "local" }) or "Updating Brain...")
-        end
-    end)
+    local fx = self:drawFleetOtaRow(14, 4, "mesh_", "mesh_upd_ae2")
+    self:drawUpdateSourceToggle(fx, 4)
 
     -- Card 1: DTPF Fleet (x=2, y=5, w=77, h=14)
     self:renderMeshPeerCard(2, 5, 77, 14, "DTPF FLEET CONTROLLER", "dtpf", peers.dtpf, 60, TAB_DTPF, function(st, bx, by, bw)
@@ -1069,6 +1071,51 @@ function UI:drawRebootBtn(bx, y, peerKey, normalLbl, confirmLbl)
     end, "reboot") + 2
 end
 
+function UI:getUpdateSource()
+    return (self.updateSource == "github") and "github" or "local"
+end
+
+function UI:triggerPeerUpdate(peerKey, fallbackLabel)
+    if self.cb.onPeerAction then
+        local uSrc = self:getUpdateSource()
+        self.statusMsg = tostring(self.cb.onPeerAction(peerKey, "update_local", { source = uSrc })
+            or (fallbackLabel or ("Updating " .. tostring(peerKey))))
+    end
+end
+
+function UI:drawUpdateSourceToggle(x, y)
+    local src = self:getUpdateSource()
+    return self:drawButton(x, y, (src == "github") and "[Src:GitHub]" or "[Src:Local]",
+        (src == "github") and COLORS.purple or COLORS.cyan, COLORS.btnBg, function()
+            self.updateSource = (self.updateSource == "github") and "local" or "github"
+            self.statusMsg = "Per-node update source -> " .. string.upper(self.updateSource)
+        end) + 2
+end
+
+function UI:drawFleetOtaRow(x, y, prefix, brainKey, opts)
+    opts = opts or {}
+    local pfx = prefix or ""
+    local nx = self:drawUpdateBtn(x, y, pfx .. "fleet_local",
+        opts.allLocal or "[↑ Update All: Local]", opts.allLocalC or "[Confirm Local All?]", function()
+            if self.cb.onUpdateFleet then
+                local _, msg = self.cb.onUpdateFleet("local")
+                self.statusMsg = tostring(msg or "Fleet local update dispatched.")
+            end
+        end)
+    nx = self:drawUpdateBtn(nx, y, pfx .. "fleet_github",
+        opts.allGh or "[↑ Update All: GitHub]", opts.allGhC or "[Confirm GH All?]", function()
+            if self.cb.onUpdateFleet then
+                local _, msg = self.cb.onUpdateFleet("github")
+                self.statusMsg = tostring(msg or "Fleet GitHub update dispatched.")
+            end
+        end)
+    nx = self:drawUpdateBtn(nx, y, brainKey or (pfx .. "upd_ae2"),
+        opts.brain or "[↻ Update Brain]", opts.brainC or "[Confirm Brain?]", function()
+            self:triggerPeerUpdate("ae2", "Updating Brain...")
+        end)
+    return nx
+end
+
 function UI:drawUpdateBtn(bx, y, key, normalLbl, confirmLbl, fn)
     local isConfirm = (self.confirmUpdateKey == key)
     local cLbl = confirmLbl or "[Confirm Upd?]"
@@ -1123,9 +1170,7 @@ function UI:renderDtpfTab()
     bx = self:drawOrchestratorBtn(bx, 9, "[Lock AutoPull]", COLORS.red, COLORS.btnBg, "dtpf", "lock_autopull")
     bx = self:drawRebootBtn(bx, 9, "dtpf", "[Reboot DTPF]", "[Confirm Reboot?]")
     self:drawUpdateBtn(bx, 9, "upd_dtpf", "[↑ Upd]", "[Confirm Upd?]", function()
-        if self.cb.onPeerAction then
-            self.statusMsg = tostring(self.cb.onPeerAction("dtpf", "update_local", { source = "local" }) or "Updating DTPF")
-        end
+        self:triggerPeerUpdate("dtpf", "Updating DTPF")
     end)
 
     self:drawFrame(2, 13, 157, 35, COLORS.border, COLORS.panelBg, "round")
@@ -1183,9 +1228,7 @@ function UI:renderUniversalTab()
     bx = self:drawOrchestratorBtn(bx, 9, "[Clear Stalls]", COLORS.red, COLORS.btnBg, "univ", "clear_stalls")
     bx = self:drawRebootBtn(bx, 9, "univ", "[Reboot Univ]", "[Confirm Reboot?]")
     self:drawUpdateBtn(bx, 9, "upd_univ", "[↑ Upd]", "[Confirm Upd?]", function()
-        if self.cb.onPeerAction then
-            self.statusMsg = tostring(self.cb.onPeerAction("univ", "update_local", { source = "local" }) or "Updating Universal")
-        end
+        self:triggerPeerUpdate("univ", "Updating Universal")
     end)
 
     self:drawFrame(2, 13, 157, 35, COLORS.border, COLORS.panelBg, "round")
@@ -1262,9 +1305,7 @@ function UI:renderGorgeTab()
     bx = self:drawOrchestratorBtn(bx, 10, "[Poll Now]", COLORS.cyan, COLORS.btnBg, "gorge", "poll")
     bx = self:drawRebootBtn(bx, 10, "gorge", "[Reboot Gorge]", "[Confirm Reboot?]")
     self:drawUpdateBtn(bx, 10, "upd_gorge", "[↑ Upd]", "[Confirm Upd?]", function()
-        if self.cb.onPeerAction then
-            self.statusMsg = tostring(self.cb.onPeerAction("gorge", "update_local", { source = "local" }) or "Updating Gorge")
-        end
+        self:triggerPeerUpdate("gorge", "Updating Gorge")
     end)
 
     self:drawFrame(2, 14, 157, 34, COLORS.border, COLORS.panelBg, "round")
@@ -1347,9 +1388,7 @@ function UI:renderPumpTab()
     bx = self:drawOrchestratorBtn(bx, 9, "[Reload Config]", COLORS.yellow, COLORS.btnBg, "pump", "reload")
     bx = self:drawRebootBtn(bx, 9, "pump", "[Reboot Pump]", "[Confirm Reboot?]")
     self:drawUpdateBtn(bx, 9, "upd_pump", "[↑ Upd]", "[Confirm Upd?]", function()
-        if self.cb.onPeerAction then
-            self.statusMsg = tostring(self.cb.onPeerAction("pump", "update_local", { source = "local" }) or "Updating Space Pump")
-        end
+        self:triggerPeerUpdate("pump", "Updating Space Pump")
     end)
 
     self:drawFrame(2, 13, 157, 35, COLORS.border, COLORS.panelBg, "round")
@@ -1408,9 +1447,7 @@ function UI:renderStockTab()
     bx = self:drawOrchestratorBtn(bx, 9, "[Benchmark]", COLORS.cyan, COLORS.btnBg, "stock", "run_bench")
     bx = self:drawRebootBtn(bx, 9, "stock", "[Reboot Stock]", "[Confirm Reboot?]")
     self:drawUpdateBtn(bx, 9, "upd_stock", "[↑ Upd]", "[Confirm Upd?]", function()
-        if self.cb.onPeerAction then
-            self.statusMsg = tostring(self.cb.onPeerAction("stock", "update_local", { source = "local" }) or "Updating Stock")
-        end
+        self:triggerPeerUpdate("stock", "Updating Stock")
     end)
 
     self:drawFrame(2, 13, 157, 35, COLORS.border, COLORS.panelBg, "round")
@@ -1534,9 +1571,7 @@ function UI:renderQftTab()
     bx = self:drawOrchestratorBtn(bx, 9, "[Rediscover]", COLORS.fg, COLORS.btnBg, "qft", "rediscover")
     bx = self:drawRebootBtn(bx, 9, "qft", "[Reboot QFT]", "[Confirm Reboot?]")
     self:drawUpdateBtn(bx, 9, "upd_qft", "[↑ Upd]", "[Confirm Upd?]", function()
-        if self.cb.onPeerAction then
-            self.statusMsg = tostring(self.cb.onPeerAction("qft", "update_local", { source = "local" }) or "Updating QFT")
-        end
+        self:triggerPeerUpdate("qft", "Updating QFT")
     end)
 
     self:drawFrame(2, 13, 157, 35, COLORS.border, COLORS.panelBg, "round")
@@ -1684,23 +1719,7 @@ function UI:renderSetupTab()
         tostring(self.cfg.allItemsMode or 0), tostring(self.cfg.maxID or 0), tostring(self.cfg.batchSize or 0)), 72), COLORS.muted, COLORS.panelBg)
 
     self:drawText(83, 43, "Fleet OTA Update (Local skips git push; Brain relays Mesh):", COLORS.accent, COLORS.panelBg)
-    self:drawUpdateBtn(83, 45, "fleet_local", "[↑ Update All: Local]", "[Confirm Local All?]", function()
-        if self.cb.onUpdateFleet then
-            local _, msg = self.cb.onUpdateFleet("local")
-            self.statusMsg = tostring(msg or "Fleet local update dispatched.")
-        end
-    end)
-    self:drawUpdateBtn(106, 45, "fleet_github", "[↑ Update All: GitHub]", "[Confirm GH All?]", function()
-        if self.cb.onUpdateFleet then
-            local _, msg = self.cb.onUpdateFleet("github")
-            self.statusMsg = tostring(msg or "Fleet GitHub update dispatched.")
-        end
-    end)
-    self:drawUpdateBtn(130, 45, "upd_ae2", "[↻ Update Brain]", "[Confirm Brain?]", function()
-        if self.cb.onPeerAction then
-            self.statusMsg = tostring(self.cb.onPeerAction("ae2", "update_local", { source = "local" }) or "Updating Brain...")
-        end
-    end)
+    self:drawFleetOtaRow(83, 45, "", "upd_ae2")
 end
 
 function UI:renderLogModal()
