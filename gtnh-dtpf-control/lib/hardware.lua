@@ -1969,11 +1969,15 @@ end
 -- Mainnet AE2 Maintainer & In-Game OC Mesh (`MESH_PORT = 4205`) Helpers
 -- ============================================================================
 
-local function getMeshTransports(compLib)
+local function getMeshTransports(compLib, cfg)
+    if cfg ~= nil then
+        Hardware._autoWakeEnabled = (cfg.autoWake ~= false)
+    end
     Hardware.WAKE_MSG = Hardware.WAKE_MSG or Common.WAKE_MSG
+    local wakeArg = (Hardware._autoWakeEnabled == false) and false or Hardware.WAKE_MSG
     local modem, tunnel, mAddr, tAddr = Common.getMeshTransports(compLib, {
         port = Hardware.MESH_PORT,
-        wakeMsg = Hardware.WAKE_MSG,
+        wakeMsg = wakeArg,
         strength = 400,
     })
     return modem, mAddr, tunnel, tAddr
@@ -1983,8 +1987,12 @@ function Hardware.hasMeshPeer()
     return Hardware._mainnetMeshAddr ~= nil
 end
 
-function Hardware.openMeshPort(compLib)
-    local modem, _, tunnel = getMeshTransports(compLib)
+function Hardware.openMeshPort(compLib, cfg)
+    if type(compLib) == "table" and compLib.autoWake ~= nil and cfg == nil then
+        cfg = compLib
+        compLib = nil
+    end
+    local modem, _, tunnel = getMeshTransports(compLib, cfg)
     return modem, tunnel
 end
 
@@ -2333,7 +2341,7 @@ end
 function Hardware.pushMeshMetrics(cfg, runtimeState, nowSec, compLib, force)
     if cfg and cfg.extLinkMode == "off" then return false end
     local cl = compLib or component
-    local modem, _, tunnel = getMeshTransports(cl)
+    local modem, _, tunnel = getMeshTransports(cl, cfg)
     if not modem and not tunnel then return false end
     nowSec = nowSec or 0
     local curArmed = (cfg and cfg.armed == true)
@@ -2372,6 +2380,7 @@ function Hardware.pushMeshMetrics(cfg, runtimeState, nowSec, compLib, force)
     end
     local pkt = {
         armed = (cfg and cfg.armed == true),
+        autoWake = (not cfg or cfg.autoWake ~= false),
         odActive = (od.hasWork == true),
         dtrStock = math.floor(tonumber(stockFluids["dimensionallytranscendentresidue"]) or 0),
         directEut = math.floor(tonumber(pwr.directEut) or 0),
@@ -2464,7 +2473,7 @@ function Hardware.pushMeshMetrics(cfg, runtimeState, nowSec, compLib, force)
     Hardware._meshStartedAt = Hardware._meshStartedAt or nowSec
     local peerSilent = (Hardware._lastMainnetSeen and (nowSec - Hardware._lastMainnetSeen) >= 60)
         or ((not Hardware._lastMainnetSeen) and (nowSec - Hardware._meshStartedAt) >= 60)
-    if peerSilent and (nowSec - (Hardware._lastMainnetWakeAt or -1000)) >= 60 then
+    if (not cfg or cfg.autoWake ~= false) and peerSilent and (nowSec - (Hardware._lastMainnetWakeAt or -1000)) >= 60 then
         Hardware._lastMainnetWakeAt = nowSec
         Hardware._mainnetWakeAttempts = (Hardware._mainnetWakeAttempts or 0) + 1
         local wakeTarget = (Hardware._mainnetMeshAddr and Hardware._mainnetWakeAttempts <= 2) and Hardware._mainnetMeshAddr or nil
@@ -2494,7 +2503,7 @@ end
 function Hardware.handleMeshMessage(webBridge, localAddr, sender, port, msgType, reqId, payload, compLib)
     if webBridge and webBridge.cfg and webBridge.cfg.extLinkMode == "off" then return false end
     local cl = compLib or component
-    local modem, _, tunnel, tAddr = getMeshTransports(cl)
+    local modem, _, tunnel, tAddr = getMeshTransports(cl, webBridge and webBridge.cfg)
     local isMeshPort = (port == Hardware.MESH_PORT) or (port == 0 and tunnel and tAddr and localAddr == tAddr)
     if not isMeshPort or not sender then return false end
 

@@ -702,12 +702,19 @@ function Hardware.applyUnitControl(unit, live, desired, compLib, state)
     return { ok = true, reconfiguring = false, action = "steady" }
 end
 
-local function getMeshTransports(compLib, state)
+local function getMeshTransports(compLib, state, cfg)
     local cl = compLib or defaultComponent or _G.component
     if not cl then return nil, nil, nil end
+    local aw = Hardware._autoWakeEnabled
+    if state and state._autoWakeEnabled ~= nil then aw = state._autoWakeEnabled end
+    if cfg ~= nil then
+        aw = (cfg.autoWake ~= false)
+        Hardware._autoWakeEnabled = aw
+        if state then state._autoWakeEnabled = aw end
+    end
     local modem, tunnel, _, tAddr = Common.getMeshTransports(cl, {
         port = Hardware.MESH_PORT,
-        wakeMsg = Hardware.WAKE_MSG,
+        wakeMsg = (aw == false) and false or Hardware.WAKE_MSG,
         strength = 400,
         proxyFn = function(c, addr)
             return getProxy(c, state, addr)
@@ -735,7 +742,7 @@ end
 function Hardware.openMeshPort(cfg, compLib, state)
     if cfg and cfg.extLinkMode == "off" then return false end
     local cl = compLib or defaultComponent or _G.component
-    local modem, tunnel = getMeshTransports(cl, state)
+    local modem, tunnel = getMeshTransports(cl, state, cfg)
     return (modem ~= nil) or (tunnel ~= nil)
 end
 
@@ -747,7 +754,7 @@ function Hardware.pushRulesToStock(cfg, state, payload, compLib)
         return false, "Invalid push payload"
     end
     local cl = compLib or defaultComponent or _G.component
-    local modem, tunnel = getMeshTransports(cl, state)
+    local modem, tunnel = getMeshTransports(cl, state, cfg)
     if not modem and not tunnel then
         return false, "No Wireless Modem or Linked Card"
     end
@@ -771,7 +778,7 @@ end
 function Hardware.pushMeshMetrics(cfg, state, nowSec, compLib, force)
     if cfg and cfg.extLinkMode == "off" then return false end
     local cl = compLib or defaultComponent or _G.component
-    local modem, tunnel = getMeshTransports(cl, state)
+    local modem, tunnel = getMeshTransports(cl, state, cfg)
     if not modem and not tunnel then return false end
 
     nowSec = nowSec or clockNow()
@@ -807,6 +814,7 @@ function Hardware.pushMeshMetrics(cfg, state, nowSec, compLib, force)
     local diagWrn = #(diag.warnings or {})
     local pkt = {
         armed = (cfg and cfg.armed == true),
+        autoWake = (not cfg or cfg.autoWake ~= false),
         unitCount = #(unitsOut),
         activeCount = running,
         reconfigCount = reconf,
@@ -845,7 +853,7 @@ function Hardware.pushMeshMetrics(cfg, state, nowSec, compLib, force)
     st._meshStartedAt = st._meshStartedAt or nowSec
     local peerSilent = (st._lastMainnetSeen and (nowSec - st._lastMainnetSeen) >= 60)
         or ((not st._lastMainnetSeen) and (nowSec - st._meshStartedAt) >= 60)
-    if peerSilent and (nowSec - (st._lastMainnetWakeAt or -1000)) >= 60 then
+    if (not cfg or cfg.autoWake ~= false) and peerSilent and (nowSec - (st._lastMainnetWakeAt or -1000)) >= 60 then
         st._lastMainnetWakeAt = nowSec
         st._mainnetWakeAttempts = (st._mainnetWakeAttempts or 0) + 1
         local wakeTarget = (st._mainnetMeshAddr and st._mainnetWakeAttempts <= 2) and st._mainnetMeshAddr or nil
@@ -873,7 +881,7 @@ end
 function Hardware.handleMeshMessage(cfg, state, localAddr, sender, port, msgType, reqId, payload, compLib, rpcHandler)
     if cfg and cfg.extLinkMode == "off" then return false end
     local cl = compLib or defaultComponent or _G.component
-    local _, tunnel, tAddr = getMeshTransports(cl, state)
+    local _, tunnel, tAddr = getMeshTransports(cl, state, cfg)
     local isMeshPort = (port == Hardware.MESH_PORT) or (port == 0 and tunnel and tAddr and localAddr == tAddr)
     if not isMeshPort or not sender then return false end
 

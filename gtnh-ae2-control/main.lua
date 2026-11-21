@@ -208,11 +208,13 @@ local INTERVAL_KEYS = {
 local TOGGLE_KEYS = {
     "enableItems", "enableFluids", "enableEssentia", "enableEnergy", "enableWireless",
     "enableEnergyAE2", "enableCpus", "enableTps", "detailedTps", "enableStorage",
-    "enableBridge", "enableMesh", "enableLogging", "enableDebug",
+    "enableBridge", "enableMesh", "enableAutoWake", "enableLogging", "enableDebug",
 }
 
 if config.enableStorage == nil then config.enableStorage = true end
 if config.storageInterval == nil then config.storageInterval = 60 * 72 end
+if config.enableAutoWake == nil then config.enableAutoWake = true end
+config.peerAutoWake = type(config.peerAutoWake) == "table" and config.peerAutoWake or {}
 
 local baseConfigSnapshot = { toggles = {}, intervals = {}, exportPaused = (config.exportPaused == true) }
 for _, k in ipairs(TOGGLE_KEYS) do
@@ -244,6 +246,7 @@ local WAKE_MSG = Common.WAKE_MSG
 
 local function armShellReviveWatchdog()
     return Common.armShellReviveWatchdog({
+        enabled = (config.enableAutoWake ~= false),
         isAutostartFn = isBrainShrcLine,
         shrcPath = SHRC_PATH,
         meshPort = MESH_PORT,
@@ -339,6 +342,13 @@ local function loadConfigOverrides()
             end
         end
     end
+    if type(ov.peerAutoWake) == "table" then
+        for k, v in pairs(ov.peerAutoWake) do
+            if type(v) == "boolean" then
+                config.peerAutoWake[tostring(k)] = v
+            end
+        end
+    end
 end
 
 local function saveConfigOverrides()
@@ -347,12 +357,18 @@ local function saveConfigOverrides()
         exportPaused = (config.exportPaused == true),
         toggles = {},
         intervals = {},
+        peerAutoWake = {},
     }
     for _, k in ipairs(TOGGLE_KEYS) do
         ov.toggles[k] = (config[k] == true)
     end
     for _, k in ipairs(INTERVAL_KEYS) do
         ov.intervals[k] = tonumber(config._sec[k]) or math.floor(((tonumber(config[k]) or 0) / 72) + 0.5)
+    end
+    for k, v in pairs(config.peerAutoWake or {}) do
+        if type(v) == "boolean" then
+            ov.peerAutoWake[tostring(k)] = v
+        end
     end
     local okO, f = pcall(io.open, OVERRIDES_PATH, "w")
     if not okO or not f then return false end
@@ -372,6 +388,7 @@ local function resetConfigOverrides()
         config[k] = ticks
         config._sec[k] = math.floor((ticks / 72) + 0.5)
     end
+    config.peerAutoWake = {}
     if okFs and filesystem and filesystem.remove then
         pcall(filesystem.remove, OVERRIDES_PATH)
         if OVERRIDES_PATH ~= LEGACY_OVERRIDES_PATH then
@@ -414,7 +431,7 @@ local function getMeshTransports()
     end
     local modem, tunnel = Common.getMeshTransports(component, {
         port = MESH_PORT,
-        wakeMsg = WAKE_MSG,
+        wakeMsg = (config.enableAutoWake ~= false) and WAKE_MSG or false,
         strength = 400,
     })
     cachedMeshModem = modem
@@ -1709,6 +1726,7 @@ local function buildMeshHealth(now)
             seen = seen,
             ageSec = seen and math.max(0, math.floor((now - p.lastSeen) + 0.5)) or nil,
             recoveries = math.floor(tonumber(p.recoveryAttempts) or 0),
+            autoWake = (config.peerAutoWake[k] ~= false),
             brief = formatPeerBrief(k, p),
         }
     end
@@ -1726,6 +1744,7 @@ local function emitMeshHelloIfOnline(writeLineFn)
             meshGorge = isMeshFresh(gorgeMesh, PEER_STALE_SEC),
             meshStock = isMeshFresh(stockMesh, PEER_STALE_SEC),
             meshQft = isMeshFresh(qftMesh, PEER_STALE_SEC),
+            ae2AutoWake = (config.enableAutoWake ~= false),
             meshHealth = buildMeshHealth(now),
         }))
     end
@@ -1760,7 +1779,8 @@ local function checkMeshWatchdog(upNow, dbUrl, writeLineFn)
                 logMsg("ERR", string.format("[WATCHDOG] %s heartbeat stale (>%ds).", p.name, p.stale))
             end
         end
-        if (not online) and (t.lastSeen or -1000) > 0 and (upNow - (t.lastRecoveryAt or -1000)) >= 60 then
+        if (config.enableAutoWake ~= false) and (config.peerAutoWake[p.name] ~= false)
+            and (not online) and (t.lastSeen or -1000) > 0 and (upNow - (t.lastRecoveryAt or -1000)) >= 60 then
             t.recoveryAttempts = (t.recoveryAttempts or 0) + 1
             totalRecoveries = totalRecoveries + 1
             t.lastRecoveryAt = upNow
@@ -1867,6 +1887,16 @@ local function fetchHttpBodyForRelay(fullUrl)
     return table.concat(chunks)
 end
 
+local function syncPeerAutoWake(roleKey, pkt, writeLineFn)
+    if type(pkt) == "table" and type(pkt.autoWake) == "boolean" then
+        local prev = config.peerAutoWake[roleKey]
+        config.peerAutoWake[roleKey] = pkt.autoWake
+        if prev ~= pkt.autoWake then
+            emitMeshHelloIfOnline(writeLineFn)
+        end
+    end
+end
+
 local function handleMeshModemEvent(interface, writeLineFn, localAddr, sender, port, msgType, arg1, arg2)
     if not sender or config.enableMesh == false or not okSer then return false end
     local modem, tunnel = getMeshTransports()
@@ -1935,6 +1965,7 @@ local function handleMeshModemEvent(interface, writeLineFn, localAddr, sender, p
         pumpMesh.lastSeen = now
         pumpMesh.status = st
         pumpMesh.statusUptime = now
+        syncPeerAutoWake("pump", st, writeLineFn)
         sendMeshPacket(sender, isTunnel, "PUMP_ACK", "ok")
         if not wasFresh then
             logMsg("MESH", "Space Pump Array connected on OC Mesh.")
@@ -1976,6 +2007,7 @@ local function handleMeshModemEvent(interface, writeLineFn, localAddr, sender, p
         dtpfMesh.viaTunnel = isTunnel
         dtpfMesh.lastSeen = now
         dtpfMesh.status = pkt
+        syncPeerAutoWake("dtpf", pkt, writeLineFn)
         sendMeshPacket(sender, isTunnel, "DTPF_ACK", "ok")
         if not wasFresh then
             logMsg("MESH", "DTPF Fleet connected on OC Mesh.")
@@ -2041,6 +2073,7 @@ local function handleMeshModemEvent(interface, writeLineFn, localAddr, sender, p
         univMesh.viaTunnel = isTunnel
         univMesh.lastSeen = now
         univMesh.status = pkt
+        syncPeerAutoWake("univ", pkt, writeLineFn)
         sendMeshPacket(sender, isTunnel, "UNIV_ACK", "ok")
         if not wasFresh then
             logMsg("MESH", "Universal RS Controller connected on OC Mesh.")
@@ -2063,6 +2096,7 @@ local function handleMeshModemEvent(interface, writeLineFn, localAddr, sender, p
         gorgeMesh.viaTunnel = isTunnel
         gorgeMesh.lastSeen = now
         gorgeMesh.status = pkt
+        syncPeerAutoWake("gorge", pkt, writeLineFn)
         sendMeshPacket(sender, isTunnel, "GORGE_ACK", "ok")
         if not wasFresh then
             logMsg("MESH", "Gorge & Exoticizer Rack connected on OC Mesh.")
@@ -2095,6 +2129,7 @@ local function handleMeshModemEvent(interface, writeLineFn, localAddr, sender, p
         stockMesh.viaTunnel = isTunnel
         stockMesh.lastSeen = now
         stockMesh.status = pkt
+        syncPeerAutoWake("stock", pkt, writeLineFn)
         sendMeshPacket(sender, isTunnel, "STOCK_ACK", "ok")
         if not wasFresh then
             logMsg("MESH", "Stock Maintainer connected on OC Mesh.")
@@ -2126,6 +2161,7 @@ local function handleMeshModemEvent(interface, writeLineFn, localAddr, sender, p
         qftMesh.viaTunnel = isTunnel
         qftMesh.lastSeen = now
         qftMesh.status = pkt
+        syncPeerAutoWake("qft", pkt, writeLineFn)
         sendMeshPacket(sender, isTunnel, "QFT_ACK", "ok")
         if not wasFresh then
             logMsg("MESH", "QFT Controller connected on OC Mesh.")
@@ -2341,6 +2377,47 @@ local function callMeshRpc(interface, writeLineFn, peer, msgType, payloadTbl, re
         end
     end
     return { ok = false, error = "OC mesh RPC timeout (" .. tostring(msgType) .. ")" }
+end
+
+local function setNodeAutoWake(role, enabled, interface, writeLineFn)
+    role = tostring(role or ""):lower()
+    local en = (enabled ~= false)
+    if role == "ae2" then
+        config.enableAutoWake = en
+        pcall(saveConfigOverrides)
+        invalidateMeshCache()
+        if config.enableMesh ~= false then getMeshTransports() end
+        emitMeshHelloIfOnline(writeLineFn)
+        logMsg("OUT", "Brain Auto-Wake -> " .. (en and "ON" or "OFF"))
+        return { ok = true, role = "ae2", autoWake = en }
+    end
+    local peerSpecs = {
+        dtpf  = { p = dtpfMesh,  mt = "DTPF_CMD",  rt = "DTPF_REPLY",  pl = { op = "set_auto_wake", enabled = en } },
+        stock = { p = stockMesh, mt = "STOCK_CMD", rt = "STOCK_REPLY", pl = { op = "stock_action", action = "set_auto_wake", enabled = en } },
+        gorge = { p = gorgeMesh, mt = "GORGE_CMD", rt = "GORGE_REPLY", pl = { action = "set_auto_wake", enabled = en } },
+        qft   = { p = qftMesh,   mt = "QFT_CMD",   rt = "QFT_REPLY",   pl = { op = "qft_action", action = "set_auto_wake", enabled = en } },
+        univ  = { p = univMesh,  mt = "UNIV_CMD",  rt = "UNIV_REPLY",  pl = { action = "set_auto_wake", enabled = en } },
+        pump  = { p = pumpMesh,  mt = "PUMP_CMD",  rt = "PUMP_REPLY",  pl = { op = "set_auto_wake", enabled = en } },
+    }
+    local sp = peerSpecs[role]
+    if not sp then
+        return { ok = false, error = "Unknown Auto-Wake role: " .. role }
+    end
+    config.peerAutoWake[role] = en
+    pcall(saveConfigOverrides)
+    local meshSynced, meshErr = false, nil
+    if sp.p and (sp.p.addr or sp.p.tunnel) then
+        local res = callMeshRpc(interface, writeLineFn, sp.p, sp.mt, sp.pl, sp.rt, 2.5)
+        if type(res) == "table" and res.ok then
+            meshSynced = true
+            if type(sp.p.status) == "table" then sp.p.status.autoWake = en end
+        else
+            meshErr = type(res) == "table" and res.error or "No response"
+        end
+    end
+    emitMeshHelloIfOnline(writeLineFn)
+    logMsg("MESH", string.format("Auto-Wake [%s] -> %s (%s)", role, en and "ON" or "OFF", meshSynced and "peer synced" or (meshErr or "saved on Brain")))
+    return { ok = true, role = role, autoWake = en, meshSynced = meshSynced, warn = meshErr }
 end
 
 local function handleBridgeCommand(sockWriteLine, interface, cmd)
@@ -2813,6 +2890,8 @@ local function handleBridgeCommand(sockWriteLine, interface, cmd)
             return reply(res)
         end
         return reply({ ok = false, error = "Empty QFT Controller mesh response" })
+    elseif op == "set_auto_wake" then
+        return reply(setNodeAutoWake(cmd.role, cmd.enabled, interface, sockWriteLine))
     elseif op == "mesh_recover" then
         local targetRole = tostring(cmd.role or "all"):lower()
         local peerMap = { dtpf = dtpfMesh, stock = stockMesh, pump = pumpMesh, gorge = gorgeMesh, univ = univMesh, qft = qftMesh }
@@ -3007,6 +3086,7 @@ local function main()
                     meshUniv = isMeshFresh(univMesh, PEER_STALE_SEC),
                     meshGorge = isMeshFresh(gorgeMesh, PEER_STALE_SEC),
                     meshStock = isMeshFresh(stockMesh, PEER_STALE_SEC),
+                    ae2AutoWake = (config.enableAutoWake ~= false),
                     meshHealth = buildMeshHealth(now),
                     storage = hubState.storage,
                     tps = hubState.tps,
@@ -3127,6 +3207,10 @@ local function main()
             end,
             onPeerAction = function(peerKey, action, extra)
                 extra = extra or {}
+                if action == "set_auto_wake" then
+                    local r = setNodeAutoWake(peerKey, extra.enabled, interface, writeBridgeLine)
+                    return string.format("%s Auto-Wake: %s", string.upper(tostring(peerKey)), (r.autoWake ~= false) and "ON" or "OFF")
+                end
                 local updUrl = (type(extra.url) == "string" and extra.url ~= "") and extra.url
                     or ((tostring(extra.source or ""):lower() == "github")
                         and "https://raw.githubusercontent.com/Jimbo-Coder/OC-gtnh-control/main"
@@ -3330,9 +3414,10 @@ local function main()
             onConfigChanged = function(kind, key, val)
                 if kind == "toggle" then
                     config[key] = (val == true)
-                    if key == "enableMesh" then
+                    if key == "enableMesh" or key == "enableAutoWake" then
                         invalidateMeshCache()
-                        if config.enableMesh then getMeshTransports() end
+                        if config.enableMesh ~= false then getMeshTransports() end
+                        emitMeshHelloIfOnline(writeBridgeLine)
                     elseif key == "enableBridge" and not config.enableBridge then
                         closeBridgeSocket()
                     else

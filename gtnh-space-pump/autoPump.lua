@@ -191,7 +191,7 @@ local function getMeshModem(forceRefresh)
   end
   local modem, tunnel = Common.getMeshTransports(component, {
     port = MESH_PORT,
-    wakeMsg = WAKE_MSG,
+    wakeMsg = (pumpOverrides._autoWake ~= false) and WAKE_MSG or false,
     strength = 400,
   })
   cachedModem = modem or false
@@ -287,6 +287,7 @@ local function buildStatusPayload(stateName, cycleNum)
   end
   return {
     state = stateName,
+    autoWake = (pumpOverrides._autoWake ~= false),
     cycle = cycleNum or 0,
     uptime = math.floor(computer.uptime()),
     threshold = threshold,
@@ -326,7 +327,7 @@ local function writeStatus(stateName, cycleNum)
       meshStartedAt = meshStartedAt or upNow
       local peerSilent = (lastMainnetSeen and (upNow - lastMainnetSeen) >= 60)
         or ((not lastMainnetSeen) and (upNow - meshStartedAt) >= 60)
-      if peerSilent and (upNow - lastMainnetWakeAt) >= 60 then
+      if (pumpOverrides._autoWake ~= false) and peerSilent and (upNow - lastMainnetWakeAt) >= 60 then
         lastMainnetWakeAt = upNow
         mainnetWakeAttempts = mainnetWakeAttempts + 1
         local wakeTarget = (mainnetAddr and mainnetWakeAttempts <= 2) and mainnetAddr or nil
@@ -483,6 +484,13 @@ local function handleMeshMessage(localAddr, sender, port, msgType, reqId, rawPay
         return true
       end
       replyCmd({ ok = true, queuedAction = act, status = buildStatusPayload(lastStateName, lastCycleNum) })
+    elseif op == 'set_auto_wake' then
+      local en = (cmd.enabled ~= false)
+      pumpOverrides._autoWake = en
+      saveOverrides()
+      getMeshModem(true)
+      logMsg('Auto-Wake -> ' .. (en and 'ON' or 'OFF'))
+      replyCmd({ ok = true, autoWake = en })
     elseif op == 'update_local' then
       local tx = Common.detectOtaTransport(component)
       if not tx.hasInternet and not tx.hasMesh then
@@ -861,6 +869,7 @@ local function armShellReviveWatchdog()
     shrcPath = '/home/.shrc',
     meshPort = MESH_PORT,
     wakeMsg = WAKE_MSG,
+    enabled = (pumpOverrides._autoWake ~= false),
   })
 end
 

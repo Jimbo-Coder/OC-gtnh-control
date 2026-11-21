@@ -737,6 +737,15 @@ function UI:renderSetupTab()
             self.statusMsg = "Autostart toggle unavailable in standalone UI."
         end
     end)
+    local awOn = (self.cfg.autoWake ~= false)
+    self:drawButton(120, 23, awOn and "[AutoWake: ON ]" or "[AutoWake: OFF]", awOn and COLORS.green or COLORS.muted, COLORS.btnBg, function()
+        self.cfg.autoWake = not awOn
+        if Hardware and Hardware.openMeshPort then
+            Hardware.openMeshPort(self.cfg, self.comp, self.state, true)
+        end
+        if self.state then self.state._forcePollNow = true end
+        self:save("Auto-Wake (WoL/Shell) -> " .. (self.cfg.autoWake and "ENABLED" or "DISABLED"))
+    end)
 
     self:drawText(84, 25, string.format("Discovered: IF=%d  TP=%d  RS=%d  DB=%d  GT=%d  LSC=%s",
         #(disc.interfaces or {}), #(disc.transposers or {}), #(disc.redstones or {}),

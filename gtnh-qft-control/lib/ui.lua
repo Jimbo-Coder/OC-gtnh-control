@@ -735,6 +735,15 @@ function UI:renderSetupTab()
             self.statusMsg = "Autostart -> " .. tostring(nxt)
         end)
     end
+    local awOn = (self.cfg.autoWake ~= false)
+    self:drawButton(54, 7, awOn and "[AutoWake: ON ]" or "[AutoWake: OFF]", awOn and COLORS.green or COLORS.muted, COLORS.btnBg, function()
+        self.cfg.autoWake = not awOn
+        if Hardware and Hardware.openMeshPort then
+            Hardware.openMeshPort(self.cfg, component, self.state)
+        end
+        if self.state then self.state._forcePollNow = true end
+        self:save("Auto-Wake -> " .. (self.cfg.autoWake and "ON" or "OFF"))
+    end)
     local ms = self.state.maintMode or {}
     self:drawText(4, 10, "Maintainer Status : " .. tostring(ms.label or "OFFLINE"), COLORS.fg, COLORS.panelBg)
     self:drawText(4, 11, padOrTrunc(tostring(ms.detail or ""), 70), COLORS.muted, COLORS.panelBg)

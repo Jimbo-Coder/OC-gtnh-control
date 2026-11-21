@@ -283,6 +283,7 @@ end
 
 local function armShellReviveWatchdog(cfg)
     return Common.armShellReviveWatchdog({
+        enabled = (cfg == nil or cfg.autoWake ~= false),
         isAutostartFn = isStockShrcLine,
         shrcPath = SHRC_PATH,
         meshPort = tonumber(cfg and cfg.meshPort) or Common.MESH_PORT,

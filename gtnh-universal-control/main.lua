@@ -243,6 +243,7 @@ local function armShellReviveWatchdog(cfg)
         shrcPath = "/home/.shrc",
         meshPort = tonumber(cfg and cfg.meshPort) or Common.MESH_PORT,
         wakeMsg = Common.WAKE_MSG,
+        enabled = (cfg == nil or cfg.autoWake ~= false),
     })
 end
 
@@ -321,6 +322,10 @@ local function runWorker()
                     local timeout = math.max(0.05, math.min(deadline - cur, Scheduler.nextWakeupDelay(cfg, state, cur)))
                     local evTbl = { event.pull(timeout) }
                     local _, stopReq = dispatchEvent(cfg, state, evTbl, computer.uptime(), nil)
+                    if state._cfgDirty then
+                        state._cfgDirty = false
+                        saveConfig(cfg, state)
+                    end
                     if stopReq or state._pendingReboot then
                         running = false
                         userExit = true
@@ -417,6 +422,10 @@ local function runGUI()
 
                 local evTbl = { event.pull(waitSec) }
                 local evDirty, stopReq = dispatchEvent(cfg, state, evTbl, computer.uptime(), ui)
+                if state._cfgDirty then
+                    state._cfgDirty = false
+                    scheduleSave(cfg)
+                end
                 if stopReq or state._pendingReboot then
                     savePending = true
                     userExit = true

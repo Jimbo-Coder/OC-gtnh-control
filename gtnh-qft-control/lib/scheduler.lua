@@ -221,6 +221,7 @@ function Scheduler.defaultConfig()
         armed = false,
         pollSec = 5,
         extLinkMode = "auto",
+        autoWake = true,
         aeAddr = "auto",
         maintFreeCpus = 2,
         maintPollSec = 10,
@@ -236,6 +237,7 @@ function Scheduler.normalizeConfig(raw)
     d.armed = (raw.armed == true)
     d.pollSec = math.max(2, math.min(120, math.floor(tonumber(raw.pollSec) or d.pollSec)))
     d.extLinkMode = (raw.extLinkMode == "off") and "off" or "auto"
+    d.autoWake = (raw.autoWake ~= false)
     d.aeAddr = (type(raw.aeAddr) == "string" and raw.aeAddr ~= "") and raw.aeAddr or "auto"
     d.maintFreeCpus = math.max(0, math.min(32, math.floor(tonumber(raw.maintFreeCpus) or d.maintFreeCpus)))
     d.maintPollSec = math.max(4, math.min(120, math.floor(tonumber(raw.maintPollSec) or d.maintPollSec)))
@@ -1142,6 +1144,11 @@ function Scheduler.executeRpcTable(cfg, state, cmd, compLib, onMutate)
         elseif act == "remove_unit" and type(cmd.unitId) == "string" then
             Scheduler.removeUnit(cfg, cmd.unitId)
             mutated = true
+        elseif act == "set_auto_wake" then
+            cfg.autoWake = (cmd.enabled ~= false)
+            Hardware.openMeshPort(cfg, compLib, state)
+            mutated = true
+            res.autoWake = cfg.autoWake
         elseif act == "update_local" then
             local cl = compLib or rawget(_G, "component")
             local tx = Common.detectOtaTransport(cl)

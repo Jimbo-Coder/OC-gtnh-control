@@ -57,6 +57,10 @@ end
 --- Arm idempotent idle-shell / Ctrl+C wake watchdog (`GTNH_WAKE` reboots after idle grace).
 function Common.armShellReviveWatchdog(opts)
     opts = opts or {}
+    if opts.enabled == false then
+        Common.disarmShellReviveWatchdog()
+        return false
+    end
     local evLib = tryRequire("event")
     if type(evLib) ~= "table" or type(evLib.listen) ~= "function" then
         return false
@@ -139,9 +143,20 @@ function Common.disarmShellReviveWatchdog()
     end
 end
 
---- Configure fuzzy Wake-on-LAN message only when not already set identically.
+--- Configure fuzzy Wake-on-LAN message only when not already set identically (false/"" disables).
 function Common.configureWake(dev, wakeMsg)
     if not dev or type(dev.setWakeMessage) ~= "function" then return false end
+    if wakeMsg == false or wakeMsg == "" then
+        if type(dev.getWakeMessage) == "function" then
+            local okWk, curWk = pcall(dev.getWakeMessage)
+            if okWk and curWk ~= nil and curWk ~= "" then
+                pcall(dev.setWakeMessage, "")
+            end
+        else
+            pcall(dev.setWakeMessage, "")
+        end
+        return false
+    end
     wakeMsg = tostring(wakeMsg or Common.WAKE_MSG)
     local needWake = true
     if type(dev.getWakeMessage) == "function" then
@@ -161,7 +176,7 @@ function Common.configureModem(m, port, wakeMsg, strength)
     if not m then return false end
     port = tonumber(port) or Common.MESH_PORT
     strength = tonumber(strength) or 400
-    wakeMsg = tostring(wakeMsg or Common.WAKE_MSG)
+    local wk = (wakeMsg == false or wakeMsg == "") and "" or tostring(wakeMsg or Common.WAKE_MSG)
 
     local needOpen = true
     if type(m.isOpen) == "function" then
@@ -184,7 +199,7 @@ function Common.configureModem(m, port, wakeMsg, strength)
         if needStr then pcall(m.setStrength, strength) end
     end
 
-    Common.configureWake(m, wakeMsg)
+    Common.configureWake(m, wk)
     return isW
 end
 
@@ -195,7 +210,7 @@ function Common.getMeshTransports(compLib, opts)
     if not cl then return nil, nil, nil, nil end
 
     local port = tonumber(opts.port) or Common.MESH_PORT
-    local wakeMsg = tostring(opts.wakeMsg or Common.WAKE_MSG)
+    local wk = (opts.wakeMsg == false or opts.wakeMsg == "") and "" or tostring(opts.wakeMsg or Common.WAKE_MSG)
     local strength = tonumber(opts.strength) or 400
     local proxyFn = opts.proxyFn or function(c, addr)
         return c.proxy and c.proxy(addr) or nil
@@ -206,14 +221,14 @@ function Common.getMeshTransports(compLib, opts)
         for addr in cl.list("modem", true) do
             local m = proxyFn(cl, addr)
             if m then
-                local isW = Common.configureModem(m, port, wakeMsg, strength)
+                local isW = Common.configureModem(m, port, wk, strength)
                 if not firstModem then firstModem, firstAddr = m, addr end
                 if isW and not wirelessModem then wirelessModem, wirelessAddr = m, addr end
             end
         end
     elseif cl.isAvailable and cl.isAvailable("modem") and cl.modem then
         local m = cl.modem
-        local isW = Common.configureModem(m, port, wakeMsg, strength)
+        local isW = Common.configureModem(m, port, wk, strength)
         firstModem, firstAddr = m, m.address or "modem"
         if isW then wirelessModem, wirelessAddr = m, firstAddr end
     end
@@ -231,7 +246,7 @@ function Common.getMeshTransports(compLib, opts)
         tunnelAddr = tunnelAddr or tunnel.address or "tunnel"
     end
     if tunnel then
-        Common.configureWake(tunnel, wakeMsg)
+        Common.configureWake(tunnel, wk)
     end
 
     return modem, tunnel, modemAddr, tunnelAddr

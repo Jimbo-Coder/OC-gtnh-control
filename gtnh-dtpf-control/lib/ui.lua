@@ -4176,6 +4176,15 @@ function UI:renderWiringTopologyCard(ctx)
     self:drawFrame(82, 9, 78, 9, COLORS.border, COLORS.panelBg, "round")
     self:drawText(84, 9, " ◈ SUBNETS & BRIDGE ", COLORS.accent, COLORS.panelBg)
     local isStandalone = (self.cfg.extLinkMode == "off")
+    local awOn = (self.cfg.autoWake ~= false)
+    self:drawButton(131, 9, awOn and "[AW:ON ]" or "[AW:OFF]",
+        awOn and COLORS.green or COLORS.muted,
+        awOn and COLORS.darkGreen or COLORS.btnBg,
+        function()
+            self.cfg.autoWake = not awOn
+            if Hardware and Hardware.openMeshPort then pcall(Hardware.openMeshPort, self.comp, self.cfg) end
+            self:save("Auto-Wake -> " .. (self.cfg.autoWake and "ON" or "OFF"))
+        end)
     self:drawButton(140, 9, isStandalone and "[Ext:Standalone]" or "[Ext:Mesh/Auto ]",
         isStandalone and COLORS.yellow or COLORS.cyan,
         isStandalone and COLORS.amberBg or COLORS.btnBg,

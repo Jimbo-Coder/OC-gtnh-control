@@ -44,6 +44,7 @@ function Scheduler.defaultConfig()
         autoUnstickEnable = true,
         autoUnstickSec = 600.0,
         extLinkMode = "auto",
+        autoWake = true,
         logLevel = "normal",
         godforge = {
             controllerAddr = nil,
@@ -73,6 +74,7 @@ function Scheduler.normalizeConfig(cfg)
     end
     cfg.autoUnstickSec = math.max(60.0, math.min(7200.0, tonumber(cfg.autoUnstickSec) or def.autoUnstickSec))
     cfg.extLinkMode = (cfg.extLinkMode == "off") and "off" or "auto"
+    cfg.autoWake = (cfg.autoWake ~= false)
     if cfg.logLevel ~= "quiet" and cfg.logLevel ~= "normal" and cfg.logLevel ~= "raw" then
         cfg.logLevel = "normal"
     end

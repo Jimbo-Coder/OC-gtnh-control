@@ -594,7 +594,7 @@ local function runGUI()
 
     local ui = UI.new(cfg, runtimeState, scheduleSave)
     local webBridge = WebBridge.new(cfg, runtimeState, ui, scheduleSave, Scheduler, Hardware)
-    if (cfg.extLinkMode ~= "off") and Hardware.openMeshPort then pcall(Hardware.openMeshPort) end
+    if Hardware.openMeshPort then pcall(Hardware.openMeshPort, nil, cfg) end
     webBridge:step(computer.uptime())
     if not okInit then
         ui.statusMsg = "Scheduler init error: " .. tostring(errInit)
@@ -730,6 +730,7 @@ local function runGUI()
 
     local function armShellReviveWatchdog(meshPort)
         return Common.armShellReviveWatchdog({
+            enabled = (cfg == nil or cfg.autoWake ~= false),
             isAutostartFn = isDtpfShrcLine,
             shrcPath = "/home/.shrc",
             meshPort = tonumber(meshPort) or Common.MESH_PORT,

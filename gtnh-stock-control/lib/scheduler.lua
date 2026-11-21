@@ -86,6 +86,7 @@ function Scheduler.defaultConfig()
         backoffMaxSec = 600,
         dtpfWarnMode = "off", -- "off" | "warn" | "block_overlap"
         extLinkMode = "auto", -- "auto" | "off"
+        autoWake = true,
         aeAddr = "auto",
         dropTransposerAddr = "auto",
         dropSide = -1,
@@ -165,6 +166,7 @@ function Scheduler.normalizeConfig(raw)
         d.dtpfWarnMode = raw.dtpfWarnMode
     end
     d.extLinkMode = (raw.extLinkMode == "off") and "off" or "auto"
+    d.autoWake = (raw.autoWake ~= false)
     d.aeAddr = (type(raw.aeAddr) == "string" and raw.aeAddr ~= "") and raw.aeAddr or "auto"
     d.dropTransposerAddr = (type(raw.dropTransposerAddr) == "string" and raw.dropTransposerAddr ~= "") and raw.dropTransposerAddr or "auto"
     d.dropSide = math.max(-1, math.min(5, math.floor(tonumber(raw.dropSide) or -1)))
@@ -1401,6 +1403,11 @@ function Scheduler.executeRpcTable(cfg, state, cmd, compLib, onMutate)
             Scheduler.pushLog(state, "out", string.format("Dispatched %d rule(s) to DTPF over OC Mesh.", #items), "OUT")
         elseif act == "run_bench" then
             Hardware.runBenchmark(cfg, state, compLib)
+        elseif act == "set_auto_wake" then
+            cfg.autoWake = (cmd.enabled ~= false)
+            Hardware.openMeshPort(cfg, compLib, state, true)
+            mutated = true
+            res = { ok = true, autoWake = cfg.autoWake }
         elseif act == "update_local" then
             local cl = compLib or rawget(_G, "component")
             if not cl then

@@ -1316,6 +1316,17 @@ function UI:renderSetupTab()
     -- Hardware Card (left) & Auto-Scan Guide (right)
     self:drawFrame(2, 9, 78, 16, COLORS.border, COLORS.panelBg, "round")
     self:drawText(4, 9, " ◈ DISCOVERY, EVENTS & LINK ", COLORS.accent, COLORS.panelBg)
+    local awOn = (self.cfg.autoWake ~= false)
+    self:drawButton(48, 9, awOn and "[AW:ON ]" or "[AW:OFF]",
+        awOn and COLORS.green or COLORS.muted, COLORS.btnBg,
+        function()
+            self.cfg.autoWake = not awOn
+            if Hardware and Hardware.openMeshPort then
+                Hardware.openMeshPort(self.cfg, component)
+            end
+            if self.state then self.state._forcePollNow = true end
+            self:save("Auto-Wake -> " .. (self.cfg.autoWake and "ON" or "OFF"))
+        end)
     self:drawButton(57, 9, isStandalone and "[Ext:Standalone]" or "[Ext:Mesh/Auto ]",
         isStandalone and COLORS.yellow or COLORS.cyan,
         isStandalone and COLORS.amberBg or COLORS.btnBg,

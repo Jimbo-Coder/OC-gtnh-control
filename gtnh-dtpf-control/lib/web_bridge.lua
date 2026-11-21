@@ -926,6 +926,18 @@ function WebBridge:executeRpcTable(cmd)
             pcall(self.ui.setStatus, self.ui, string.format("Maintained %d inputs locally (%s).", #pushRules, tag))
         end
         return { id = id, ok = true, target = "local", count = #pushRules, tag = tag, maintMode = "local" }
+    elseif op == "set_auto_wake" then
+        self.cfg.autoWake = (cmd.enabled ~= false)
+        if self.Hardware and self.Hardware.openMeshPort then
+            pcall(self.Hardware.openMeshPort, nil, self.cfg)
+        end
+        if self.state then
+            self.state._forcePollNow = true
+        end
+        if self.scheduleSave then
+            self.scheduleSave()
+        end
+        return { id = id, ok = true, autoWake = self.cfg.autoWake }
     elseif op == "update_local" then
         local okC, cLib = pcall(require, "component")
         local cl = (okC and type(cLib) == "table") and cLib or rawget(_G, "component")

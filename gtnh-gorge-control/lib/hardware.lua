@@ -764,27 +764,37 @@ end
 -- Zero-Tick Cached OC Mesh (`MESH_PORT = 4205`: `GORGE_METRICS` / `GORGE_CMD`)
 -- ============================================================================
 
-local function getMeshTransports(compLib, state)
+local function getMeshTransports(compLib, state, cfg, forceRefresh)
     local cl = compLib or component
-    if state and (state._meshModem ~= nil or state._meshTunnel ~= nil) then
-        return state._meshModem, state._meshTunnel, state._meshTunnelAddr
+    local prevAw = Hardware._autoWakeEnabled
+    if state and state._autoWakeEnabled ~= nil then prevAw = state._autoWakeEnabled end
+    local aw = prevAw
+    if cfg ~= nil then
+        aw = (cfg.autoWake ~= false)
+        Hardware._autoWakeEnabled = aw
+        if state then state._autoWakeEnabled = aw end
+        if prevAw ~= nil and aw ~= prevAw then forceRefresh = true end
+    end
+    if (not forceRefresh) and state and (state._meshModem ~= nil or state._meshTunnel ~= nil) then
+        return state._meshModem or nil, state._meshTunnel or nil, state._meshTunnelAddr
     end
     local modem, tunnel, _, tAddr = Common.getMeshTransports(cl, {
         port = Hardware.MESH_PORT,
-        wakeMsg = Hardware.WAKE_MSG,
+        wakeMsg = (aw == false) and false or Hardware.WAKE_MSG,
         strength = 400,
     })
     if state then
         state._meshModem = modem or false
         state._meshTunnel = tunnel or false
         state._meshTunnelAddr = tAddr
+        if aw ~= nil then state._autoWakeEnabled = aw end
     end
     return modem, tunnel, tAddr
 end
 
-function Hardware.openMeshPort(cfg, compLib, state)
+function Hardware.openMeshPort(cfg, compLib, state, forceRefresh)
     if cfg and cfg.extLinkMode == "off" then return nil, nil end
-    return getMeshTransports(compLib, state)
+    return getMeshTransports(compLib, state, cfg, forceRefresh)
 end
 
 local function sendMeshPacket(cl, state, targetAddr, viaTunnel, msgType, ...)
@@ -806,7 +816,7 @@ end
 function Hardware.pushMeshMetrics(cfg, state, nowSec, compLib, force)
     if cfg and cfg.extLinkMode == "off" then return false end
     local cl = compLib or component
-    local modem, tunnel = getMeshTransports(cl, state)
+    local modem, tunnel = getMeshTransports(cl, state, cfg)
     if not modem and not tunnel then return false end
 
     nowSec = nowSec or 0
@@ -842,6 +852,7 @@ function Hardware.pushMeshMetrics(cfg, state, nowSec, compLib, force)
     local gf = (state and state.godforge) or {}
     local pkt = {
         armed = (cfg and cfg.armed == true),
+        autoWake = (not cfg or cfg.autoWake ~= false),
         activeCount = kpis.activeCount or 0,
         completedCycles = kpis.completedCycles or 0,
         errorCount = kpis.errorCount or 0,
@@ -863,7 +874,7 @@ function Hardware.pushMeshMetrics(cfg, state, nowSec, compLib, force)
         state._meshStartedAt = state._meshStartedAt or nowSec
         local peerSilent = (state._lastMainnetSeen and (nowSec - state._lastMainnetSeen) >= 60)
             or ((not state._lastMainnetSeen) and (nowSec - state._meshStartedAt) >= 60)
-        if peerSilent and (nowSec - (state._lastReverseWake or -1000)) >= 60 then
+        if (not cfg or cfg.autoWake ~= false) and peerSilent and (nowSec - (state._lastReverseWake or -1000)) >= 60 then
             state._lastReverseWake = nowSec
             state._mainnetWakeAttempts = (state._mainnetWakeAttempts or 0) + 1
             local wakeTarget = (state._mainnetMeshAddr and state._mainnetWakeAttempts <= 2) and state._mainnetMeshAddr or nil
@@ -876,7 +887,7 @@ end
 function Hardware.handleMeshMessage(cfg, state, localAddr, sender, port, msgType, reqId, payload, compLib)
     if cfg and cfg.extLinkMode == "off" then return false end
     local cl = compLib or component
-    local _, tunnel, tAddr = getMeshTransports(cl, state)
+    local _, tunnel, tAddr = getMeshTransports(cl, state, cfg)
     local isMeshPort = (port == Hardware.MESH_PORT) or (port == 0 and tunnel and tAddr and localAddr == tAddr)
     if not isMeshPort or not sender then return false end
 
@@ -951,6 +962,14 @@ function Hardware.handleMeshMessage(cfg, state, localAddr, sender, port, msgType
                 else
                     reply = { ok = false, error = "Invalid mode (magmatter|gluon|auto)" }
                 end
+            elseif cmd.action == "set_auto_wake" then
+                cfg.autoWake = (cmd.enabled ~= false)
+                Hardware.openMeshPort(cfg, cl, state, true)
+                if state then
+                    state._cfgDirty = true
+                    state._forcePollNow = true
+                end
+                reply = { ok = true, autoWake = cfg.autoWake }
             elseif cmd.action == "update_local" then
                 local tx = Common.detectOtaTransport(cl)
                 if not tx.hasInternet and not tx.hasMesh then

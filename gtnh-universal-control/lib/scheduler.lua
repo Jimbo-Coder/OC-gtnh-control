@@ -102,6 +102,7 @@ function Scheduler.defaultConfig()
         maxRecipeCache = 4096,
         ignoreBuiltinNC = true,
         extLinkMode = "auto",
+        autoWake = true,
         logLevel = "normal",
         pools = {
             Scheduler.newPool(1, "Pool 1", nil, 2),
@@ -199,6 +200,7 @@ function Scheduler.normalizeConfig(cfg)
     cfg.maxRecipeCache = math.max(256, math.min(8192, math.floor(tonumber(cfg.maxRecipeCache) or def.maxRecipeCache)))
     if cfg.ignoreBuiltinNC == nil then cfg.ignoreBuiltinNC = true else cfg.ignoreBuiltinNC = (cfg.ignoreBuiltinNC == true) end
     cfg.extLinkMode = (cfg.extLinkMode == "off") and "off" or "auto"
+    cfg.autoWake = (cfg.autoWake ~= false)
     if cfg.logLevel ~= "quiet" and cfg.logLevel ~= "normal" and cfg.logLevel ~= "raw" then
         cfg.logLevel = "normal"
     end

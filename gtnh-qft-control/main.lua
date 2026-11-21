@@ -142,6 +142,7 @@ local function armShellReviveWatchdog(cfg)
         shrcPath = SHRC_PATH,
         meshPort = tonumber(cfg and cfg.meshPort) or Common.MESH_PORT,
         wakeMsg = Common.WAKE_MSG,
+        enabled = (cfg == nil or cfg.autoWake ~= false),
     })
 end
 

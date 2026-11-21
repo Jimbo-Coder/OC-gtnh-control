@@ -804,6 +804,17 @@ function UI:renderMeshPeerCard(x, y, cw, ch, title, peerKey, peer, winSec, targe
     local fresh = peer and peer.addr ~= nil and (now - (peer.lastSeen or -1000)) < winSec
     local badge = fresh and ("ONLINE (" .. UI.formatAge(now, peer.lastSeen) .. ")") or "OFFLINE"
     local bCol = fresh and COLORS.green or COLORS.red
+    local st = peer and peer.status or nil
+    local awOn = not ((self.cfg.peerAutoWake and self.cfg.peerAutoWake[peerKey] == false)
+        or (type(st) == "table" and st.autoWake == false))
+    if self.cb.onPeerAction then
+        self:drawButton(x + cw - #badge - 12, y, awOn and "[AW:ON ]" or "[AW:OFF]",
+            awOn and COLORS.green or COLORS.muted,
+            awOn and COLORS.darkGreen or COLORS.panelBg, function()
+                self.statusMsg = tostring(self.cb.onPeerAction(peerKey, "set_auto_wake", { enabled = not awOn })
+                    or ("Auto-Wake -> " .. ((not awOn) and "ON" or "OFF")))
+            end)
+    end
     self:drawText(x + cw - #badge - 3, y, " " .. badge .. " ", bCol, COLORS.panelBg)
 
     local bx = x + 3
@@ -1622,6 +1633,7 @@ function UI:renderSetupTab()
         { key = "detailedTps",     lbl = "Detailed Per-Dim MSPT" },
         { key = "enableBridge",    lbl = "Out-of-Game TCP Bridge" },
         { key = "enableMesh",      lbl = "OC Wireless/Tunnel Mesh" },
+        { key = "enableAutoWake",  lbl = "Auto-Wake Fleet & Self" },
         { key = "enableLogging",   lbl = "Activity Console Logs" },
         { key = "enableDebug",     lbl = "Verbose Line Debug" },
     }

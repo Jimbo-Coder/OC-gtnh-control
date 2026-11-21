@@ -573,6 +573,11 @@ function Scheduler.ensureConfig(cfg)
     cfg.maintMaxDispatch = math.max(1, math.min(8, math.floor(tonumber(cfg.maintMaxDispatch) or 2)))
     cfg.mainnetAddr = cfg.mainnetAddr or "auto"
     cfg.extLinkMode = (cfg.extLinkMode == "off") and "off" or "auto"
+    if cfg.autoWake == nil then
+        cfg.autoWake = true
+    else
+        cfg.autoWake = (cfg.autoWake == true)
+    end
     if type(cfg.maintRules) ~= "table" then
         cfg.maintRules = {}
         for line in DEFAULT_MAINT_SPEC:gmatch("[^\r\n]+") do

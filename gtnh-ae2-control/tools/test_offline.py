@@ -869,6 +869,9 @@ local ui3 = Ae2UI.new(cfg3, hub3, {
         if type(extra) == "table" and extra.mode then
             tag = tag .. ":" .. tostring(extra.mode)
         end
+        if type(extra) == "table" and extra.enabled ~= nil then
+            tag = tag .. ":" .. tostring(extra.enabled)
+        end
         peerActionsLog[#peerActionsLog + 1] = tag
         return tag .. " OK"
     end,
@@ -1055,6 +1058,26 @@ ui3:handleTouch(54, 4, 0)
 assertEq(ui3.updateSource, "github", "Clicked [Src:Local] toggled updateSource to github")
 ui3:handleTouch(54, 4, 0)
 assertEq(ui3.updateSource, "local", "Clicked [Src:GitHub] toggled updateSource back to local")
+
+-- Tab 3 [AW:ON ] on DTPF card header (y=5, x=2..77) + Tab 0 Setup enableAutoWake toggle (y=30, x=40)
+ui3:handleKeyDown(51, 4)
+ui3:render()
+local awHb = nil
+for _, hb in ipairs(ui3.hitboxes or {}) do
+    if hb.y1 == 5 and hb.x1 >= 2 and hb.x2 <= 77 then
+        awHb = hb
+        break
+    end
+end
+assert(awHb ~= nil, "Expected [AW:ON ] hitbox on DTPF [3]MESH card header (y=5)")
+ui3:handleTouch(awHb.x1 + 1, 5, 0)
+assertEq(peerActionsLog[#peerActionsLog], "dtpf:set_auto_wake:false", "Clicked [AW:ON ] triggered dtpf:set_auto_wake:false")
+ui3:handleKeyDown(48, 11)
+cfg3.enableAutoWake = true
+ui3:render()
+ui3:handleTouch(40, 30, 0)
+assertEq(cfg3.enableAutoWake, false, "Clicked [0]SET enableAutoWake toggled config.enableAutoWake to false")
+cfg3.enableAutoWake = true
 
 -- Audit Brain row 50 footer fits within col 160 without clipping "Q Quit"
 do
@@ -1291,6 +1314,28 @@ do
     relayChunk2()
     assertEq(#kdListeners, 1, "Idempotent watchdog did NOT add duplicate key_down listener")
     assertEq(#mmListeners, 1, "Idempotent watchdog did NOT add duplicate modem_message listener")
+
+    -- Verify Common.configureWake(dev, false) clears GTNH_WAKE and enabled=false disarms watchdog
+    do
+        local clearedWake = nil
+        local mockDev = {
+            getWakeMessage = function() return "GTNH_WAKE" end,
+            setWakeMessage = function(s) clearedWake = s; return true end,
+        }
+        local Common = require("gtnh_common")
+        Common.configureWake(mockDev, false)
+        assertEq(clearedWake, "", "Common.configureWake(dev, false) must clear modem wake message")
+
+        wdShutdownArg = "none"
+        local prevMm = mmListeners[1]
+        assertEq(Common.armShellReviveWatchdog({ enabled = false, isAutostartFn = function() return true end, shrcPath = "/home/.shrc" }), false, "armShellReviveWatchdog(enabled=false) returns false")
+        assertEq(_G.__gtnhReviveWd and _G.__gtnhReviveWd.armed, false, "enabled=false sets __gtnhReviveWd.armed = false")
+        assertEq(#kdListeners, 1, "enabled=false keeps idempotent key_down listener")
+        assertEq(#mmListeners, 1, "enabled=false keeps idempotent modem_message listener")
+        mockClk = 1200.0
+        if prevMm then prevMm("modem_message", "mod-rly", "dtpf-addr", 4205, 5, "GTNH_WAKE") end
+        assertEq(wdShutdownArg, "none", "GTNH_WAKE ignored after watchdog disarmed via enabled=false")
+    end
 
     evMod.listen = origListen
     computer.uptime = origUptime

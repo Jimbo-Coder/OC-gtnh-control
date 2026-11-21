@@ -1086,6 +1086,14 @@ function UI:renderPerfSetupTab()
                 self.statusMsg = "Boot Autostart -> " .. (nextOn and "ON" or "OFF")
             end)
     end
+    local awOn = (self.cfg.autoWake ~= false)
+    self:drawText(4, 32, "Auto-Wake (WoL/Shell):", COLORS.fg, COLORS.panelBg)
+    self:drawButton(31, 32, awOn and "[ ON ]" or "[OFF ]",
+        awOn and COLORS.green or COLORS.muted, awOn and COLORS.darkGreen or COLORS.btnBg, function()
+            self.cfg.autoWake = not awOn
+            Hardware.openMeshPort(self.cfg, self.comp, self.state, true)
+            self:save("Auto-Wake -> " .. (self.cfg.autoWake and "ON" or "OFF"))
+        end)
 
     -- Right Card: Live Performance & Physical Maintainer Comparison
     self:drawFrame(81, 5, 78, 43, COLORS.border, COLORS.panelBg, "round")
