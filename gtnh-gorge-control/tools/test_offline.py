@@ -768,12 +768,15 @@ local lscProxy = {
     end,
 }
 local meshSent = {}
+local gWakeMsg, gWakeFuzzy, gWakeCalls = "GTNH_WAKE", false, 0
 local modemProxy = {
     isOpen = function() return true end,
     isWireless = function() return true end,
     getStrength = function() return 400 end,
     setStrength = function() end,
     open = function() end,
+    getWakeMessage = function() return gWakeMsg, gWakeFuzzy end,
+    setWakeMessage = function(m, f) gWakeCalls = gWakeCalls + 1; gWakeMsg = m; gWakeFuzzy = (f == true); return gWakeMsg end,
     broadcast = function(port, msgType, payload) meshSent[#meshSent + 1] = { port = port, t = msgType, p = payload } end,
     send = function(addr, port, msgType, p1, p2) meshSent[#meshSent + 1] = { addr = addr, port = port, t = msgType, p1 = p1, p2 = p2 } end,
 }
@@ -809,7 +812,17 @@ lscPctVal = 36
 Scheduler.step(cfg5, st5, 12.0)
 assertEq(gfWorkAllowed, true, "LSC >= resume unpauses Godforge")
 
--- Mesh push, GTNH_WAKE, & GORGE_CMD dispatch
+-- Mesh push, GTNH_WAKE (fuzzy enforcement + never-seen broadcast fallback), & GORGE_CMD dispatch
+local st5Wake = Scheduler.newState()
+Hardware.pushMeshMetrics(cfg5, st5Wake, 10.0, nil, true)
+assertEq(gWakeFuzzy, true, "Gorge upgraded non-fuzzy GTNH_WAKE to fuzzy=true")
+assertEq(gWakeCalls, 1, "Gorge called setWakeMessage once")
+meshSent = {}
+Hardware.pushMeshMetrics(cfg5, st5Wake, 75.0, nil, true)
+local gBcastWake = false
+for _, pkt in ipairs(meshSent) do if pkt.t == "GTNH_WAKE" and pkt.addr == nil and pkt.p == nil then gBcastWake = true end end
+assert(gBcastWake, "Gorge emits 1-arg broadcast GTNH_WAKE when Brain never seen for 60s")
+meshSent = {}
 Hardware.pushMeshMetrics(cfg5, st5, 12.0, nil, true)
 assert(#meshSent >= 1 and meshSent[1].t == "GORGE_METRICS", "Sent GORGE_METRICS over port 4205")
 local beforeWakeCnt = #meshSent

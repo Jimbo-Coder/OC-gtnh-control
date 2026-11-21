@@ -535,15 +535,15 @@ local function enqueueReply(addr, port, msgType, p1)
     end
 end
 
-local wakeMsg, wakeSetCalls = nil, 0
+local wakeMsg, wakeFuzzy, wakeSetCalls = "GTNH_WAKE", false, 0
 component._register("mod-1", "modem", {
     isOpen = function() return true end,
     open = function() openCalls = openCalls + 1 end,
     isWireless = function() return true end,
     getStrength = function() return 400 end,
     setStrength = function() strCalls = strCalls + 1 end,
-    getWakeMessage = function() return wakeMsg end,
-    setWakeMessage = function(m) wakeSetCalls = wakeSetCalls + 1; wakeMsg = m; return wakeMsg end,
+    getWakeMessage = function() return wakeMsg, wakeFuzzy end,
+    setWakeMessage = function(m, f) wakeSetCalls = wakeSetCalls + 1; wakeMsg = m; wakeFuzzy = (f == true); return wakeMsg end,
     broadcast = function(port, msgType, p1, p2)
         sendCalls = sendCalls + 1
         sentPackets[#sentPackets + 1] = { port = port, t = msgType, p1 = p1, p2 = p2 }
@@ -700,6 +700,7 @@ expChunk("--headless")
 assertEq(openCalls, 0, "Zero redundant modem.open() calls when already open")
 assertEq(strCalls, 0, "Zero redundant modem.setStrength() calls when >= 400")
 assertEq(wakeMsg, "GTNH_WAKE", "Modem configured with GTNH_WAKE wake message")
+assertEq(wakeFuzzy, true, "Modem upgraded non-fuzzy GTNH_WAKE to fuzzy=true")
 assertEq(wakeSetCalls, 1, "Zero redundant setWakeMessage() calls")
 assert(sendCalls >= 4, "Sent Mesh ACKs/RPCs without re-opening modem")
 assert(o1ItemCalls >= 1 and o1FluidCalls >= 1, "inspectMainnetForMaint must use O(1) getItemInNetwork/getFluidInNetwork")
@@ -717,7 +718,7 @@ for _, pkt in ipairs(sentPackets) do
     if pkt.addr == "dtpf-addr" and pkt.t == "DTPF_HANDOFF" and pkt.p1 == "dh-1" and pkt.p2 == "handoff-payload" then sawHandoffToDtpf = true end
     if pkt.addr == "stock-addr" and pkt.t == "DTPF_HANDOFF_ACK" and pkt.p1 == "dh-1" and pkt.p2 == "ack-payload" then sawHandoffAckToStock = true end
     if pkt.addr == "dtpf-addr" and pkt.t == "MESH_MAINNET_HELLO" and pkt.p1 == "wake_ack" then sawWakeHelloReply = true end
-    if pkt.t == "GTNH_WAKE" and (pkt.p1 == "stock" or pkt.p1 == "gorge" or pkt.p1 == "univ") then sawWatchdogWake = true end
+    if pkt.t == "GTNH_WAKE" and pkt.p1 == nil and (pkt.addr == "stock-addr" or pkt.addr == "gorge-addr" or pkt.addr == "univ-addr") then sawWatchdogWake = true end
     if pkt.t == "GORGE_CMD" and type(pkt.p2) == "string" then
         local c = serialization.unserialize(pkt.p2)
         if type(c) == "table" and c.action == "reboot" then sawGorgeReboot = true end

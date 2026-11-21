@@ -755,8 +755,8 @@ local function getMeshTransports(compLib, state)
                 if type(m.setWakeMessage) == "function" then
                     local needWake = true
                     if type(m.getWakeMessage) == "function" then
-                        local okW, curW = pcall(m.getWakeMessage)
-                        if okW and curW == Hardware.WAKE_MSG then needWake = false end
+                        local okW, curW, curFuzzy = pcall(m.getWakeMessage)
+                        if okW and curW == Hardware.WAKE_MSG and curFuzzy == true then needWake = false end
                     end
                     if needWake then pcall(m.setWakeMessage, Hardware.WAKE_MSG, true) end
                 end
@@ -771,7 +771,12 @@ local function getMeshTransports(compLib, state)
     if ta then
         tunnel, tAddr = cl.proxy(ta), ta
         if tunnel and type(tunnel.setWakeMessage) == "function" then
-            pcall(tunnel.setWakeMessage, Hardware.WAKE_MSG, true)
+            local needWake = true
+            if type(tunnel.getWakeMessage) == "function" then
+                local okW, curW, curFuzzy = pcall(tunnel.getWakeMessage)
+                if okW and curW == Hardware.WAKE_MSG and curFuzzy == true then needWake = false end
+            end
+            if needWake then pcall(tunnel.setWakeMessage, Hardware.WAKE_MSG, true) end
         end
     end
     if state then
@@ -859,11 +864,16 @@ function Hardware.pushMeshMetrics(cfg, state, nowSec, compLib, force)
     }
     local viaTunnel = (state and state._mainnetMeshViaTunnel == true) or (not modem and tunnel ~= nil)
     sendMeshPacket(cl, state, state and state._mainnetMeshAddr, viaTunnel, "GORGE_METRICS", serialization.serialize(pkt))
-    if state and state._mainnetMeshAddr and state._lastMainnetSeen
-        and (nowSec - state._lastMainnetSeen) >= 90
-        and (nowSec - (state._lastReverseWake or -1000)) >= 60 then
-        state._lastReverseWake = nowSec
-        sendMeshPacket(cl, state, state._mainnetMeshAddr, viaTunnel, Hardware.WAKE_MSG, "gorge_watchdog")
+    if state then
+        state._meshStartedAt = state._meshStartedAt or nowSec
+        local peerSilent = (state._lastMainnetSeen and (nowSec - state._lastMainnetSeen) >= 60)
+            or ((not state._lastMainnetSeen) and (nowSec - state._meshStartedAt) >= 60)
+        if peerSilent and (nowSec - (state._lastReverseWake or -1000)) >= 60 then
+            state._lastReverseWake = nowSec
+            state._mainnetWakeAttempts = (state._mainnetWakeAttempts or 0) + 1
+            local wakeTarget = (state._mainnetMeshAddr and state._mainnetWakeAttempts <= 2) and state._mainnetMeshAddr or nil
+            sendMeshPacket(cl, state, wakeTarget, viaTunnel, Hardware.WAKE_MSG)
+        end
     end
     return true
 end
@@ -881,6 +891,7 @@ function Hardware.handleMeshMessage(cfg, state, localAddr, sender, port, msgType
             state._mainnetMeshAddr = sender
             state._mainnetMeshViaTunnel = (port == 0)
             state._lastMainnetSeen = upNow
+            state._mainnetWakeAttempts = 0
         end
         Hardware.pushMeshMetrics(cfg, state, upNow, cl, true)
         return true
@@ -889,6 +900,7 @@ function Hardware.handleMeshMessage(cfg, state, localAddr, sender, port, msgType
             state._mainnetMeshAddr = sender
             state._mainnetMeshViaTunnel = (port == 0)
             state._lastMainnetSeen = upNow
+            state._mainnetWakeAttempts = 0
         end
         return true
     elseif msgType == "GORGE_CMD" then
@@ -896,6 +908,7 @@ function Hardware.handleMeshMessage(cfg, state, localAddr, sender, port, msgType
             state._mainnetMeshAddr = sender
             state._mainnetMeshViaTunnel = (port == 0)
             state._lastMainnetSeen = upNow
+            state._mainnetWakeAttempts = 0
         end
         local cmd = (type(payload) == "string") and serialization.unserialize(payload) or nil
         local reply = { ok = false, error = "Unknown GORGE_CMD" }

@@ -18,6 +18,169 @@ local Hardware = {}
 Hardware.MESH_PORT = 4205
 Hardware.WAKE_MSG = "GTNH_WAKE"
 
+local GT_TIER_NAMES = { "ULV", "LV", "MV", "HV", "EV", "IV", "LuV", "ZPM", "UV", "UHV", "UEV", "UIV", "UMV", "UXV", "MAX" }
+local GT_TIER_V = { 8, 32, 128, 512, 2048, 8192, 32768, 131072, 524288, 2097152, 8388608, 33554432, 134217728, 536870912, 2147483640 }
+local SI_MULT = { k = 1e3, K = 1e3, M = 1e6, G = 1e9, B = 1e9, T = 1e12, P = 1e15, E = 1e18 }
+
+local function stripFormatting(s)
+    if type(s) ~= "string" then return "" end
+    return (s:gsub("\194\167.", ""):gsub("\167.", ""):gsub("[\1-\31]", ""))
+end
+
+local function collectSensorLines(lines)
+    if type(lines) ~= "table" then return {} end
+    local ordered = {}
+    local n = #lines
+    if n > 0 then
+        if type(lines[0]) == "string" then
+            ordered[#ordered + 1] = lines[0]
+        end
+        for i = 1, n do
+            if type(lines[i]) == "string" then
+                ordered[#ordered + 1] = lines[i]
+            end
+        end
+        return ordered
+    end
+    local numKeys = {}
+    for k, v in pairs(lines) do
+        if type(k) == "number" and type(v) == "string" then
+            numKeys[#numKeys + 1] = k
+        end
+    end
+    table.sort(numKeys)
+    for i = 1, #numKeys do
+        ordered[#ordered + 1] = lines[numKeys[i]]
+    end
+    return ordered
+end
+
+local function readCoords(proxy)
+    if not proxy or not proxy.getCoordinates then return nil, nil, nil end
+    local ok, a, b, c = pcall(proxy.getCoordinates)
+    if not ok or a == nil then return nil, nil, nil end
+    if type(a) == "table" then
+        return tonumber(a[1] or a.x), tonumber(a[2] or a.y), tonumber(a[3] or a.z)
+    end
+    return tonumber(a), tonumber(b), tonumber(c)
+end
+
+local function parseSensorNumber(raw)
+    if type(raw) ~= "string" then return nil end
+    local clean = raw:gsub(",", ""):match("^%s*(.-)%s*$")
+    if clean == "" then return nil end
+    local baseS, expS = clean:match("([%d%.]+)%s*[xX*]%s*10%^([%+%-]?%d+)")
+    if baseS and expS then
+        return tonumber(baseS .. "e" .. expS)
+    end
+    local eNum = clean:match("([%+%-]?%d+%.?%d*[eE][%+%-]?%d+)")
+    if eNum then
+        return tonumber(eNum)
+    end
+    local numS, suf = clean:match("^([%+%-]?%d+%.?%d*)%s*([kKMGBTPPE]?)")
+    if numS and numS ~= "" then
+        local f = tonumber(numS)
+        local mult = (suf and suf ~= "" and SI_MULT[suf]) or 1
+        return f and (f * mult) or nil
+    end
+    return nil
+end
+
+local function fmtCommaInt(n)
+    local s = tostring(math.floor(tonumber(n) or 0))
+    return (s:reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", ""))
+end
+
+local function deriveHatchFromMaxEu(maxEu)
+    maxEu = tonumber(maxEu) or 0
+    if maxEu <= 0 then return nil, nil end
+    for i = #GT_TIER_NAMES, 1, -1 do
+        local v = GT_TIER_V[i]
+        if maxEu >= v and (maxEu % v) == 0 then
+            return math.floor(maxEu / v), GT_TIER_NAMES[i]
+        end
+    end
+    for i = #GT_TIER_NAMES, 1, -1 do
+        local v = GT_TIER_V[i]
+        if maxEu >= v then
+            return math.floor(maxEu / v + 0.5), GT_TIER_NAMES[i]
+        end
+    end
+    return nil, nil
+end
+
+local function formatHatchLabel(amps, tier)
+    if not amps or not tier or amps <= 0 then return nil end
+    return fmtCommaInt(amps) .. "A " .. tostring(tier)
+end
+
+-- Parse QFT multiblock sensor lines (both GTNH 2.9.0 encoded `\` keys and decoded English)
+function Hardware.parseQftSensor(lines)
+    local info = {
+        maxInputEu = nil,
+        hatchAmps = nil,
+        hatchTier = nil,
+        hatchLabel = nil,
+        liveEut = nil,
+        problems = 0,
+    }
+    if type(lines) ~= "table" then return info end
+    local lineList = collectSensorLines(lines)
+    for i = 1, #lineList do
+        local clean = stripFormatting(lineList[i])
+        if not info.maxInputEu then
+            local mEu, mAmp, mTier = clean:match("^GT5U%.multiblock%.scanner%.mei_amp\\+([^\\]+)\\+([^\\]+)\\+([^\\]+)")
+            if mEu then
+                info.maxInputEu = parseSensorNumber(mEu)
+                info.hatchAmps = parseSensorNumber(mAmp)
+                info.hatchTier = (mTier and mTier:match("([%a]+)")) or nil
+            else
+                local mEuOnly = clean:match("^GT5U%.multiblock%.scanner%.mei\\+([^\\]+)")
+                if mEuOnly then
+                    info.maxInputEu = parseSensorNumber(mEuOnly)
+                else
+                    local dEu, dAmp, dTier = clean:match("Max Energy Input:%s*([^%(]+)%s*EU/t%s*%(([%d,%.]+)A%s*([%a]+)%s*%)")
+                    if dEu then
+                        info.maxInputEu = parseSensorNumber(dEu)
+                        info.hatchAmps = parseSensorNumber(dAmp)
+                        info.hatchTier = dTier
+                    else
+                        local dEuOnly = clean:match("Max Energy Input:%s*(.-)%s*EU/t")
+                        if dEuOnly then
+                            info.maxInputEu = parseSensorNumber(dEuOnly)
+                        end
+                    end
+                end
+            end
+        end
+        if not info.liveEut then
+            local uRaw = clean:match("^GT5U%.multiblock%.scanner%.usage\\+([^\\]+)")
+                or clean:match("[Cc]urrently uses:%s*(.-)%s*EU/t")
+                or clean:match("[Pp]robably uses:%s*(.-)%s*EU/t")
+            if uRaw then
+                info.liveEut = parseSensorNumber(uRaw)
+            end
+        end
+        local ep = clean:match("^GT5U%.multiblock%.scanner%.problems\\+([^\\]+)")
+        if ep then
+            local np = parseSensorNumber(ep)
+            if np then info.problems = math.floor(np) end
+        else
+            local dp = clean:match("Problems:%s*(%d+)")
+            if dp then info.problems = tonumber(dp) or 0 end
+        end
+    end
+    if info.maxInputEu and (not info.hatchAmps or not info.hatchTier) then
+        local da, dt = deriveHatchFromMaxEu(info.maxInputEu)
+        info.hatchAmps = info.hatchAmps or da
+        info.hatchTier = info.hatchTier or dt
+    end
+    if info.hatchAmps and info.hatchTier then
+        info.hatchLabel = formatHatchLabel(info.hatchAmps, info.hatchTier)
+    end
+    return info
+end
+
 local function clockNow()
     if computer and computer.uptime then return computer.uptime()
     elseif _G.computer and _G.computer.uptime then return _G.computer.uptime()
@@ -99,6 +262,7 @@ function Hardware.discover(cfg, compLib, state)
         local p = getProxy(cl, state, addr)
         local mName = "gt_machine"
         local matched = false
+        local sensorTbl = nil
         if p then
             if p.getName then
                 local okN, n = pcall(p.getName)
@@ -107,18 +271,42 @@ function Hardware.discover(cfg, compLib, state)
                     if isQftName(mName) then matched = true end
                 end
             end
-            if not matched and p.getSensorInformation then
+            if p.getSensorInformation then
                 local okS, s = pcall(p.getSensorInformation)
-                if okS and isQftSensor(s) then matched = true end
+                if okS and type(s) == "table" then
+                    sensorTbl = s
+                    if (not matched) and isQftSensor(s) then matched = true end
+                end
             end
         end
-        local rec = { addr = addr, short = Hardware.shortAddr(addr), name = mName }
+        local x, y, z = readCoords(p)
+        local parsed = sensorTbl and Hardware.parseQftSensor(sensorTbl) or nil
+        local rec = {
+            addr = addr,
+            short = Hardware.shortAddr(addr),
+            name = mName,
+            coords = (x and y and z) and { x = x, y = y, z = z } or nil,
+            hatchLabel = parsed and parsed.hatchLabel or nil,
+            maxInputEu = parsed and parsed.maxInputEu or nil,
+            problems = parsed and parsed.problems or 0,
+        }
         if matched then
             disc.controllers[#disc.controllers + 1] = rec
         else
             disc.otherMachines[#disc.otherMachines + 1] = rec
         end
     end
+    table.sort(disc.controllers, function(a, b)
+        local ac, bc = a.coords, b.coords
+        if ac and bc then
+            if ac.z ~= bc.z then return ac.z < bc.z end
+            if ac.x ~= bc.x then return ac.x < bc.x end
+            if ac.y ~= bc.y then return ac.y < bc.y end
+        elseif ac or bc then
+            return ac ~= nil
+        end
+        return tostring(a.addr) < tostring(b.addr)
+    end)
 
     for _, addr in ipairs(listAll(cl, "me_inputbus")) do
         local p = getProxy(cl, state, addr)
@@ -360,12 +548,20 @@ function Hardware.readUnit(unit, compLib, state)
         hasNeptunium = false,
         hasFermium = false,
         hatchInfo = nil,
+        maxInputEu = nil,
+        hatchAmps = nil,
+        hatchTier = nil,
+        hatchLabel = nil,
+        liveEut = nil,
+        coords = nil,
         problems = 0,
     }
 
     local ctrl = getProxy(cl, state, unit.controllerAddr)
     if ctrl then
         res.online = true
+        local x, y, z = readCoords(ctrl)
+        if x and y and z then res.coords = { x = x, y = y, z = z } end
         if ctrl.isMachineActive then
             local okA, a = pcall(ctrl.isMachineActive)
             if okA then res.active = (a == true) end
@@ -385,11 +581,13 @@ function Hardware.readUnit(unit, compLib, state)
         if ctrl.getSensorInformation then
             local okS, s = pcall(ctrl.getSensorInformation)
             if okS and type(s) == "table" then
-                for _, line in ipairs(s) do
-                    local txt = tostring(line or "")
-                    local np = txt:match("Problems:%s*(%d+)")
-                    if np then res.problems = tonumber(np) or 0 end
-                end
+                local parsed = Hardware.parseQftSensor(s)
+                res.maxInputEu = parsed.maxInputEu
+                res.hatchAmps = parsed.hatchAmps
+                res.hatchTier = parsed.hatchTier
+                res.hatchLabel = parsed.hatchLabel
+                res.liveEut = parsed.liveEut
+                res.problems = parsed.problems or 0
             end
         end
     end
@@ -503,13 +701,60 @@ function Hardware.applyUnitControl(unit, live, desired, compLib, state)
     return { ok = true, reconfiguring = false, action = "steady" }
 end
 
+local function configureMeshWake(m, wakeMsg)
+    if m and type(m.setWakeMessage) == "function" then
+        local needWake = true
+        if type(m.getWakeMessage) == "function" then
+            local okWk, curWk, curFuzzy = pcall(m.getWakeMessage)
+            if okWk and curWk == wakeMsg and curFuzzy == true then needWake = false end
+        end
+        if needWake then pcall(m.setWakeMessage, wakeMsg, true) end
+    end
+end
+
 local function getMeshTransports(compLib, state)
     local cl = compLib or defaultComponent or _G.component
     if not cl then return nil, nil, nil end
-    local mAddr = cl.list and cl.list("modem", true)() or nil
+    local firstModem, wModem = nil, nil
+    if cl.list then
+        for addr in cl.list("modem", true) do
+            local m = getProxy(cl, state, addr)
+            if m then
+                local needOpen = true
+                if type(m.isOpen) == "function" then
+                    local okO, isO = pcall(m.isOpen, Hardware.MESH_PORT)
+                    if okO and isO == true then needOpen = false end
+                end
+                if needOpen and m.open then pcall(m.open, Hardware.MESH_PORT) end
+                local isW = false
+                if m.isWireless then
+                    local okW, rW = pcall(m.isWireless)
+                    isW = okW and (rW == true)
+                end
+                if isW and m.setStrength then
+                    local needStr = true
+                    if type(m.getStrength) == "function" then
+                        local okG, curStr = pcall(m.getStrength)
+                        if okG and tonumber(curStr) and tonumber(curStr) >= 400 then needStr = false end
+                    end
+                    if needStr then pcall(m.setStrength, 400) end
+                end
+                configureMeshWake(m, Hardware.WAKE_MSG)
+                if not firstModem then firstModem = m end
+                if isW and not wModem then wModem = m end
+            end
+        end
+    elseif cl.isAvailable and cl.isAvailable("modem") and cl.modem then
+        local m = cl.modem
+        if m.open then pcall(m.open, Hardware.MESH_PORT) end
+        if m.isWireless and m.isWireless() and m.setStrength then pcall(m.setStrength, 400) end
+        configureMeshWake(m, Hardware.WAKE_MSG)
+        firstModem = m
+    end
+    local modem = wModem or firstModem
     local tAddr = cl.list and cl.list("tunnel", true)() or nil
-    local modem = mAddr and getProxy(cl, state, mAddr) or nil
     local tunnel = tAddr and getProxy(cl, state, tAddr) or nil
+    if tunnel then configureMeshWake(tunnel, Hardware.WAKE_MSG) end
     return modem, tunnel, tAddr
 end
 
@@ -533,18 +778,7 @@ function Hardware.openMeshPort(cfg, compLib, state)
     if cfg and cfg.extLinkMode == "off" then return false end
     local cl = compLib or defaultComponent or _G.component
     local modem, tunnel = getMeshTransports(cl, state)
-    if modem then
-        if modem.open then pcall(modem.open, Hardware.MESH_PORT) end
-        if modem.isWireless and modem.isWireless() and modem.setStrength then
-            pcall(modem.setStrength, 400)
-        end
-        if modem.setWakeMessage then pcall(modem.setWakeMessage, Hardware.WAKE_MSG) end
-        return true
-    end
-    if tunnel and tunnel.setWakeMessage then
-        pcall(tunnel.setWakeMessage, Hardware.WAKE_MSG)
-    end
-    return tunnel ~= nil
+    return (modem ~= nil) or (tunnel ~= nil)
 end
 
 function Hardware.pushRulesToStock(cfg, state, payload, compLib)
@@ -596,6 +830,7 @@ function Hardware.pushMeshMetrics(cfg, state, nowSec, compLib, force)
             label = uSt.label,
             recipeId = uSt.recipeId,
             recipeName = uSt.recipeName,
+            catalystLabel = uSt.catalystLabel or "",
             tier = uSt.tier,
             online = uSt.online == true,
             active = uSt.active == true,
@@ -603,10 +838,15 @@ function Hardware.pushMeshMetrics(cfg, state, nowSec, compLib, force)
             focusCircuit = uSt.focusCircuit,
             hasNeptunium = uSt.hasNeptunium == true,
             hasFermium = uSt.hasFermium == true,
+            hatchLabel = uSt.hatchLabel or "",
+            maxInputEu = math.floor(tonumber(uSt.maxInputEu) or 0),
             state = uSt.state or "IDLE",
         }
     end
     local maintMode = st.maintMode or { mode = "offline", label = "OFFLINE" }
+    local diag = st.hwDiag or {}
+    local diagErr = #(diag.errors or {})
+    local diagWrn = #(diag.warnings or {})
     local pkt = {
         armed = (cfg and cfg.armed == true),
         unitCount = #(unitsOut),
@@ -614,13 +854,15 @@ function Hardware.pushMeshMetrics(cfg, state, nowSec, compLib, force)
         reconfigCount = reconf,
         problemCount = problems,
         errorCount = errs,
+        diagErrors = diagErr,
+        diagWarnings = diagWrn,
         maintMode = maintMode.mode,
         maintLabel = maintMode.label,
         localRulesCount = #(cfg and cfg.localRules or {}),
         units = unitsOut,
     }
-    local digest = string.format("%s:%d:%d:%d:%s",
-        tostring(pkt.armed), pkt.activeCount, pkt.reconfigCount, pkt.problemCount, tostring(pkt.maintMode))
+    local digest = string.format("%s:%d:%d:%d:%s:%d:%d",
+        tostring(pkt.armed), pkt.activeCount, pkt.reconfigCount, pkt.problemCount, tostring(pkt.maintMode), diagErr, diagWrn)
     if not force and digest == st._lastMeshDigest and (nowSec - (st._lastMeshAt or -100)) < 15 then
         return false
     end
@@ -629,15 +871,27 @@ function Hardware.pushMeshMetrics(cfg, state, nowSec, compLib, force)
 
     local raw = serialization.serialize(pkt)
     if #raw > 5800 then
+        for _, uo in ipairs(pkt.units) do
+            uo.hatchLabel = nil
+            uo.catalystLabel = nil
+        end
+        raw = serialization.serialize(pkt)
+    end
+    if #raw > 5800 then
         pkt.units = {}
         raw = serialization.serialize(pkt)
     end
     local viaTunnel = (st._mainnetMeshViaTunnel == true) or (not modem and tunnel ~= nil)
     sendMeshPacket(cl, st, st._mainnetMeshAddr, viaTunnel, "QFT_METRICS", raw)
 
-    if st._lastMainnetSeen and (nowSec - st._lastMainnetSeen) >= 90 and (nowSec - (st._lastMainnetWakeAt or -1000)) >= 60 then
+    st._meshStartedAt = st._meshStartedAt or nowSec
+    local peerSilent = (st._lastMainnetSeen and (nowSec - st._lastMainnetSeen) >= 60)
+        or ((not st._lastMainnetSeen) and (nowSec - st._meshStartedAt) >= 60)
+    if peerSilent and (nowSec - (st._lastMainnetWakeAt or -1000)) >= 60 then
         st._lastMainnetWakeAt = nowSec
-        sendMeshPacket(cl, st, st._mainnetMeshAddr, viaTunnel, Hardware.WAKE_MSG, "qft")
+        st._mainnetWakeAttempts = (st._mainnetWakeAttempts or 0) + 1
+        local wakeTarget = (st._mainnetMeshAddr and st._mainnetWakeAttempts <= 2) and st._mainnetMeshAddr or nil
+        sendMeshPacket(cl, st, wakeTarget, viaTunnel, Hardware.WAKE_MSG)
     end
     return true
 end
@@ -670,6 +924,7 @@ function Hardware.handleMeshMessage(cfg, state, localAddr, sender, port, msgType
             state._mainnetMeshAddr = sender
             state._mainnetMeshViaTunnel = (port == 0)
             state._lastMainnetSeen = clockNow()
+            state._mainnetWakeAttempts = 0
         end
         Hardware.pushMeshMetrics(cfg, state, clockNow(), cl, true)
         return true
@@ -678,6 +933,7 @@ function Hardware.handleMeshMessage(cfg, state, localAddr, sender, port, msgType
             state._mainnetMeshAddr = sender
             state._mainnetMeshViaTunnel = (port == 0)
             state._lastMainnetSeen = clockNow()
+            state._mainnetWakeAttempts = 0
         end
         return true
     elseif msgType == "STOCK_CLAIMS" then
@@ -722,6 +978,7 @@ function Hardware.handleMeshMessage(cfg, state, localAddr, sender, port, msgType
             state._mainnetMeshAddr = sender
             state._mainnetMeshViaTunnel = (port == 0)
             state._lastMainnetSeen = clockNow()
+            state._mainnetWakeAttempts = 0
         end
         local rawStr = (type(reqId) == "string" and reqId:sub(1, 1) == "{" and (payload == nil or payload == "")) and reqId or payload
         local okU, cmd = pcall(serialization.unserialize, tostring(rawStr or ""))

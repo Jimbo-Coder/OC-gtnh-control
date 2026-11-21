@@ -669,10 +669,13 @@ end
 -- TEST 8: Mesh UNIV_CMD (pause/resume/force_slice) & Standalone Mode Guard
 -- =========================================================================
 local modemReplies = {}
+local uWakeMsg, uWakeFuzzy, uWakeCalls = "GTNH_WAKE", false, 0
 component._register("modem-w", "modem", {
     open = function() end,
     isWireless = function() return true end,
     setStrength = function() end,
+    getWakeMessage = function() return uWakeMsg, uWakeFuzzy end,
+    setWakeMessage = function(m, f) uWakeCalls = uWakeCalls + 1; uWakeMsg = m; uWakeFuzzy = (f == true); return uWakeMsg end,
     send = function(target, port, msgType, reqId, pay) modemReplies[#modemReplies + 1] = { target, port, msgType, reqId, pay } end,
     broadcast = function(port, msgType, pay) modemReplies[#modemReplies + 1] = { "bcast", port, msgType, pay } end,
 })
@@ -686,6 +689,13 @@ assertEq(Hardware.handleMeshMessage(mCfg, mState, "m1", "peer1", 4205, "UNIV_CMD
 
 mCfg.extLinkMode = "auto"
 assertEq(Hardware.pushMeshMetrics(mCfg, mState, 201.0, component, true), true, "Mesh mode sends UNIV_METRICS")
+assertEq(uWakeFuzzy, true, "Univ upgraded non-fuzzy GTNH_WAKE to fuzzy=true")
+assertEq(uWakeCalls, 1, "Univ called setWakeMessage once")
+modemReplies = {}
+Hardware.pushMeshMetrics(mCfg, mState, 266.0, component, true)
+local sawUnivBcastWake = false
+for _, r in ipairs(modemReplies) do if r[1] == "bcast" and r[3] == "GTNH_WAKE" and r[4] == nil then sawUnivBcastWake = true end end
+assert(sawUnivBcastWake, "Univ emits 1-arg broadcast GTNH_WAKE when Brain never seen for 60s")
 assertEq(Hardware.handleMeshMessage(mCfg, mState, "m1", "peer1", 4205, "UNIV_CMD", "r2", serialization.serialize({ action = "pause" })), true, "UNIV_CMD pause handled")
 assertEq(mCfg.armed, false, "UNIV_CMD pause disarms")
 assertEq(Hardware.handleMeshMessage(mCfg, mState, "m1", "peer1", 4205, "UNIV_CMD", "r3", serialization.serialize({ action = "resume" })), true, "UNIV_CMD resume handled")

@@ -154,13 +154,15 @@ end
 local WAKE_MSG = 'GTNH_WAKE'
 local lastMainnetSeen = nil
 local lastMainnetWakeAt = -1000
+local meshStartedAt = nil
+local mainnetWakeAttempts = 0
 
 local function configureModemWake(m)
   if m and type(m.setWakeMessage) == 'function' then
     local needWake = true
     if type(m.getWakeMessage) == 'function' then
-      local okWk, curWk = pcall(m.getWakeMessage)
-      if okWk and curWk == WAKE_MSG then needWake = false end
+      local okWk, curWk, curFuzzy = pcall(m.getWakeMessage)
+      if okWk and curWk == WAKE_MSG and curFuzzy == true then needWake = false end
     end
     if needWake then pcall(m.setWakeMessage, WAKE_MSG, true) end
   end
@@ -341,9 +343,14 @@ local function writeStatus(stateName, cycleNum)
     if okSer and (component.isAvailable('modem') or component.isAvailable('tunnel')) then
       sendMeshPacket(mainnetAddr, mainnetViaTunnel, 'PUMP_STATUS', serializeMeshTable(payload))
       local upNow = computer.uptime()
-      if lastMainnetSeen and (upNow - lastMainnetSeen) >= 240 and (upNow - lastMainnetWakeAt) >= 60 then
+      meshStartedAt = meshStartedAt or upNow
+      local peerSilent = (lastMainnetSeen and (upNow - lastMainnetSeen) >= 60)
+        or ((not lastMainnetSeen) and (upNow - meshStartedAt) >= 60)
+      if peerSilent and (upNow - lastMainnetWakeAt) >= 60 then
         lastMainnetWakeAt = upNow
-        sendMeshPacket(mainnetAddr, mainnetViaTunnel, WAKE_MSG, 'pump')
+        mainnetWakeAttempts = mainnetWakeAttempts + 1
+        local wakeTarget = (mainnetAddr and mainnetWakeAttempts <= 2) and mainnetAddr or nil
+        sendMeshPacket(wakeTarget, mainnetViaTunnel, WAKE_MSG)
       end
     end
   end)
@@ -408,12 +415,14 @@ local function handleMeshMessage(localAddr, sender, port, msgType, reqId, rawPay
     mainnetViaTunnel = isTunnel
     meshAckSeen = true
     lastMainnetSeen = computer.uptime()
+    mainnetWakeAttempts = 0
     return true
   elseif msgType == 'MESH_MAINNET_HELLO' or msgType == WAKE_MSG then
     mainnetAddr = sender
     mainnetViaTunnel = isTunnel
     meshAckSeen = true
     lastMainnetSeen = computer.uptime()
+    mainnetWakeAttempts = 0
     writeStatus(lastStateName, lastCycleNum)
     return true
   elseif msgType == 'PUMP_CMD' then
@@ -421,6 +430,7 @@ local function handleMeshMessage(localAddr, sender, port, msgType, reqId, rawPay
     mainnetViaTunnel = isTunnel
     meshAckSeen = true
     lastMainnetSeen = computer.uptime()
+    mainnetWakeAttempts = 0
     if reqId ~= nil and tostring(reqId) ~= '' then
       if tostring(reqId) == lastHandledReqId then return true end
       lastHandledReqId = tostring(reqId)

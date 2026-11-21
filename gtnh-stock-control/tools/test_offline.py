@@ -940,9 +940,9 @@ do
     assert(screen3:find("[DTPF]", 1, true), "Tab 3 marks DTPF passive import slots with [DTPF]")
     component.gpu = gpu
 
-    -- Test GTNH_WAKE hardware setup, wake response, and stale Mainnet heartbeat wake
+    -- Test GTNH_WAKE hardware setup (fuzzy enforcement), wake response, and stale/never-seen Mainnet heartbeat wake
     local stWake = Scheduler.newState()
-    local wakeMsgS, wakeSetS, wakeSentS = nil, 0, {}
+    local wakeMsgS, wakeFuzzyS, wakeSetS, wakeSentS = "GTNH_WAKE", false, 0, {}
     local wakeComp = {
         list = function(ctype)
             local done = false
@@ -959,8 +959,8 @@ do
                 isWireless = function() return true end,
                 getStrength = function() return 400 end,
                 setStrength = function() return 400 end,
-                getWakeMessage = function() return wakeMsgS end,
-                setWakeMessage = function(m) wakeSetS = wakeSetS + 1; wakeMsgS = m; return wakeMsgS end,
+                getWakeMessage = function() return wakeMsgS, wakeFuzzyS end,
+                setWakeMessage = function(m, f) wakeSetS = wakeSetS + 1; wakeMsgS = m; wakeFuzzyS = (f == true); return wakeMsgS end,
                 send = function(t, port, ...) wakeSentS[#wakeSentS + 1] = { t = t, port = port, args = { ... } }; return true end,
                 broadcast = function(port, ...) wakeSentS[#wakeSentS + 1] = { port = port, args = { ... } }; return true end,
             }
@@ -969,18 +969,28 @@ do
     Hardware.openMeshPort(cfgH, wakeComp, stWake)
     Hardware.openMeshPort(cfgH, wakeComp, stWake)
     assertEq(wakeMsgS, "GTNH_WAKE", "Stock openMeshPort configures GTNH_WAKE wake message")
-    assertEq(wakeSetS, 1, "Stock openMeshPort skips redundant setWakeMessage calls")
-    assert(Hardware.handleMeshMessage(cfgH, stWake, "modem-sw", "ae2-sw", Hardware.MESH_PORT, "GTNH_WAKE", "stock", nil, wakeComp), "Stock handled GTNH_WAKE")
+    assertEq(wakeFuzzyS, true, "Stock openMeshPort upgrades fuzzy=false to fuzzy=true")
+    assertEq(wakeSetS, 1, "Stock openMeshPort skips redundant setWakeMessage calls once fuzzy=true")
+    -- Test never-seen Mainnet triggers broadcast wake after 60s
+    Hardware.pushMeshMetrics(cfgH, stWake, 10, wakeComp, true)
+    wakeSentS = {}
+    Hardware.pushMeshMetrics(cfgH, stWake, 75, wakeComp, true)
+    local swNever = 0
+    for _, pkt in ipairs(wakeSentS) do if pkt.args[1] == "GTNH_WAKE" and pkt.t == nil and pkt.args[2] == nil then swNever = swNever + 1 end end
+    assertEq(swNever, 1, "Stock emits 1-arg broadcast GTNH_WAKE if Brain never seen for 60s")
+    wakeSentS = {}
+    assert(Hardware.handleMeshMessage(cfgH, stWake, "modem-sw", "ae2-sw", Hardware.MESH_PORT, "GTNH_WAKE", nil, nil, wakeComp), "Stock handled GTNH_WAKE")
     local sawStockWakeMetrics = false
     for _, pkt in ipairs(wakeSentS) do if pkt.args[1] == "STOCK_METRICS" then sawStockWakeMetrics = true end end
     assert(sawStockWakeMetrics == true, "Stock GTNH_WAKE pushed STOCK_METRICS")
     stWake._lastMainnetSeen = 10
     stWake._lastMainnetWakeAt = -1000
+    stWake._mainnetWakeAttempts = 0
     wakeSentS = {}
     Hardware.pushMeshMetrics(cfgH, stWake, 120, wakeComp, true)
     local sw1, sw2 = 0, 0
-    for _, pkt in ipairs(wakeSentS) do if pkt.args[1] == "GTNH_WAKE" then sw1 = sw1 + 1 end end
-    assertEq(sw1, 1, "Stock stale Mainnet emitted 1 GTNH_WAKE")
+    for _, pkt in ipairs(wakeSentS) do if pkt.args[1] == "GTNH_WAKE" and pkt.args[2] == nil then sw1 = sw1 + 1 end end
+    assertEq(sw1, 1, "Stock stale Mainnet emitted 1 single-arg GTNH_WAKE")
     wakeSentS = {}
     Hardware.pushMeshMetrics(cfgH, stWake, 130, wakeComp, true)
     for _, pkt in ipairs(wakeSentS) do if pkt.args[1] == "GTNH_WAKE" then sw2 = sw2 + 1 end end

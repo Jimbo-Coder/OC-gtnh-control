@@ -154,8 +154,22 @@ end
 local function sanitizeUnit(raw, idx)
     if type(raw) ~= "table" then raw = {} end
     local id = (type(raw.id) == "string" and raw.id ~= "") and raw.id or ("qft_" .. tostring(idx or 1))
-    local recipeId = (type(raw.recipeId) == "string" and RecipesDb.BY_ID[raw.recipeId])
-        and raw.recipeId or (RecipesDb.RECIPES[1] and RecipesDb.RECIPES[1].id or "pt_metallic_powder")
+    local rcp = (type(raw.recipeId) == "string" and RecipesDb.BY_ID[raw.recipeId]) or RecipesDb.RECIPES[1]
+    local catDmg = tonumber(raw.catalystDamage)
+    if catDmg and RecipesDb.CATALYST_BY_DAMAGE and RecipesDb.CATALYST_BY_DAMAGE[math.floor(catDmg)] then
+        catDmg = math.floor(catDmg)
+        local cat = RecipesDb.CATALYST_BY_DAMAGE[catDmg]
+        local inCat = false
+        for _, rid in ipairs(cat.recipeIds or {}) do
+            if rcp and rid == rcp.id then inCat = true; break end
+        end
+        if not inCat and cat.recipeIds and cat.recipeIds[1] and RecipesDb.BY_ID[cat.recipeIds[1]] then
+            rcp = RecipesDb.BY_ID[cat.recipeIds[1]]
+        end
+    else
+        catDmg = (rcp and rcp.catalyst and rcp.catalyst.damage) or 16
+    end
+    local recipeId = rcp and rcp.id or "pt_metallic_powder"
     local fMode = raw.focusMode
     if fMode ~= "auto" and fMode ~= "fixed" and fMode ~= "none" then fMode = "auto" end
     local npMode = raw.boostNeptunium
@@ -170,6 +184,7 @@ local function sanitizeUnit(raw, idx)
         busAddr = (type(raw.busAddr) == "string") and raw.busAddr or "",
         hatchAddr = (type(raw.hatchAddr) == "string") and raw.hatchAddr or "",
         tier = math.max(1, math.min(4, math.floor(tonumber(raw.tier) or 4))),
+        catalystDamage = catDmg,
         recipeId = recipeId,
         mode = (raw.mode == "paused") and "paused" or "passive",
         targetStock = math.max(0, math.floor(tonumber(raw.targetStock) or 0)), -- 0 = 24/7 passive
@@ -272,6 +287,32 @@ function Scheduler.findUnit(cfg, id)
     return nil, nil
 end
 
+function Scheduler.setUnitCatalyst(unit, damage)
+    if not unit then return nil, nil end
+    local cat = RecipesDb.CATALYST_BY_DAMAGE and RecipesDb.CATALYST_BY_DAMAGE[math.floor(tonumber(damage) or -1)] or nil
+    if not cat then return nil, nil end
+    unit.catalystDamage = cat.damage
+    local valid = false
+    for _, rid in ipairs(cat.recipeIds or {}) do
+        if rid == unit.recipeId then valid = true; break end
+    end
+    if not valid and cat.recipeIds and cat.recipeIds[1] then
+        unit.recipeId = cat.recipeIds[1]
+    end
+    return cat, RecipesDb.BY_ID[unit.recipeId]
+end
+
+function Scheduler.removeUnit(cfg, unitId)
+    if not (cfg and type(cfg.units) == "table") then return false end
+    for i, u in ipairs(cfg.units) do
+        if u and u.id == unitId then
+            table.remove(cfg.units, i)
+            return true
+        end
+    end
+    return false
+end
+
 function Scheduler.addUnitFromDiscovery(cfg, ctrlAddr, busAddr, hatchAddr, label)
     cfg.units = cfg.units or {}
     if ctrlAddr and ctrlAddr ~= "" then
@@ -284,34 +325,201 @@ function Scheduler.addUnitFromDiscovery(cfg, ctrlAddr, busAddr, hatchAddr, label
         end
     end
     local idx = #cfg.units + 1
+    local seen = {}
+    for _, u in ipairs(cfg.units) do seen[u.id] = true end
+    local newId = "qft_" .. tostring(idx)
+    while seen[newId] do idx = idx + 1; newId = "qft_" .. tostring(idx) end
     local u = sanitizeUnit({
-        id = "qft_" .. tostring(idx),
-        label = label or ("QFT-" .. tostring(idx)),
+        id = newId,
+        label = label or ("QFT-" .. tostring(#cfg.units + 1)),
         controllerAddr = ctrlAddr or "",
         busAddr = busAddr or "",
         hatchAddr = hatchAddr or "",
-    }, idx)
-    cfg.units[idx] = u
+    }, #cfg.units + 1)
+    cfg.units[#cfg.units + 1] = u
     return u, true
 end
 
 function Scheduler.autoBindDiscoveredUnits(cfg, disc)
     disc = disc or {}
-    local usedCtrl = {}
-    for _, u in ipairs(cfg.units or {}) do
+    cfg.units = cfg.units or {}
+    local usedCtrl, usedBus, usedHatch = {}, {}, {}
+    for _, u in ipairs(cfg.units) do
         if u.controllerAddr and u.controllerAddr ~= "" then usedCtrl[u.controllerAddr] = true end
+        if u.busAddr and u.busAddr ~= "" then usedBus[u.busAddr] = true end
+        if u.hatchAddr and u.hatchAddr ~= "" then usedHatch[u.hatchAddr] = true end
+    end
+    local function nextUnused(list, used)
+        for _, entry in ipairs(list or {}) do
+            if entry and entry.addr and entry.addr ~= "" and not used[entry.addr] then
+                used[entry.addr] = true
+                return entry.addr
+            end
+        end
+        return ""
+    end
+    local boundExtra = 0
+    for _, u in ipairs(cfg.units) do
+        if u.controllerAddr and u.controllerAddr ~= "" then
+            if u.busAddr == nil or u.busAddr == "" then
+                local nb = nextUnused(disc.inputBuses, usedBus)
+                if nb ~= "" then u.busAddr = nb; boundExtra = boundExtra + 1 end
+            end
+            if u.hatchAddr == nil or u.hatchAddr == "" then
+                local nh = nextUnused(disc.inputHatches, usedHatch)
+                if nh ~= "" then u.hatchAddr = nh; boundExtra = boundExtra + 1 end
+            end
+        end
     end
     local added = 0
     for _, c in ipairs(disc.controllers or {}) do
-        if not usedCtrl[c.addr] then
-            local bus = (#(cfg.units or {}) == 0 and disc.inputBuses and disc.inputBuses[1]) and disc.inputBuses[1].addr or ""
-            local hatch = (#(cfg.units or {}) == 0 and disc.inputHatches and disc.inputHatches[1]) and disc.inputHatches[1].addr or ""
-            Scheduler.addUnitFromDiscovery(cfg, c.addr, bus, hatch, "QFT-" .. tostring(#(cfg.units or {}) + 1))
+        if c and c.addr and not usedCtrl[c.addr] then
             usedCtrl[c.addr] = true
+            local bus = nextUnused(disc.inputBuses, usedBus)
+            local hatch = nextUnused(disc.inputHatches, usedHatch)
+            Scheduler.addUnitFromDiscovery(cfg, c.addr, bus, hatch, "QFT-" .. tostring(#cfg.units + 1))
             added = added + 1
         end
     end
-    return added
+    return added, boundExtra
+end
+
+function Scheduler.diagnoseHardware(cfg, disc)
+    disc = disc or {}
+    local hasScan = (type(disc.controllers) == "table")
+    local knownCtrl, knownBus, knownHatch = {}, {}, {}
+    for _, c in ipairs(disc.controllers or {}) do if c.addr then knownCtrl[c.addr] = c end end
+    for _, b in ipairs(disc.inputBuses or {}) do if b.addr then knownBus[b.addr] = b end end
+    for _, h in ipairs(disc.inputHatches or {}) do if h.addr then knownHatch[h.addr] = h end end
+
+    local errors, warnings, unitFlags = {}, {}, {}
+    local byCtrl, byBus, byHatch = {}, {}, {}
+    local boundCtrl, boundBus, boundHatch = {}, {}, {}
+
+    local function ensureFlag(uid)
+        if not unitFlags[uid] then
+            unitFlags[uid] = { ctrlErr = false, busErr = false, hatchErr = false, anyErr = false, anyWarn = false }
+        end
+        return unitFlags[uid]
+    end
+    local function addErr(code, msg, uid, slot)
+        errors[#errors + 1] = { sev = "err", code = code, msg = msg, unitId = uid, slot = slot }
+        if uid then
+            local fl = ensureFlag(uid)
+            fl.anyErr = true
+            if slot == "ctrl" then fl.ctrlErr = true
+            elseif slot == "bus" then fl.busErr = true
+            elseif slot == "hatch" then fl.hatchErr = true end
+        end
+    end
+    local function addWarn(code, msg, uid, slot)
+        warnings[#warnings + 1] = { sev = "warn", code = code, msg = msg, unitId = uid, slot = slot }
+        if uid then
+            local fl = ensureFlag(uid)
+            fl.anyWarn = true
+        end
+    end
+
+    for _, u in ipairs((cfg and cfg.units) or {}) do
+        ensureFlag(u.id)
+        if u.controllerAddr and u.controllerAddr ~= "" then
+            byCtrl[u.controllerAddr] = byCtrl[u.controllerAddr] or {}
+            byCtrl[u.controllerAddr][#byCtrl[u.controllerAddr] + 1] = u
+            boundCtrl[u.controllerAddr] = true
+        end
+        if u.busAddr and u.busAddr ~= "" then
+            byBus[u.busAddr] = byBus[u.busAddr] or {}
+            byBus[u.busAddr][#byBus[u.busAddr] + 1] = u
+            boundBus[u.busAddr] = true
+        end
+        if u.hatchAddr and u.hatchAddr ~= "" then
+            byHatch[u.hatchAddr] = byHatch[u.hatchAddr] or {}
+            byHatch[u.hatchAddr][#byHatch[u.hatchAddr] + 1] = u
+            boundHatch[u.hatchAddr] = true
+        end
+    end
+
+    local function checkDups(map, code, kindLabel, slot)
+        for addr, owners in pairs(map) do
+            if #owners > 1 then
+                local names = {}
+                for _, ou in ipairs(owners) do
+                    names[#names + 1] = ou.label
+                    local fl = ensureFlag(ou.id)
+                    fl.anyErr = true
+                    if slot == "ctrl" then fl.ctrlErr = true
+                    elseif slot == "bus" then fl.busErr = true
+                    elseif slot == "hatch" then fl.hatchErr = true end
+                end
+                errors[#errors + 1] = {
+                    sev = "err",
+                    code = code,
+                    msg = string.format("Duplicate %s (%s) on %s (doubled MFU/adapter)", kindLabel, Hardware.shortAddr(addr), table.concat(names, " & ")),
+                    slot = slot,
+                }
+            end
+        end
+    end
+    checkDups(byCtrl, "DUP-CTRL", "Controller", "ctrl")
+    checkDups(byBus, "DUP-BUS", "ME Input Bus", "bus")
+    checkDups(byHatch, "DUP-HATCH", "ME Input Hatch", "hatch")
+
+    for _, u in ipairs((cfg and cfg.units) or {}) do
+        if not u.controllerAddr or u.controllerAddr == "" then
+            addErr("NO-CTRL", string.format("%s: no QFT Controller bound", u.label), u.id, "ctrl")
+        elseif hasScan and not knownCtrl[u.controllerAddr] then
+            addErr("MISS-CTRL", string.format("%s: Controller %s offline/missing", u.label, Hardware.shortAddr(u.controllerAddr)), u.id, "ctrl")
+        end
+        if not u.busAddr or u.busAddr == "" then
+            addWarn("NO-BUS", string.format("%s: no ME Stocking Bus (focus swap disabled)", u.label), u.id, "bus")
+        elseif hasScan and not knownBus[u.busAddr] then
+            addErr("MISS-BUS", string.format("%s: ME Bus %s offline/missing", u.label, Hardware.shortAddr(u.busAddr)), u.id, "bus")
+        end
+        if not u.hatchAddr or u.hatchAddr == "" then
+            addWarn("NO-HATCH", string.format("%s: no ME Stocking Hatch (Np/Fm boost disabled)", u.label), u.id, "hatch")
+        elseif hasScan and not knownHatch[u.hatchAddr] then
+            addErr("MISS-HATCH", string.format("%s: ME Hatch %s offline/missing", u.label, Hardware.shortAddr(u.hatchAddr)), u.id, "hatch")
+        end
+    end
+
+    if hasScan then
+        for _, c in ipairs(disc.controllers or {}) do
+            if c.addr and not boundCtrl[c.addr] then
+                local eh = c.hatchLabel and (" [" .. c.hatchLabel .. "]") or ""
+                addWarn("UNBOUND-CTRL", string.format("Unbound QFT Controller %s%s (click Scan & Auto-Bind)", c.short or Hardware.shortAddr(c.addr), eh), nil, "ctrl")
+            end
+        end
+        local unBus, unHatch = 0, 0
+        for _, b in ipairs(disc.inputBuses or {}) do
+            if b.addr and not boundBus[b.addr] then unBus = unBus + 1 end
+        end
+        for _, h in ipairs(disc.inputHatches or {}) do
+            if h.addr and not boundHatch[h.addr] then unHatch = unHatch + 1 end
+        end
+        if unBus > 0 then
+            addWarn("UNBOUND-BUS", string.format("%d unbound ME Stocking Bus(es) detected", unBus), nil, "bus")
+        end
+        if unHatch > 0 then
+            addWarn("UNBOUND-HATCH", string.format("%d unbound ME Stocking Hatch(es) detected", unHatch), nil, "hatch")
+        end
+        if #(disc.aeInterfaces or {}) == 0 then
+            addWarn("NO-AE2", "No AE2 Interface attached (output caps & local maintainer disabled)", nil, "ae2")
+        end
+        for _, om in ipairs(disc.otherMachines or {}) do
+            addWarn("OTHER-GT", string.format("Non-QFT machine attached: %s (%s) - check adapter", tostring(om.name or "gt_machine"), tostring(om.short or "?")), nil, "other")
+        end
+    end
+
+    local items = {}
+    for _, e in ipairs(errors) do items[#items + 1] = e end
+    for _, w in ipairs(warnings) do items[#items + 1] = w end
+    return {
+        ok = (#errors == 0 and #warnings == 0),
+        errors = errors,
+        warnings = warnings,
+        items = items,
+        unitFlags = unitFlags,
+    }
 end
 
 function Scheduler.getMaintainerStatus(cfg, state, nowSec, compLib)
@@ -506,7 +714,11 @@ function Scheduler.retireRecipeInputs(cfg, state, req, compLib)
 end
 
 function Scheduler.syncHardware(cfg, state, compLib)
-    return Hardware.discover(cfg, compLib, state)
+    local disc = Hardware.discover(cfg, compLib, state)
+    if state then
+        state.hwDiag = Scheduler.diagnoseHardware(cfg, disc)
+    end
+    return disc
 end
 
 local function stepLocalMaintainer(cfg, state, nowSec, compLib, ms, ae, counter)
@@ -636,6 +848,8 @@ function Scheduler.step(cfg, state, nowSec, compLib, opts)
     local counter = { aeCalls = 0 }
     local cl = compLib or rawget(_G, "component")
     local ae = Hardware.getLocalAeProxy(cfg, cl, state)
+    local diag = Scheduler.diagnoseHardware(cfg, (state and state.discovery) or {})
+    state.hwDiag = diag
 
     local unitStatuses = {}
     local running, reconfCount, errCount = 0, 0, 0
@@ -711,11 +925,16 @@ function Scheduler.step(cfg, state, nowSec, compLib, opts)
         if live.problems > 0 then errCount = errCount + 1 end
 
         local focusedOut = (chosenFocus > 0 and outs[chosenFocus]) and outs[chosenFocus] or nil
+        local cat = (RecipesDb.CATALYST_BY_DAMAGE and RecipesDb.CATALYST_BY_DAMAGE[u.catalystDamage])
+            or (recipe and recipe.catalyst and RecipesDb.CATALYST_BY_DAMAGE and RecipesDb.CATALYST_BY_DAMAGE[recipe.catalyst.damage])
         unitStatuses[i] = {
             id = u.id,
             label = u.label,
             enabled = (u.enabled ~= false),
             tier = u.tier,
+            catalystDamage = (cat and cat.damage) or u.catalystDamage,
+            catalystLabel = (cat and cat.shortLabel) or (recipe and recipe.catalyst and recipe.catalyst.label) or "None",
+            catalystRecipeCount = (cat and cat.recipeIds) and #cat.recipeIds or 1,
             recipeId = recipe and recipe.id or "",
             recipeName = recipe and recipe.name or "None",
             recipeTier = recipe and recipe.focusTier or 1,
@@ -739,8 +958,14 @@ function Scheduler.step(cfg, state, nowSec, compLib, opts)
             workAllowed = live.workAllowed,
             progress = live.progress,
             maxProgress = live.maxProgress,
+            maxInputEu = live.maxInputEu,
+            hatchAmps = live.hatchAmps,
+            hatchTier = live.hatchTier,
+            hatchLabel = live.hatchLabel or "",
+            liveEut = live.liveEut,
             problems = live.problems,
             reconfiguring = (ctrlRes.reconfiguring == true),
+            flags = (diag.unitFlags and diag.unitFlags[u.id]) or {},
             state = stTag,
             outputs = outs,
         }
@@ -765,6 +990,9 @@ function Scheduler.buildSnapshot(cfg, state, nowSec)
     end
     for i, u in ipairs((cfg and cfg.units) or {}) do
         local us = uById[u.id] or {}
+        local rcp = RecipesDb.BY_ID[u.recipeId]
+        local cat = RecipesDb.CATALYST_BY_DAMAGE and RecipesDb.CATALYST_BY_DAMAGE[u.catalystDamage]
+            or (rcp and rcp.catalyst and RecipesDb.CATALYST_BY_DAMAGE and RecipesDb.CATALYST_BY_DAMAGE[rcp.catalyst.damage])
         unitsOut[i] = {
             id = u.id,
             label = u.label,
@@ -773,9 +1001,12 @@ function Scheduler.buildSnapshot(cfg, state, nowSec)
             controllerAddr = u.controllerAddr,
             busAddr = u.busAddr,
             hatchAddr = u.hatchAddr,
+            catalystDamage = (cat and cat.damage) or u.catalystDamage,
+            catalystLabel = us.catalystLabel or (cat and cat.shortLabel) or (rcp and rcp.catalyst and rcp.catalyst.label) or "",
+            catalystRecipeCount = us.catalystRecipeCount or ((cat and cat.recipeIds) and #cat.recipeIds or 1),
             recipeId = u.recipeId,
-            recipeName = us.recipeName or (RecipesDb.BY_ID[u.recipeId] and RecipesDb.BY_ID[u.recipeId].name) or u.recipeId,
-            recipeTier = us.recipeTier or (RecipesDb.BY_ID[u.recipeId] and RecipesDb.BY_ID[u.recipeId].focusTier) or 1,
+            recipeName = us.recipeName or (rcp and rcp.name) or u.recipeId,
+            recipeTier = us.recipeTier or (rcp and rcp.focusTier) or 1,
             mode = u.mode,
             targetStock = u.targetStock,
             focusMode = u.focusMode,
@@ -792,12 +1023,19 @@ function Scheduler.buildSnapshot(cfg, state, nowSec)
             hasHatch = us.hasHatch == true,
             hasNeptunium = us.hasNeptunium == true,
             hasFermium = us.hasFermium == true,
+            maxInputEu = us.maxInputEu,
+            hatchAmps = us.hatchAmps,
+            hatchTier = us.hatchTier,
+            hatchLabel = us.hatchLabel or "",
+            liveEut = us.liveEut,
+            flags = us.flags or {},
             progress = us.progress or 0,
             maxProgress = us.maxProgress or 0,
             problems = us.problems or 0,
             state = us.state or "IDLE",
         }
     end
+    local diag = (state and state.hwDiag) or Scheduler.diagnoseHardware(cfg, (state and state.discovery) or {})
     local evOut = {}
     for i = 1, math.min(20, #((state and state.events) or {})) do
         local e = state.events[i]
@@ -816,6 +1054,12 @@ function Scheduler.buildSnapshot(cfg, state, nowSec)
             maintGroup = cfg.maintGroup,
         },
         maintStatus = ms,
+        diagnostics = {
+            ok = diag.ok == true,
+            errors = diag.errors or {},
+            warnings = diag.warnings or {},
+            items = diag.items or {},
+        },
         units = unitsOut,
         localRules = state and state.localRuleStatuses or cfg.localRules or {},
         events = evOut,
@@ -845,7 +1089,12 @@ function Scheduler.executeRpcTable(cfg, state, cmd, compLib, onMutate)
             if type(pu.label) == "string" and pu.label ~= "" then u.label = pu.label end
             if type(pu.enabled) == "boolean" then u.enabled = pu.enabled end
             if tonumber(pu.tier) then u.tier = math.max(1, math.min(4, math.floor(tonumber(pu.tier)))) end
-            if type(pu.recipeId) == "string" and RecipesDb.BY_ID[pu.recipeId] then u.recipeId = pu.recipeId end
+            if tonumber(pu.catalystDamage) then Scheduler.setUnitCatalyst(u, tonumber(pu.catalystDamage)) end
+            if type(pu.recipeId) == "string" and RecipesDb.BY_ID[pu.recipeId] then
+                local r = RecipesDb.BY_ID[pu.recipeId]
+                u.recipeId = r.id
+                if r.catalyst and r.catalyst.damage then u.catalystDamage = r.catalyst.damage end
+            end
             if pu.mode == "passive" or pu.mode == "paused" then u.mode = pu.mode end
             if pu.targetStock ~= nil and tonumber(pu.targetStock) then u.targetStock = math.max(0, math.floor(tonumber(pu.targetStock))) end
             if pu.focusMode == "auto" or pu.focusMode == "fixed" or pu.focusMode == "none" then u.focusMode = pu.focusMode end
@@ -878,6 +1127,19 @@ function Scheduler.executeRpcTable(cfg, state, cmd, compLib, onMutate)
         elseif act == "rediscover" then
             local disc = Scheduler.syncHardware(cfg, state, compLib)
             Scheduler.autoBindDiscoveredUnits(cfg, disc)
+            mutated = true
+        elseif act == "sync_mainnet" then
+            for _, lr in ipairs(cfg.localRules or {}) do
+                if lr and lr.enabled ~= false then lr.syncedToMainnet = false end
+            end
+            state._lastAutoSyncAt = -1000
+            Scheduler.step(cfg, state, clockNow(), compLib)
+            if onMutate then pcall(onMutate, cfg) end
+        elseif act == "add_unit" then
+            Scheduler.addUnitFromDiscovery(cfg, "", "", "")
+            mutated = true
+        elseif act == "remove_unit" and type(cmd.unitId) == "string" then
+            Scheduler.removeUnit(cfg, cmd.unitId)
             mutated = true
         elseif act == "update_local" then
             local cl = compLib or rawget(_G, "component")

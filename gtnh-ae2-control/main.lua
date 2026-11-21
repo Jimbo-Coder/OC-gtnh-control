@@ -399,8 +399,8 @@ local function configureModemProxy(m)
     if type(m.setWakeMessage) == "function" then
         local needWake = true
         if type(m.getWakeMessage) == "function" then
-            local okWk, curWk = pcall(m.getWakeMessage)
-            if okWk and curWk == WAKE_MSG then needWake = false end
+            local okWk, curWk, curFuzzy = pcall(m.getWakeMessage)
+            if okWk and curWk == WAKE_MSG and curFuzzy == true then needWake = false end
         end
         if needWake then pcall(m.setWakeMessage, WAKE_MSG, true) end
     end
@@ -411,8 +411,8 @@ local function configureTunnelWake(t)
     if t and type(t.setWakeMessage) == "function" then
         local needWake = true
         if type(t.getWakeMessage) == "function" then
-            local okWk, curWk = pcall(t.getWakeMessage)
-            if okWk and curWk == WAKE_MSG then needWake = false end
+            local okWk, curWk, curFuzzy = pcall(t.getWakeMessage)
+            if okWk and curWk == WAKE_MSG and curFuzzy == true then needWake = false end
         end
         if needWake then pcall(t.setWakeMessage, WAKE_MSG, true) end
     end
@@ -1794,7 +1794,10 @@ local function checkMeshWatchdog(upNow, dbUrl, writeLineFn)
             totalRecoveries = totalRecoveries + 1
             t.lastRecoveryAt = upNow
             changed = true
-            sendMeshPacket(t.addr, t.viaTunnel, WAKE_MSG, p.name)
+            sendMeshPacket(t.addr, t.viaTunnel, WAKE_MSG)
+            if t.recoveryAttempts >= 3 and (t.recoveryAttempts % 3) == 0 then
+                sendMeshPacket(nil, false, WAKE_MSG)
+            end
             sendMeshPacket(nil, false, "MESH_MAINNET_HELLO", "watchdog")
             logMsg("ERR", string.format("[WATCHDOG] Sent %s + HELLO to stale peer %s (#%d).", WAKE_MSG, p.name, t.recoveryAttempts))
         end
@@ -2722,7 +2725,7 @@ local function handleBridgeCommand(sockWriteLine, interface, cmd)
             if targetRole == "all" or targetRole == rName then
                 pTbl.recoveryAttempts = (pTbl.recoveryAttempts or 0) + 1
                 pTbl.lastRecoveryAt = now
-                sendMeshPacket(pTbl.addr, pTbl.viaTunnel, WAKE_MSG, rName)
+                sendMeshPacket(pTbl.addr, pTbl.viaTunnel, WAKE_MSG)
                 woken[#woken + 1] = rName
             end
         end
@@ -2990,7 +2993,7 @@ local function main()
                     if role == "all" or role == rName then
                         pTbl.recoveryAttempts = (pTbl.recoveryAttempts or 0) + 1
                         pTbl.lastRecoveryAt = now
-                        sendMeshPacket(pTbl.addr, pTbl.viaTunnel, WAKE_MSG, rName)
+                        sendMeshPacket(pTbl.addr, pTbl.viaTunnel, WAKE_MSG)
                         woken[#woken + 1] = rName
                     end
                 end

@@ -5222,21 +5222,22 @@ do
     assertEq(ackPkt.passiveCount, 1, "DTPF_HANDOFF_ACK counts 1 passive")
     assertEq(ackPkt.maintCount, 1, "DTPF_HANDOFF_ACK counts 1 maint rule")
 
-    -- Test Hardware.openMeshPort sets GTNH_WAKE, GTNH_WAKE responds with DTPF_METRICS, and stale Mainnet wake is rate-limited
-    local dtpfWakeMsg, dtpfWakeSet = nil, 0
+    -- Test Hardware.openMeshPort enforces GTNH_WAKE + fuzzy=true, responds with DTPF_METRICS, broadcasts fallback & obeys 60s limit
+    local dtpfWakeMsg, dtpfWakeFuzzy, dtpfWakeSet = "GTNH_WAKE", false, 0
     component._register("modem-w24", "modem", {
         isWireless = function() return true end,
         open = function() return true end,
         setStrength = function() return 400 end,
-        getWakeMessage = function() return dtpfWakeMsg end,
-        setWakeMessage = function(m) dtpfWakeSet = dtpfWakeSet + 1; dtpfWakeMsg = m; return dtpfWakeMsg end,
+        getWakeMessage = function() return dtpfWakeMsg, dtpfWakeFuzzy end,
+        setWakeMessage = function(m, f) dtpfWakeSet = dtpfWakeSet + 1; dtpfWakeMsg = m; dtpfWakeFuzzy = (f == true); return dtpfWakeMsg end,
         send = function(addr, port, ...) modemSent[#modemSent + 1] = { addr = addr, port = port, args = { ... } }; return true end,
         broadcast = function(port, ...) modemSent[#modemSent + 1] = { port = port, args = { ... } }; return true end,
     })
     Hardware.openMeshPort()
     Hardware.openMeshPort()
     assertEq(dtpfWakeMsg, "GTNH_WAKE", "T24b openMeshPort configures GTNH_WAKE wake message")
-    assertEq(dtpfWakeSet, 1, "T24b openMeshPort does not repeat setWakeMessage once configured")
+    assertEq(dtpfWakeFuzzy, true, "T24b openMeshPort upgrades fuzzy=false to fuzzy=true")
+    assertEq(dtpfWakeSet, 1, "T24b openMeshPort does not repeat setWakeMessage once fuzzy=true")
     modemSent = {}
     assert(Hardware.handleMeshMessage(wb24, "modem-w24", "ae2-wake", Hardware.MESH_PORT, "GTNH_WAKE", "dtpf"), "T24b GTNH_WAKE handled")
     local sawWakeMetrics = false
@@ -5244,16 +5245,24 @@ do
     assert(sawWakeMetrics == true, "T24b GTNH_WAKE immediately pushed DTPF_METRICS")
     Hardware._lastMainnetSeen = 1000
     Hardware._lastMainnetWakeAt = -1000
+    Hardware._mainnetWakeAttempts = 0
     modemSent = {}
     Hardware.pushMeshMetrics(env, st24, 2200, nil, true)
     local wakeCnt1 = 0
-    for _, pkt in ipairs(modemSent) do if pkt.args[1] == "GTNH_WAKE" then wakeCnt1 = wakeCnt1 + 1 end end
-    assertEq(wakeCnt1, 1, "T24b stale Mainnet emitted 1 GTNH_WAKE")
+    for _, pkt in ipairs(modemSent) do if pkt.args[1] == "GTNH_WAKE" and pkt.args[2] == nil then wakeCnt1 = wakeCnt1 + 1 end end
+    assertEq(wakeCnt1, 1, "T24b stale Mainnet emitted 1 single-arg GTNH_WAKE")
     modemSent = {}
     Hardware.pushMeshMetrics(env, st24, 2210, nil, true)
     local wakeCnt2 = 0
     for _, pkt in ipairs(modemSent) do if pkt.args[1] == "GTNH_WAKE" then wakeCnt2 = wakeCnt2 + 1 end end
     assertEq(wakeCnt2, 0, "T24b Mainnet GTNH_WAKE suppressed within 60s window")
+    -- Unicast tries 1 & 2, then broadcast fallback on attempt 3
+    Hardware.pushMeshMetrics(env, st24, 2270, nil, true)
+    modemSent = {}
+    Hardware.pushMeshMetrics(env, st24, 2340, nil, true)
+    local sawBcastWake = false
+    for _, pkt in ipairs(modemSent) do if pkt.args[1] == "GTNH_WAKE" and pkt.addr == nil then sawBcastWake = true end end
+    assert(sawBcastWake == true, "T24b DTPF falls back to broadcast GTNH_WAKE after 2 failed unicast wakes")
 
     -- Test Mainnet Maintainer status clarity & push_recipe_inputs (Mainnet Stock + Local fallback)
     local nowMain = compMod.uptime()

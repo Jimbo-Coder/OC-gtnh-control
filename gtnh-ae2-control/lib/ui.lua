@@ -1393,10 +1393,14 @@ function UI:renderQftTab()
     self:drawFrame(2, 5, 157, 7, COLORS.border, COLORS.panelBg, "round")
     self:drawText(4, 5, " ◈ QUANTUM FORCE TRANSFORMER ORCHESTRATOR ", COLORS.accent, COLORS.panelBg)
     self:drawText(138, 5, fresh and (" ONLINE (" .. UI.formatAge(now, peer.lastSeen) .. ") ") or " STALE ", fresh and COLORS.green or COLORS.yellow, COLORS.panelBg)
+    local dErr = tonumber(st.diagErrors) or 0
+    local dWrn = tonumber(st.diagWarnings) or 0
+    local diagStr = (dErr > 0 or dWrn > 0) and string.format("  Diag:%dE/%dW", dErr, dWrn) or ""
     self:drawText(4, 7, padOrTrunc(string.format(
-        "Armed:%-5s  Units:%d/%d online (%d active, %d recfg)  Maintainer:%s (%s)",
+        "Armed:%-5s  Units:%d/%d online (%d active, %d recfg)  Maintainer:%s (%s)%s",
         tostring(st.armed == true), onN, #units, actN, recN,
-        tostring(mm.label or mm.mode or "OFF"), tostring(mm.detail or "-")), 152), COLORS.fg, COLORS.panelBg)
+        tostring(mm.label or mm.mode or "OFF"), tostring(mm.detail or "-"), diagStr), 152),
+        (dErr > 0) and COLORS.red or ((dWrn > 0) and COLORS.yellow or COLORS.fg), COLORS.panelBg)
 
     local bx = 4
     bx = self:drawOrchestratorBtn(bx, 9, "[Arm Fleet]", COLORS.fg, COLORS.darkGreen, "qft", "resume")
@@ -1409,7 +1413,7 @@ function UI:renderQftTab()
     self:drawFrame(2, 13, 157, 35, COLORS.border, COLORS.panelBg, "round")
     self:drawText(4, 13, string.format(" ◈ QFT UNITS (%d) ", #units), COLORS.accent, COLORS.panelBg)
     self:drawText(4, 15, padOrTrunc(string.format("%-4s %-16s %-8s %-6s %-28s %-14s %-10s %-16s %s",
-        "#", "Unit", "State", "Tier", "Recipe", "Blocks", "Focus", "Plasma Np/Fm", "Progress / Note"), 152), COLORS.muted, COLORS.panelBg)
+        "#", "Unit", "State", "Tier", "Recipe", "E-Hatch", "Focus", "Plasma Np/Fm", "Progress / Note"), 152), COLORS.muted, COLORS.panelBg)
     self:drawText(4, 16, string.rep("─", 152), COLORS.border, COLORS.panelBg)
 
     local maxShow = 15
@@ -1423,13 +1427,14 @@ function UI:renderQftTab()
             local bg = (i % 2 == 0) and COLORS.rowAltBg or COLORS.panelBg
             self:fillRect(3, ry, 155, 1, " ", COLORS.fg, bg)
             local stTxt = tostring(u.state or (u.active and "RUN" or (u.online and "IDLE" or "OFFLINE")))
-            local blkTxt = u.hasHatch and "Ctrl+Bus+Hat" or (u.hasBus and "Ctrl+Bus" or "Ctrl-1Blk")
+            local blkTxt = (type(u.hatchLabel) == "string" and u.hatchLabel ~= "") and u.hatchLabel
+                or (u.hasHatch and "Ctrl+Bus+Hat" or (u.hasBus and "Ctrl+Bus" or "Ctrl-1Blk"))
             local plsTxt = string.format("Np:%s Fm:%s", u.hasNeptunium and "ON" or "--", u.hasFermium and "ON" or "--")
             local focTxt = string.format("#%d (%s)", tonumber(u.focusCircuit) or 0, tostring(u.focusMode or "auto"))
             local note = u.reconfiguring and "Waiting idle to swap!" or (u.maxProgress and (u.maxProgress > 0) and string.format("%d/%dt", u.progress or 0, u.maxProgress) or tostring(u.mode or "passive"))
             local line = string.format("%-4d %-16s %-8s T%-5d %-28s %-14s %-10s %-16s %s",
                 idx, padOrTrunc(u.label or ("QFT#" .. idx), 16), stTxt, tonumber(u.tier) or 1,
-                padOrTrunc(u.recipeName or u.recipeId or "-", 28), blkTxt, focTxt, plsTxt, padOrTrunc(note, 24))
+                padOrTrunc(u.recipeName or u.recipeId or "-", 28), padOrTrunc(blkTxt, 14), focTxt, plsTxt, padOrTrunc(note, 24))
             local col = u.reconfiguring and COLORS.yellow or (u.active and COLORS.green or (u.online and COLORS.fg or COLORS.muted))
             self:drawText(4, ry, padOrTrunc(line, 152), col, bg)
         end

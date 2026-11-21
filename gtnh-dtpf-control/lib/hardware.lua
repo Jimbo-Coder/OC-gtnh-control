@@ -37,6 +37,8 @@ function Hardware.resetClusterState()
     Hardware._remoteOwner = {}
     Hardware._lastMainnetSeen = nil
     Hardware._lastMainnetWakeAt = -1000
+    Hardware._meshStartedAt = nil
+    Hardware._mainnetWakeAttempts = 0
     Hardware._lastClaimsRaw = nil
     Hardware._lastClaimsSig = nil
     Hardware._lastClaimsSent = -100
@@ -1970,8 +1972,8 @@ local function configureMeshWake(m, wakeMsg)
     if m and type(m.setWakeMessage) == "function" then
         local needWake = true
         if type(m.getWakeMessage) == "function" then
-            local okWk, curWk = pcall(m.getWakeMessage)
-            if okWk and curWk == wakeMsg then needWake = false end
+            local okWk, curWk, curFuzzy = pcall(m.getWakeMessage)
+            if okWk and curWk == wakeMsg and curFuzzy == true then needWake = false end
         end
         if needWake then pcall(m.setWakeMessage, wakeMsg, true) end
     end
@@ -2264,6 +2266,7 @@ local function awaitMeshAck(tunnel, tAddr, reqId, ackType, timeoutSec, maxPulls,
                 Hardware._mainnetMeshAddr = sender
                 Hardware._mainnetMeshViaTunnel = (port == 0)
                 Hardware._lastMainnetSeen = meshUptime()
+                Hardware._mainnetWakeAttempts = 0
                 return tbl, sender, port
             end
         end
@@ -2500,9 +2503,14 @@ function Hardware.pushMeshMetrics(cfg, runtimeState, nowSec, compLib, force)
             end
         end
     end
-    if Hardware._lastMainnetSeen and (nowSec - Hardware._lastMainnetSeen) >= 90 and (nowSec - (Hardware._lastMainnetWakeAt or -1000)) >= 60 then
+    Hardware._meshStartedAt = Hardware._meshStartedAt or nowSec
+    local peerSilent = (Hardware._lastMainnetSeen and (nowSec - Hardware._lastMainnetSeen) >= 60)
+        or ((not Hardware._lastMainnetSeen) and (nowSec - Hardware._meshStartedAt) >= 60)
+    if peerSilent and (nowSec - (Hardware._lastMainnetWakeAt or -1000)) >= 60 then
         Hardware._lastMainnetWakeAt = nowSec
-        sendMeshPacket(cl, Hardware._mainnetMeshAddr, viaTunnel, Hardware.WAKE_MSG or "GTNH_WAKE", "dtpf")
+        Hardware._mainnetWakeAttempts = (Hardware._mainnetWakeAttempts or 0) + 1
+        local wakeTarget = (Hardware._mainnetMeshAddr and Hardware._mainnetWakeAttempts <= 2) and Hardware._mainnetMeshAddr or nil
+        sendMeshPacket(cl, wakeTarget, viaTunnel, Hardware.WAKE_MSG or "GTNH_WAKE")
     end
     return true
 end
@@ -2538,6 +2546,7 @@ function Hardware.handleMeshMessage(webBridge, localAddr, sender, port, msgType,
             Hardware._mainnetMeshAddr = sender
             Hardware._mainnetMeshViaTunnel = (port == 0)
             Hardware._lastMainnetSeen = up
+            Hardware._mainnetWakeAttempts = 0
         end
         Hardware.pushMeshMetrics(webBridge and webBridge.cfg, webBridge and webBridge.state, up, cl, true)
         return true
@@ -2572,11 +2581,13 @@ function Hardware.handleMeshMessage(webBridge, localAddr, sender, port, msgType,
         Hardware._mainnetMeshAddr = sender
         Hardware._mainnetMeshViaTunnel = (port == 0)
         Hardware._lastMainnetSeen = (computer and computer.uptime and computer.uptime()) or (_G.computer and _G.computer.uptime and _G.computer.uptime()) or 0
+        Hardware._mainnetWakeAttempts = 0
         return true
     elseif msgType == "DTPF_CMD" then
         Hardware._mainnetMeshAddr = sender
         Hardware._mainnetMeshViaTunnel = (port == 0)
         Hardware._lastMainnetSeen = (computer and computer.uptime and computer.uptime()) or (_G.computer and _G.computer.uptime and _G.computer.uptime()) or 0
+        Hardware._mainnetWakeAttempts = 0
         local cmd = (type(payload) == "string") and serialization.unserialize(payload) or nil
         local resTbl
         if type(cmd) == "table" and webBridge and webBridge.executeRpcTable then

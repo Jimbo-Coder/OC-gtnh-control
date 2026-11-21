@@ -995,8 +995,8 @@ local function getMeshTransports(compLib)
                 if type(m.setWakeMessage) == "function" then
                     local needWake = true
                     if type(m.getWakeMessage) == "function" then
-                        local okWk, curWk = pcall(m.getWakeMessage)
-                        if okWk and curWk == Hardware.WAKE_MSG then needWake = false end
+                        local okWk, curWk, curFuzzy = pcall(m.getWakeMessage)
+                        if okWk and curWk == Hardware.WAKE_MSG and curFuzzy == true then needWake = false end
                     end
                     if needWake then pcall(m.setWakeMessage, Hardware.WAKE_MSG, true) end
                 end
@@ -1011,7 +1011,12 @@ local function getMeshTransports(compLib)
     if ta then
         tunnel, tAddr = cl.proxy(ta), ta
         if tunnel and type(tunnel.setWakeMessage) == "function" then
-            pcall(tunnel.setWakeMessage, Hardware.WAKE_MSG, true)
+            local needWake = true
+            if type(tunnel.getWakeMessage) == "function" then
+                local okWk, curWk, curFuzzy = pcall(tunnel.getWakeMessage)
+                if okWk and curWk == Hardware.WAKE_MSG and curFuzzy == true then needWake = false end
+            end
+            if needWake then pcall(tunnel.setWakeMessage, Hardware.WAKE_MSG, true) end
         end
     end
     return modem, tunnel, tAddr
@@ -1106,11 +1111,14 @@ function Hardware.pushMeshMetrics(cfg, state, nowSec, compLib, force)
     end
     local viaTunnel = (Hardware._mainnetMeshViaTunnel == true) or (not modem and tunnel ~= nil)
     sendMeshPacket(cl, Hardware._mainnetMeshAddr, viaTunnel, "UNIV_METRICS", raw)
-    if Hardware._mainnetMeshAddr and Hardware._lastMainnetSeen
-        and (nowSec - Hardware._lastMainnetSeen) >= 90
-        and (nowSec - (Hardware._lastReverseWake or -1000)) >= 60 then
+    Hardware._meshStartedAt = Hardware._meshStartedAt or nowSec
+    local peerSilent = (Hardware._lastMainnetSeen and (nowSec - Hardware._lastMainnetSeen) >= 60)
+        or ((not Hardware._lastMainnetSeen) and (nowSec - Hardware._meshStartedAt) >= 60)
+    if peerSilent and (nowSec - (Hardware._lastReverseWake or -1000)) >= 60 then
         Hardware._lastReverseWake = nowSec
-        sendMeshPacket(cl, Hardware._mainnetMeshAddr, viaTunnel, Hardware.WAKE_MSG, "univ_watchdog")
+        Hardware._mainnetWakeAttempts = (Hardware._mainnetWakeAttempts or 0) + 1
+        local wakeTarget = (Hardware._mainnetMeshAddr and Hardware._mainnetWakeAttempts <= 2) and Hardware._mainnetMeshAddr or nil
+        sendMeshPacket(cl, wakeTarget, viaTunnel, Hardware.WAKE_MSG)
     end
     return true
 end
@@ -1127,17 +1135,20 @@ function Hardware.handleMeshMessage(cfg, state, localAddr, sender, port, msgType
         Hardware._mainnetMeshAddr = sender
         Hardware._mainnetMeshViaTunnel = (port == 0)
         Hardware._lastMainnetSeen = upNow
+        Hardware._mainnetWakeAttempts = 0
         Hardware.pushMeshMetrics(cfg, state, upNow, cl, true)
         return true
     elseif msgType == "UNIV_ACK" then
         Hardware._mainnetMeshAddr = sender
         Hardware._mainnetMeshViaTunnel = (port == 0)
         Hardware._lastMainnetSeen = upNow
+        Hardware._mainnetWakeAttempts = 0
         return true
     elseif msgType == "UNIV_CMD" then
         Hardware._mainnetMeshAddr = sender
         Hardware._mainnetMeshViaTunnel = (port == 0)
         Hardware._lastMainnetSeen = upNow
+        Hardware._mainnetWakeAttempts = 0
         local cmd = (type(payload) == "string") and serialization.unserialize(payload) or nil
         local reply = { ok = false, error = "Unknown command" }
         if type(cmd) == "table" then

@@ -666,8 +666,8 @@ M.RECIPES = {
     },
   },
   {
-    id = "qft_recipe_19",
-    name = "Ultimate Plasticizer Catalyst #19",
+    id = "xenoxene_radox_kevlar",
+    name = "Xenoxene, Radox & Kevlar",
     tier = 4,
     focusTier = 4,
     durationTicks = 400,
@@ -692,9 +692,35 @@ M.RECIPES = {
   },
 }
 
+M.CATALYSTS = {
+  { damage = 19, label = "Adhesion Promoter Catalyst", shortLabel = "Adhesion Promoter", tier = 1, recipeIds = { "adhesives_solder" } },
+  { damage = 17, label = "Plastic Polymer Catalyst", shortLabel = "Plastic Polymer", tier = 1, recipeIds = { "plastics_line" } },
+  { damage = 16, label = "Platinum Group Catalyst", shortLabel = "Platinum Group", tier = 1, recipeIds = { "crude_rh_metal", "ir_leach_residue", "leach_residue", "pd_metallic_powder", "platline_combs", "platline_crops", "pt_metallic_powder", "ir_os_leach_residue" } },
+  { damage = 21, label = "Radioactivity Catalyst", shortLabel = "Radioactivity", tier = 1, recipeIds = { "thorium_uranium_plutonium" } },
+  { damage = 18, label = "Rubber Polymer Catalyst", shortLabel = "Rubber Polymer", tier = 1, recipeIds = { "rubber_line" } },
+  { damage = 20, label = "Tita-Tungsten Indium Catalyst", shortLabel = "Tita-Tungsten Indium", tier = 1, recipeIds = { "ti_w_in_bauxite", "ti_ta_nb_re_hf" } },
+  { damage = 35, label = "Crystal Colorization Catalyst", shortLabel = "Crystal Colorization", tier = 2, recipeIds = { "prismatic_naquadah" } },
+  { damage = 34, label = "Hellish Force Catalyst", shortLabel = "Hellish Force", tier = 2, recipeIds = { "netherite_nanoparticles" } },
+  { damage = 22, label = "Rare-Earth Group Catalyst", shortLabel = "Rare-Earth Group", tier = 2, recipeIds = { "rare_earth_bastnasite", "rare_earth_cerium", "rare_earth_monazite" } },
+  { damage = 23, label = "Simple Naquadah Catalyst", shortLabel = "Simple Naquadah", tier = 2, recipeIds = { "enriched_naquadah_earth", "naquadah_earth" } },
+  { damage = 24, label = "Advanced Naquadah Catalyst", shortLabel = "Advanced Naquadah", tier = 3, recipeIds = { "naquadria_earth" } },
+  { damage = 25, label = "Raw Intelligence Catalyst", shortLabel = "Raw Intelligence", tier = 3, recipeIds = { "stemcells_growth_medium" } },
+  { damage = 33, label = "Algagenic Growth Promoter Catalyst", shortLabel = "Algagenic Growth Promoter", tier = 4, recipeIds = { "seaweed_broth_extract" } },
+  { damage = 27, label = "Biological Intelligence Catalyst", shortLabel = "Biological Intelligence", tier = 4, recipeIds = { "biocells_living_solder" } },
+  { damage = 28, label = "Temporal Harmonizer Catalyst", shortLabel = "Temporal Harmonizer", tier = 4, recipeIds = { "shirabon_timepiece_eternity" } },
+  { damage = 26, label = "Ultimate Plasticizer Catalyst", shortLabel = "Ultimate Plasticizer", tier = 4, recipeIds = { "kevlar_combs", "xenoxene_radox_kevlar" } },
+}
+
 M.BY_ID = {}
 for _, r in ipairs(M.RECIPES) do
   M.BY_ID[r.id] = r
+end
+
+M.BY_ID["qft_recipe_19"] = M.BY_ID["xenoxene_radox_kevlar"]
+
+M.CATALYST_BY_DAMAGE = {}
+for _, c in ipairs(M.CATALYSTS) do
+  M.CATALYST_BY_DAMAGE[c.damage] = c
 end
 
 return M

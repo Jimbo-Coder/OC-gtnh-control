@@ -619,9 +619,9 @@ def resolve_fluid(fl) -> dict:
 
 def classify_recipe(raw_cat, focus_tier, raw_items_in, idx):
     cat_key = raw_cat["key"]
-    first_in = str(raw_items_in[0]) if raw_items_in else ""
+    all_in = " ".join(str(x) for x in (raw_items_in or []))
     for (needle, t_req), info in RECIPE_NAME_HINTS.items():
-        if t_req == focus_tier and (needle == cat_key or needle in first_in):
+        if t_req == focus_tier and (needle == cat_key or needle in all_in):
             return info
     return (f"qft_recipe_{idx}", f"{raw_cat['label']} #{idx}")
 
@@ -735,12 +735,50 @@ def format_lua(recipes: list) -> str:
             lines.append(f"      {{ name = {lua_str(fl['name'])}, amount = {fl['amount']}, label = {lua_str(fl['label'])} }},")
         lines.append("    },")
         lines.append("  },")
+    cat_groups = {}
+    for r in recipes:
+        c = r["catalyst"]
+        dmg = int(c["damage"])
+        grp = cat_groups.get(dmg)
+        if not grp:
+            lbl = str(c["label"])
+            short_lbl = lbl[:-len(" Catalyst")] if lbl.endswith(" Catalyst") else lbl
+            grp = {
+                "damage": dmg,
+                "label": lbl,
+                "shortLabel": short_lbl,
+                "tier": int(r["tier"]),
+                "recipeIds": [],
+            }
+            cat_groups[dmg] = grp
+        grp["tier"] = min(grp["tier"], int(r["tier"]))
+        grp["recipeIds"].append(r["id"])
+    catalysts = sorted(cat_groups.values(), key=lambda c: (c["tier"], c["label"]))
+
+    lines.extend([
+        "}",
+        "",
+        "M.CATALYSTS = {",
+    ])
+    for c in catalysts:
+        rids = ", ".join(lua_str(rid) for rid in c["recipeIds"])
+        lines.append(
+            f"  {{ damage = {c['damage']}, label = {lua_str(c['label'])}, "
+            f"shortLabel = {lua_str(c['shortLabel'])}, tier = {c['tier']}, recipeIds = {{ {rids} }} }},"
+        )
     lines.extend([
         "}",
         "",
         "M.BY_ID = {}",
         "for _, r in ipairs(M.RECIPES) do",
         "  M.BY_ID[r.id] = r",
+        "end",
+        "",
+        'M.BY_ID["qft_recipe_19"] = M.BY_ID["xenoxene_radox_kevlar"]',
+        "",
+        "M.CATALYST_BY_DAMAGE = {}",
+        "for _, c in ipairs(M.CATALYSTS) do",
+        "  M.CATALYST_BY_DAMAGE[c.damage] = c",
         "end",
         "",
         "return M",

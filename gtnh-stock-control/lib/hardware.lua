@@ -891,8 +891,8 @@ local function configureMeshWake(m, wakeMsg)
     if m and type(m.setWakeMessage) == "function" then
         local needWake = true
         if type(m.getWakeMessage) == "function" then
-            local okWk, curWk = pcall(m.getWakeMessage)
-            if okWk and curWk == wakeMsg then needWake = false end
+            local okWk, curWk, curFuzzy = pcall(m.getWakeMessage)
+            if okWk and curWk == wakeMsg and curFuzzy == true then needWake = false end
         end
         if needWake then pcall(m.setWakeMessage, wakeMsg, true) end
     end
@@ -1105,9 +1105,14 @@ function Hardware.pushMeshMetrics(cfg, state, nowSec, compLib, force)
             sendMeshPacket(cl, st, nil, viaTunnel, "STOCK_CLAIMS", claimsRaw)
         end
     end
-    if st._lastMainnetSeen and (nowSec - st._lastMainnetSeen) >= 90 and (nowSec - (st._lastMainnetWakeAt or -1000)) >= 60 then
+    st._meshStartedAt = st._meshStartedAt or nowSec
+    local peerSilent = (st._lastMainnetSeen and (nowSec - st._lastMainnetSeen) >= 60)
+        or ((not st._lastMainnetSeen) and (nowSec - st._meshStartedAt) >= 60)
+    if peerSilent and (nowSec - (st._lastMainnetWakeAt or -1000)) >= 60 then
         st._lastMainnetWakeAt = nowSec
-        sendMeshPacket(cl, st, st._mainnetMeshAddr, viaTunnel, Hardware.WAKE_MSG, "stock")
+        st._mainnetWakeAttempts = (st._mainnetWakeAttempts or 0) + 1
+        local wakeTarget = (st._mainnetMeshAddr and st._mainnetWakeAttempts <= 2) and st._mainnetMeshAddr or nil
+        sendMeshPacket(cl, st, wakeTarget, viaTunnel, Hardware.WAKE_MSG)
     end
     return true
 end
@@ -1165,6 +1170,7 @@ function Hardware.handleMeshMessage(cfg, state, localAddr, sender, port, msgType
             state._mainnetMeshAddr = sender
             state._mainnetMeshViaTunnel = (port == 0)
             state._lastMainnetSeen = clockNow()
+            state._mainnetWakeAttempts = 0
         end
         Hardware.pushMeshMetrics(cfg, state, clockNow(), cl, true)
         return true
@@ -1173,6 +1179,7 @@ function Hardware.handleMeshMessage(cfg, state, localAddr, sender, port, msgType
             state._mainnetMeshAddr = sender
             state._mainnetMeshViaTunnel = (port == 0)
             state._lastMainnetSeen = clockNow()
+            state._mainnetWakeAttempts = 0
         end
         return true
     elseif msgType == "DTPF_CLAIMS" then
@@ -1207,6 +1214,7 @@ function Hardware.handleMeshMessage(cfg, state, localAddr, sender, port, msgType
             state._mainnetMeshAddr = sender
             state._mainnetMeshViaTunnel = (port == 0)
             state._lastMainnetSeen = clockNow()
+            state._mainnetWakeAttempts = 0
         end
         local cmd = (type(payload) == "string") and serialization.unserialize(payload) or nil
         local resTbl
@@ -1229,6 +1237,7 @@ function Hardware.handleMeshMessage(cfg, state, localAddr, sender, port, msgType
             state._mainnetMeshAddr = sender
             state._mainnetMeshViaTunnel = (port == 0)
             state._lastMainnetSeen = clockNow()
+            state._mainnetWakeAttempts = 0
         end
         local okU, pushTbl = pcall(serialization.unserialize, tostring(payload or ""))
         local resTbl

@@ -99,6 +99,7 @@ function UI.new(cfg, state, onSave, compLib, extras)
         selectedUnitId = (cfg.units[1] and cfg.units[1].id) or nil,
         tierFilter = 0,
         selectedRecipeId = (cfg.units[1] and cfg.units[1].recipeId) or RecipesDb.RECIPES[1].id,
+        pickingCatalyst = false,
         recipeScroll = 0,
         hwScroll = 0,
         inputDrafts = {},
@@ -241,17 +242,27 @@ end
 function UI:renderFleetTab()
     self:drawFrame(2, 5, 102, 43, COLORS.border, COLORS.panelBg, "round")
     self:drawText(4, 5, " ◈ QFT UNITS (1, 2 OR 3 BLOCKS PER QFT) ", COLORS.accent, COLORS.panelBg)
+    local diag = self.state.hwDiag
+    local errCnt = (diag and diag.errors) and #diag.errors or 0
+    local wrnCnt = (diag and diag.warnings) and #diag.warnings or 0
+    if errCnt > 0 or wrnCnt > 0 then
+        local firstMsg = (errCnt > 0 and diag.errors[1].msg) or (wrnCnt > 0 and diag.warnings[1].msg) or ""
+        local ban = padOrTrunc(string.format("[! %dE/%dW: %s -> Hardware]", errCnt, wrnCnt, firstMsg), 98)
+        self:drawButton(4, 6, ban, errCnt > 0 and COLORS.fg or COLORS.yellow,
+            errCnt > 0 and COLORS.darkRed or COLORS.amberBg, function() self.tab = TAB_HW end)
+    end
     local units = self.state.unitStatuses or {}
     if #units == 0 then
         self:drawText(4, 8, "No QFTs configured yet. Go to [3] HARDWARE BINDING or click below.", COLORS.yellow, COLORS.panelBg)
         self:drawButton(4, 10, "[↻ Auto-Discover QFTs]", COLORS.cyan, COLORS.btnBg, function()
             local disc = Scheduler.syncHardware(self.cfg, self.state, self.comp)
-            local added = Scheduler.autoBindDiscoveredUnits(self.cfg, disc)
-            self:save(string.format("Discovered %d QFT(s), added %d.", #(disc.controllers or {}), added))
+            local added, bound = Scheduler.autoBindDiscoveredUnits(self.cfg, disc)
+            self.state.hwDiag = Scheduler.diagnoseHardware(self.cfg, disc)
+            self:save(string.format("Discovered %d QFT(s), added %d, paired %d.", #(disc.controllers or {}), added, bound))
         end)
     else
-        self:drawText(4, 7, padOrTrunc(string.format("%-6s %-10s %-4s %-22s %-8s %-7s %-7s %s",
-            "State", "Unit", "Tier", "Recipe", "Focus", "Np", "Fm", "Output Target"), 98), COLORS.muted, COLORS.panelBg)
+        self:drawText(4, 7, padOrTrunc(string.format("%-6s %-9s %-10s %-3s %-30s %-5s %-7s %-6s %s",
+            "State", "Unit", "E-Hatch", "T", "Catalyst / Recipe", "Foc", "Np/Fm", "Cap", "Al"), 98), COLORS.muted, COLORS.panelBg)
         self:drawText(4, 8, string.rep("─", 98), COLORS.border, COLORS.panelBg)
         for i, us in ipairs(units) do
             if i > 17 then break end
@@ -259,16 +270,22 @@ function UI:renderFleetTab()
             local sel = (us.id == self.selectedUnitId)
             local bg = sel and COLORS.selectedBg or ((i % 2 == 0) and COLORS.rowAltBg or COLORS.panelBg)
             self:fillRect(3, ry, 100, 1, " ", COLORS.fg, bg)
+            local fl = us.flags or {}
             local stCol = (us.state == "RUN" and COLORS.green) or (us.state == "RECFG" and COLORS.yellow)
-                or (us.state == "OFF" and COLORS.red) or COLORS.muted
-            local line = string.format("%-6s %-10s T%-3d %-22s #%-7d %-7s %-7s %s",
-                us.state, padOrTrunc(us.label, 10), us.tier, padOrTrunc(us.recipeName, 22),
-                us.focusCircuit or 0,
-                us.hasNeptunium and "ON" or tostring(us.boostNeptunium):upper(),
-                us.hasFermium and "ON" or tostring(us.boostFermium):upper(),
-                us.targetStock > 0 and UI.formatNumber(us.targetStock) or "24/7")
+                or ((us.state == "OFF" or fl.ctrlErr) and COLORS.red) or COLORS.muted
+            local eh = (type(us.hatchLabel) == "string" and us.hatchLabel ~= "") and us.hatchLabel or "--"
+            local npTag = us.hasNeptunium and "NP" or (us.boostNeptunium == "on" and "np" or (us.boostNeptunium == "auto" and "au" or "--"))
+            local fmTag = us.hasFermium and "FM" or (us.boostFermium == "on" and "fm" or (us.boostFermium == "auto" and "au" or "--"))
+            local alTag = fl.anyErr and "!ER" or (fl.anyWarn and "!WN" or "")
+            local line = string.format("%-6s %-9s %-10s T%-2d %-30s #%-4d %-7s %-6s %s",
+                us.state, padOrTrunc(us.label, 9), padOrTrunc(eh, 10), us.tier, padOrTrunc(us.recipeName, 30),
+                us.focusCircuit or 0, npTag .. "/" .. fmTag,
+                us.targetStock > 0 and UI.formatNumber(us.targetStock) or "24/7", alTag)
             self:drawButton(4, ry, padOrTrunc(line, 98), stCol, bg, function()
-                self.selectedUnitId = us.id
+                if self.selectedUnitId ~= us.id then
+                    self.selectedUnitId = us.id
+                    self.pickingCatalyst = false
+                end
             end)
         end
     end
@@ -280,75 +297,143 @@ function UI:renderFleetTab()
         self:drawText(108, 8, "Select a QFT unit to configure.", COLORS.muted, COLORS.panelBg)
         return
     end
+    local usSel = nil
+    for _, xus in ipairs(units) do
+        if xus.id == u.id then usSel = xus; break end
+    end
     local rcp = RecipesDb.BY_ID[u.recipeId] or RecipesDb.RECIPES[1]
-    self:drawText(108, 7, "Unit   : " .. padOrTrunc(u.label, 24) .. " (" .. (u.enabled and "ON" or "OFF") .. ")", COLORS.fg, COLORS.panelBg)
-    self:drawButton(145, 7, u.enabled and "[Disable]" or "[Enable ]", u.enabled and COLORS.green or COLORS.muted, COLORS.btnBg, function()
+    local cat = (RecipesDb.CATALYST_BY_DAMAGE and RecipesDb.CATALYST_BY_DAMAGE[u.catalystDamage])
+        or (rcp.catalyst and RecipesDb.CATALYST_BY_DAMAGE and RecipesDb.CATALYST_BY_DAMAGE[rcp.catalyst.damage])
+    local catShort = (cat and cat.shortLabel) or (rcp.catalyst and rcp.catalyst.label) or "Unknown"
+    local catTier = (cat and cat.tier) or rcp.tier or 1
+
+    self:drawText(108, 7, "Unit   : " .. padOrTrunc(u.label, 22) .. " (" .. (u.enabled and "ON" or "OFF") .. ")", COLORS.fg, COLORS.panelBg)
+    self:drawButton(147, 7, u.enabled and "[Disable]" or "[Enable ]", u.enabled and COLORS.green or COLORS.muted, COLORS.btnBg, function()
         u.enabled = not (u.enabled ~= false)
         self:save(u.label .. " -> " .. (u.enabled and "ENABLED" or "DISABLED"))
     end)
-    self:drawText(108, 9, "Recipe : " .. padOrTrunc(rcp.name, 40), COLORS.cyan, COLORS.panelBg)
-    self:drawButton(108, 10, "[Pick Recipe / Maintain Inputs ->]", COLORS.fg, COLORS.btnActiveBg, function()
+
+    local ehTxt = (usSel and type(usSel.hatchLabel) == "string" and usSel.hatchLabel ~= "") and usSel.hatchLabel or "--"
+    local euTxt = (usSel and usSel.liveEut and usSel.liveEut > 0) and (" | " .. UI.formatNumber(usSel.liveEut) .. " EU/t") or ""
+    self:drawText(108, 8, padOrTrunc("E-Hatch: " .. ehTxt .. euTxt, 48), COLORS.cyan, COLORS.panelBg)
+
+    local uFl = (usSel and usSel.flags) or (diag and diag.unitFlags and diag.unitFlags[u.id]) or {}
+    if uFl.anyErr or uFl.anyWarn then
+        self:drawButton(108, 9, padOrTrunc("! Wiring issue detected -> [Fix in Hardware]", 48),
+            uFl.anyErr and COLORS.red or COLORS.yellow, uFl.anyErr and COLORS.darkRed or COLORS.amberBg,
+            function() self.tab = TAB_HW end)
+    else
+        self:drawText(108, 9, padOrTrunc("Ctrl:" .. Hardware.shortAddr(u.controllerAddr) .. " Bus:" .. Hardware.shortAddr(u.busAddr) .. " Hat:" .. Hardware.shortAddr(u.hatchAddr), 48),
+            COLORS.muted, COLORS.panelBg)
+    end
+
+    self:drawText(108, 11, padOrTrunc(string.format("Catalyst: T%d %s", catTier, catShort), 38), COLORS.purple, COLORS.panelBg)
+    self:drawButton(147, 11, self.pickingCatalyst and "[Cancel]" or "[Change]",
+        self.pickingCatalyst and COLORS.yellow or COLORS.cyan, COLORS.btnBg, function()
+            self.pickingCatalyst = not self.pickingCatalyst
+        end)
+
+    if self.pickingCatalyst then
+        self:drawText(108, 13, "Click Installed Catalyst (auto-filters recipes):", COLORS.accent, COLORS.panelBg)
+        for ci, c in ipairs(RecipesDb.CATALYSTS or {}) do
+            if ci > 28 then break end
+            local cur = (cat and c.damage == cat.damage)
+            local rCnt = #(c.recipeIds or {})
+            local lbl = padOrTrunc(string.format("%s T%d %-31s (%d %s)",
+                cur and ">" or " ", c.tier, c.shortLabel, rCnt, rCnt == 1 and "rec" or "recs"), 48)
+            self:drawButton(108, 14 + ci, lbl, cur and COLORS.fg or COLORS.cyan, cur and COLORS.btnActiveBg or COLORS.btnBg, function()
+                Scheduler.setUnitCatalyst(u, c.damage)
+                self.pickingCatalyst = false
+                self:save(u.label .. " catalyst -> " .. c.shortLabel)
+            end)
+        end
+        return
+    end
+
+    local rIds = (cat and cat.recipeIds) or { u.recipeId }
+    local baseY
+    if #rIds <= 1 then
+        self:drawText(108, 13, padOrTrunc("Recipe  : " .. rcp.name, 48), COLORS.cyan, COLORS.panelBg)
+        self:drawText(108, 14, "(Fixed 1:1 catalyst -> recipe mapping)", COLORS.muted, COLORS.panelBg)
+        baseY = 16
+    else
+        self:drawText(108, 13, string.format("Select Recipe for Catalyst (%d options):", #rIds), COLORS.fg, COLORS.panelBg)
+        for ri = 1, math.min(8, #rIds) do
+            local cand = RecipesDb.BY_ID[rIds[ri]]
+            if cand then
+                local isSel = (cand.id == u.recipeId)
+                local rl = padOrTrunc(string.format("%s %-43s", isSel and "[*]" or "[ ]", cand.name), 48)
+                self:drawButton(108, 13 + ri, rl, isSel and COLORS.fg or COLORS.cyan, isSel and COLORS.btnActiveBg or COLORS.btnBg, function()
+                    u.recipeId = cand.id
+                    if cand.catalyst and cand.catalyst.damage then u.catalystDamage = cand.catalyst.damage end
+                    self:save(u.label .. " -> " .. cand.name)
+                end)
+            end
+        end
+        baseY = 13 + math.min(8, #rIds) + 2
+    end
+
+    self:drawButton(108, baseY, "[◈ Maintain Recipe Inputs ->]", COLORS.fg, COLORS.darkGreen, function()
         self.selectedRecipeId = u.recipeId
         self.tab = TAB_RECIPES
     end)
 
-    self:drawText(108, 12, "QFT Tier (Pulse Casings):", COLORS.fg, COLORS.panelBg)
-    local tx = 108
+    self:drawText(108, baseY + 2, "Tier :", COLORS.fg, COLORS.panelBg)
+    local tx = 115
     for t = 1, 4 do
         local act = (u.tier == t)
-        tx = self:drawButton(tx, 13, "[T" .. t .. "]", act and COLORS.fg or COLORS.muted, act and COLORS.btnActiveBg or COLORS.btnBg, function()
+        tx = self:drawButton(tx, baseY + 2, "[T" .. t .. "]", act and COLORS.fg or COLORS.muted, act and COLORS.btnActiveBg or COLORS.btnBg, function()
             u.tier = t
             self:save(u.label .. " tier -> T" .. t)
         end) + 1
     end
 
-    self:drawText(108, 15, "Focus Circuit Mode:", COLORS.fg, COLORS.panelBg)
-    local fx = 108
+    self:drawText(108, baseY + 4, "Focus:", COLORS.fg, COLORS.panelBg)
+    local fx = 115
     for _, fm in ipairs({ "auto", "fixed", "none" }) do
         local act = (u.focusMode == fm)
-        fx = self:drawButton(fx, 16, "[" .. fm:upper() .. "]", act and COLORS.fg or COLORS.muted, act and COLORS.btnActiveBg or COLORS.btnBg, function()
+        fx = self:drawButton(fx, baseY + 4, "[" .. fm:upper() .. "]", act and COLORS.fg or COLORS.muted, act and COLORS.btnActiveBg or COLORS.btnBg, function()
             u.focusMode = fm
             self:save(u.label .. " focus -> " .. fm)
         end) + 1
     end
     if u.focusMode == "fixed" then
-        self:drawButton(fx + 1, 16, "[# " .. tostring(u.focusCircuit) .. " ->]", COLORS.cyan, COLORS.btnBg, function()
+        self:drawButton(fx, baseY + 4, "[#" .. tostring(u.focusCircuit) .. "->]", COLORS.cyan, COLORS.btnBg, function()
             local maxO = #Scheduler.recipeOutputs(rcp)
             u.focusCircuit = (u.focusCircuit % math.max(1, maxO)) + 1
             self:save(u.label .. " focus circuit -> #" .. u.focusCircuit)
         end)
     end
 
-    self:drawText(108, 18, "Np Boost:", COLORS.fg, COLORS.panelBg)
-    local nx = 119
+    self:drawText(108, baseY + 6, "Np   :", COLORS.fg, COLORS.panelBg)
+    local nx = 115
     for _, m in ipairs({ "auto", "on", "off" }) do
         local act = (u.boostNeptunium == m)
-        nx = self:drawButton(nx, 18, "[" .. m:upper() .. "]", act and COLORS.fg or COLORS.muted, act and COLORS.btnActiveBg or COLORS.btnBg, function()
+        nx = self:drawButton(nx, baseY + 6, "[" .. m:upper() .. "]", act and COLORS.fg or COLORS.muted, act and COLORS.btnActiveBg or COLORS.btnBg, function()
             u.boostNeptunium = m
             self:save(u.label .. " Np boost -> " .. m)
         end) + 1
     end
-    self:drawText(108, 20, "Fm Boost:", COLORS.fg, COLORS.panelBg)
-    local mx = 119
+    self:drawText(108, baseY + 8, "Fm   :", COLORS.fg, COLORS.panelBg)
+    local mx = 115
     for _, m in ipairs({ "auto", "on", "off" }) do
         local act = (u.boostFermium == m)
-        mx = self:drawButton(mx, 20, "[" .. m:upper() .. "]", act and COLORS.fg or COLORS.muted, act and COLORS.btnActiveBg or COLORS.btnBg, function()
+        mx = self:drawButton(mx, baseY + 8, "[" .. m:upper() .. "]", act and COLORS.fg or COLORS.muted, act and COLORS.btnActiveBg or COLORS.btnBg, function()
             u.boostFermium = m
             self:save(u.label .. " Fm boost -> " .. m)
         end) + 1
     end
 
-    self:drawText(108, 22, "Output Stock Cap (0 = 24/7): " .. (u.targetStock > 0 and UI.formatNumber(u.targetStock) or "24/7"), COLORS.fg, COLORS.panelBg)
+    self:drawText(108, baseY + 10, "Output Cap (0 = 24/7): " .. (u.targetStock > 0 and UI.formatNumber(u.targetStock) or "24/7"), COLORS.fg, COLORS.panelBg)
     local cx = 108
     for _, v in ipairs({ 0, 1024, 16384, 100000, 1000000 }) do
-        cx = self:drawButton(cx, 23, "[" .. (v == 0 and "24/7" or UI.formatNumber(v)) .. "]", COLORS.cyan, COLORS.btnBg, function()
+        cx = self:drawButton(cx, baseY + 11, "[" .. (v == 0 and "24/7" or UI.formatNumber(v)) .. "]", COLORS.cyan, COLORS.btnBg, function()
             u.targetStock = v
             self:save(u.label .. " output cap -> " .. (v == 0 and "24/7" or UI.formatNumber(v)))
         end) + 1
     end
 
-    self:drawText(108, 26, "Safety: Focus/plasma changes wait for", COLORS.muted, COLORS.panelBg)
-    self:drawText(108, 27, "isMachineActive()==false to prevent voiding.", COLORS.muted, COLORS.panelBg)
+    self:drawText(108, baseY + 13, "Safety: Focus/plasma swaps wait for idle.", COLORS.muted, COLORS.panelBg)
 end
 
 function UI:renderRecipesTab()
@@ -429,6 +514,7 @@ function UI:renderRecipesTab()
     if selU then
         self:drawButton(112, by, "[Assign to " .. padOrTrunc(selU.label, 10) .. "]", COLORS.cyan, COLORS.btnBg, function()
             selU.recipeId = r.id
+            if r.catalyst and r.catalyst.damage then selU.catalystDamage = r.catalyst.damage end
             self:save("Assigned " .. r.name .. " -> " .. selU.label)
         end)
     end
@@ -448,24 +534,144 @@ function UI:renderRecipesTab()
     end
 end
 
+local function cycleDiscAddr(cur, list)
+    list = list or {}
+    if #list == 0 then return "" end
+    if not cur or cur == "" then return list[1].addr or "" end
+    for k, entry in ipairs(list) do
+        if entry.addr == cur then
+            return (list[k + 1] and list[k + 1].addr) or ""
+        end
+    end
+    return list[1].addr or ""
+end
+
 function UI:renderHardwareTab()
     self:drawFrame(2, 5, 157, 43, COLORS.border, COLORS.panelBg, "round")
-    self:drawText(4, 5, " ◈ QFT HARDWARE DISCOVERY & 1/2/3-BLOCK BINDING ", COLORS.accent, COLORS.panelBg)
-    self:drawButton(4, 7, "[↻ Scan & Auto-Bind]", COLORS.cyan, COLORS.btnBg, function()
+    self:drawText(4, 5, " ◈ QFT HARDWARE BINDING & WIRING DIAGNOSTICS ", COLORS.accent, COLORS.panelBg)
+
+    local bx = 4
+    bx = self:drawButton(bx, 7, "[↻ Scan & Auto-Bind]", COLORS.cyan, COLORS.btnBg, function()
         local disc = Scheduler.syncHardware(self.cfg, self.state, self.comp)
-        local added = Scheduler.autoBindDiscoveredUnits(self.cfg, disc)
-        self:save(string.format("Scanned QFT=%d Bus=%d Hatch=%d (added %d)",
-            #(disc.controllers or {}), #(disc.inputBuses or {}), #(disc.inputHatches or {}), added))
+        local added, bound = Scheduler.autoBindDiscoveredUnits(self.cfg, disc)
+        self.state.hwDiag = Scheduler.diagnoseHardware(self.cfg, disc)
+        self:save(string.format("Scanned QFT=%d Bus=%d Hatch=%d (added %d, paired %d)",
+            #(disc.controllers or {}), #(disc.inputBuses or {}), #(disc.inputHatches or {}), added, bound))
+    end) + 2
+    bx = self:drawButton(bx, 7, "[+ Add QFT]", COLORS.green, COLORS.btnBg, function()
+        local nu = Scheduler.addUnitFromDiscovery(self.cfg, "", "", "")
+        self.selectedUnitId = nu and nu.id or self.selectedUnitId
+        self.state.hwDiag = Scheduler.diagnoseHardware(self.cfg, self.state.discovery or {})
+        self:save("Added empty QFT unit slot; click Ctrl/Bus/Hatch to bind.")
+    end) + 2
+    bx = self:drawButton(bx, 7, "[Remove Empty]", COLORS.yellow, COLORS.btnBg, function()
+        local removed = 0
+        for idx = #(self.cfg.units or {}), 1, -1 do
+            local cu = self.cfg.units[idx]
+            if cu and (cu.controllerAddr or "") == "" then
+                table.remove(self.cfg.units, idx)
+                removed = removed + 1
+            end
+        end
+        self.state.hwDiag = Scheduler.diagnoseHardware(self.cfg, self.state.discovery or {})
+        self:save("Removed " .. removed .. " empty QFT unit(s).")
+    end) + 2
+    self:drawButton(bx, 7, "[↻ Re-Check Wiring]", COLORS.fg, COLORS.btnBg, function()
+        local disc = Scheduler.syncHardware(self.cfg, self.state, self.comp)
+        local d = self.state.hwDiag or Scheduler.diagnoseHardware(self.cfg, disc)
+        self:save(d.ok and "Wiring check OK." or string.format("Found %d error(s), %d warning(s).", #(d.errors or {}), #(d.warnings or {})))
     end)
+
     local disc = self.state.discovery or {}
-    self:drawText(4, 9, string.format("Controllers: %d  |  ME Stocking Buses: %d  |  ME Stocking Hatches: %d  |  Local AE2: %d",
-        #(disc.controllers or {}), #(disc.inputBuses or {}), #(disc.inputHatches or {}), #(disc.aeInterfaces or {})), COLORS.fg, COLORS.panelBg)
-    self:drawText(4, 11, "Tip: Place 1 OC Adapter touching adjacent blocks (0 MFUs) or bind 1-3 MFUs for remote wireless.", COLORS.muted, COLORS.panelBg)
-    for i, u in ipairs(self.cfg.units or {}) do
-        if i > 12 then break end
-        self:drawText(4, 12 + i * 2, string.format("%-10s Ctrl:%-10s Bus:%-10s Hatch:%-10s",
-            padOrTrunc(u.label, 10), Hardware.shortAddr(u.controllerAddr),
-            Hardware.shortAddr(u.busAddr), Hardware.shortAddr(u.hatchAddr)), COLORS.cyan, COLORS.panelBg)
+    local diag = self.state.hwDiag or Scheduler.diagnoseHardware(self.cfg, disc)
+    self:drawText(4, 9, padOrTrunc(string.format(
+        "Discovered: Ctrl=%d | ME Bus=%d | ME Hatch=%d | AE2=%d  ||  Errors=%d  Warnings=%d  (Click Ctrl/Bus/Hatch below to cycle)",
+        #(disc.controllers or {}), #(disc.inputBuses or {}), #(disc.inputHatches or {}), #(disc.aeInterfaces or {}),
+        #(diag.errors or {}), #(diag.warnings or {})), 152), COLORS.fg, COLORS.panelBg)
+
+    local units = self.cfg.units or {}
+    local usById, cInfo = {}, {}
+    for _, xus in ipairs(self.state.unitStatuses or {}) do
+        if xus and xus.id then usById[xus.id] = xus end
+    end
+    for _, dc in ipairs(disc.controllers or {}) do
+        if dc.addr then cInfo[dc.addr] = dc end
+    end
+
+    self:drawText(4, 11, padOrTrunc(string.format("%-11s %-12s %-20s %-19s %-20s %s",
+        "Unit", "E-Hatch", "Controller", "ME Stocking Bus", "ME Stocking Hatch", "Action"), 152), COLORS.muted, COLORS.panelBg)
+    self:drawText(4, 12, string.rep("─", 152), COLORS.border, COLORS.panelBg)
+
+    local maxShow = 8
+    self.hwScroll = math.max(0, math.min(math.max(0, #units - maxShow), self.hwScroll or 0))
+    for i = 1, math.min(maxShow, #units - self.hwScroll) do
+        local u = units[self.hwScroll + i]
+        local ry = 11 + i * 2
+        local bg = (i % 2 == 0) and COLORS.rowAltBg or COLORS.panelBg
+        self:fillRect(3, ry, 155, 1, " ", COLORS.fg, bg)
+        local us = usById[u.id]
+        local dc = u.controllerAddr ~= "" and cInfo[u.controllerAddr] or nil
+        local eh = (us and type(us.hatchLabel) == "string" and us.hatchLabel ~= "") and us.hatchLabel
+            or (dc and dc.hatchLabel) or "--"
+        local fl = (diag.unitFlags and diag.unitFlags[u.id]) or {}
+        self:drawButton(4, ry, padOrTrunc(u.label, 10), COLORS.fg, bg, function()
+            self.selectedUnitId = u.id
+        end)
+        self:drawText(16, ry, padOrTrunc(eh, 11), COLORS.cyan, bg)
+
+        local cLbl = string.format("[Ctrl:%-10s]", (u.controllerAddr ~= "" and Hardware.shortAddr(u.controllerAddr) or "NONE"))
+        self:drawButton(29, ry, cLbl, fl.ctrlErr and COLORS.red or COLORS.cyan,
+            fl.ctrlErr and COLORS.darkRed or COLORS.btnBg, function()
+                u.controllerAddr = cycleDiscAddr(u.controllerAddr, disc.controllers)
+                self.state.hwDiag = Scheduler.diagnoseHardware(self.cfg, disc)
+                self:save(u.label .. " controller -> " .. Hardware.shortAddr(u.controllerAddr))
+            end)
+
+        local bLbl = string.format("[Bus:%-10s]", (u.busAddr ~= "" and Hardware.shortAddr(u.busAddr) or "None"))
+        self:drawButton(50, ry, bLbl, fl.busErr and COLORS.red or ((u.busAddr == "") and COLORS.yellow or COLORS.green),
+            fl.busErr and COLORS.darkRed or COLORS.btnBg, function()
+                u.busAddr = cycleDiscAddr(u.busAddr, disc.inputBuses)
+                self.state.hwDiag = Scheduler.diagnoseHardware(self.cfg, disc)
+                self:save(u.label .. " bus -> " .. (u.busAddr ~= "" and Hardware.shortAddr(u.busAddr) or "None"))
+            end)
+
+        local hLbl = string.format("[Hatch:%-10s]", (u.hatchAddr ~= "" and Hardware.shortAddr(u.hatchAddr) or "None"))
+        self:drawButton(70, ry, hLbl, fl.hatchErr and COLORS.red or ((u.hatchAddr == "") and COLORS.yellow or COLORS.green),
+            fl.hatchErr and COLORS.darkRed or COLORS.btnBg, function()
+                u.hatchAddr = cycleDiscAddr(u.hatchAddr, disc.inputHatches)
+                self.state.hwDiag = Scheduler.diagnoseHardware(self.cfg, disc)
+                self:save(u.label .. " hatch -> " .. (u.hatchAddr ~= "" and Hardware.shortAddr(u.hatchAddr) or "None"))
+            end)
+
+        self:drawButton(92, ry, "[Del]", COLORS.red, COLORS.darkRed, function()
+            local nm = u.label
+            Scheduler.removeUnit(self.cfg, u.id)
+            self.selectedUnitId = self.cfg.units[1] and self.cfg.units[1].id or nil
+            self.state.hwDiag = Scheduler.diagnoseHardware(self.cfg, disc)
+            self:save("Removed " .. nm)
+        end)
+    end
+    if #units > maxShow then
+        self:drawButton(134, 11, "[Up]", COLORS.cyan, COLORS.btnBg, function()
+            self.hwScroll = math.max(0, (self.hwScroll or 0) - 2)
+        end)
+        self:drawButton(140, 11, "[Dn]", COLORS.cyan, COLORS.btnBg, function()
+            self.hwScroll = math.min(math.max(0, #units - maxShow), (self.hwScroll or 0) + 2)
+        end)
+    end
+
+    self:drawText(4, 30, " ◈ AUTO-SETUP & WIRING DIAGNOSTICS ", COLORS.accent, COLORS.panelBg)
+    self:drawText(4, 31, string.rep("─", 152), COLORS.border, COLORS.panelBg)
+    if diag.ok then
+        self:drawText(4, 33, "[OK] All QFT controllers, ME Stocking Buses, ME Stocking Hatches & AE2 verified (no duplicates or missing components).",
+            COLORS.green, COLORS.panelBg)
+    else
+        for di = 1, math.min(12, #(diag.items or {})) do
+            local item = diag.items[di]
+            local isErr = (item.sev == "err")
+            self:drawText(4, 32 + di, padOrTrunc((isErr and "[ERR] " or "[WRN] ") .. tostring(item.msg or ""), 152),
+                isErr and COLORS.red or COLORS.yellow, COLORS.panelBg)
+        end
     end
 end
 
@@ -532,6 +738,9 @@ end
 function UI:handleScroll(dir)
     if self.tab == TAB_RECIPES then
         self.recipeScroll = math.max(0, (self.recipeScroll or 0) + ((dir > 0) and -3 or 3))
+        self:render()
+    elseif self.tab == TAB_HW then
+        self.hwScroll = math.max(0, (self.hwScroll or 0) + ((dir > 0) and -2 or 2))
         self:render()
     end
 end

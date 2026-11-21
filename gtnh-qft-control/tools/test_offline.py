@@ -335,8 +335,12 @@ local function assertEq(actual, expected, msg)
     end
 end
 
--- TEST 1: GTNH 2.9.0 QFT Recipe Catalog Integrity (all 28 recipes)
+-- TEST 1: GTNH 2.9.0 QFT Recipe & Catalyst Catalog Integrity (all 28 recipes, 16 catalysts)
 assertEq(#RecipesDb.RECIPES, 28, "Expected 28 GTNH 2.9.0 QFT recipes")
+assertEq(#RecipesDb.CATALYSTS, 16, "Expected 16 unique QFT catalysts")
+assert(RecipesDb.BY_ID["xenoxene_radox_kevlar"] ~= nil, "xenoxene_radox_kevlar renamed cleanly from qft_recipe_19")
+assertEq(RecipesDb.BY_ID["qft_recipe_19"], RecipesDb.BY_ID["xenoxene_radox_kevlar"], "Legacy qft_recipe_19 alias preserved")
+assertEq(RecipesDb.CATALYST_BY_DAMAGE[16] and #RecipesDb.CATALYST_BY_DAMAGE[16].recipeIds or 0, 8, "Platline catalyst maps to 8 recipes")
 assertEq(RecipesDb.PLASMAS.neptunium.name, "plasma.neptunium", "Exact Neptunium plasma fluid ID")
 assertEq(RecipesDb.PLASMAS.fermium.name, "plasma.fermium", "Exact Fermium plasma fluid ID")
 for _, r in ipairs(RecipesDb.RECIPES) do
@@ -347,7 +351,7 @@ for _, r in ipairs(RecipesDb.RECIPES) do
     assert((#r.itemsOut + #r.fluidsOut) >= 1, "Has outputs on " .. tostring(r.id))
 end
 
--- TEST 2: Plasma-Voiding Safety Guard (3-block QFT: Ctrl + Bus + Hatch)
+-- TEST 2: E-Hatch Sensor Parsing + Plasma-Voiding Safety Guard (3-block QFT: Ctrl + Bus + Hatch)
 local qftActive = true
 local qftWorkAllowed = true
 local focusCir = 1
@@ -360,12 +364,20 @@ local busWrites, hatchWrites = {}, {}
 component._reset()
 component._register("gt-qft-1", "gt_machine", {
     getName = function() return "QuantumForceTransformer" end,
+    getCoordinates = function() return 10, 64, 20 end,
     isMachineActive = function() return qftActive end,
     isWorkAllowed = function() return qftWorkAllowed end,
     setWorkAllowed = function(v) qftWorkAllowed = (v == true) end,
     getWorkProgress = function() return qftActive and 120 or 0 end,
     getWorkMaxProgress = function() return 400 end,
-    getSensorInformation = function() return { "Quantum Force Transformer", "Problems: 0" } end,
+    getSensorInformation = function()
+        return {
+            "Quantum Force Transformer",
+            "GT5U.multiblock.scanner.mei_amp\\33,554,432\\64\\UV",
+            "GT5U.multiblock.scanner.usage\\7864320",
+            "Problems: 0",
+        }
+    end,
 })
 component._register("bus-qft-1", "me_inputbus", {
     getCircuitConfiguration = function() return focusCir end,
@@ -389,12 +401,19 @@ component._register("hatch-qft-1", "me_inputhatch", {
 })
 component._register("gt-qft-2-1block", "gt_machine", {
     getName = function() return "QuantumForceTransformer" end,
+    getCoordinates = function() return 20, 64, 20 end,
     isMachineActive = function() return false end,
     isWorkAllowed = function() return false end,
     setWorkAllowed = function() end,
     getWorkProgress = function() return 0 end,
     getWorkMaxProgress = function() return 400 end,
-    getSensorInformation = function() return { "Problems: 0" } end,
+    getSensorInformation = function()
+        return {
+            "Max Energy Input: 2,097,152 EU/t (1A UHV)",
+            "Currently uses: 0 EU/t",
+            "Problems: 0",
+        }
+    end,
 })
 
 local cfg = Scheduler.defaultConfig()
@@ -415,6 +434,16 @@ assertEq(qftWorkAllowed, false, "Paused QFT setWorkAllowed(false) while active t
 assertEq(#busWrites, 0, "Zero bus mutations while QFT active")
 assertEq(#hatchWrites, 0, "Zero hatch plasma clears while QFT active (prevented cycle void!)")
 assertEq(st.unitStatuses[1].state, "RECFG", "Status clearly indicates RECFG wait state")
+assertEq(st.unitStatuses[1].hatchLabel, "64A UV", "Parsed encoded GT5U.multiblock.scanner.mei_amp into 64A UV")
+assertEq(st.unitStatuses[1].liveEut, 7864320, "Parsed live usage EU/t")
+assertEq(st.unitStatuses[2].hatchLabel, "1A UHV", "Parsed English Max Energy Input into 1A UHV")
+
+-- Test Catalyst-First Assignment (1:1 and multi-recipe Rare-Earth)
+Scheduler.setUnitCatalyst(cfg.units[1], 17) -- Plastic Polymer (1:1)
+assertEq(cfg.units[1].catalystDamage, 17, "Catalyst damage updated to 17")
+assertEq(cfg.units[1].recipeId, "plastics_line", "1:1 catalyst immediately auto-pinned plastics_line")
+Scheduler.setUnitCatalyst(cfg.units[1], 22) -- Rare-Earth (3 options)
+assertEq(cfg.units[1].recipeId, "rare_earth_bastnasite", "Multi-recipe catalyst selected first valid Rare-Earth recipe")
 
 -- Cycle finishes -> machine becomes idle -> safe to apply focus & clear Np/Fm plasma!
 qftActive = false
@@ -448,13 +477,28 @@ component._register("ae-local", "me_interface", {
     end,
 })
 local meshPkts = {}
+local qWakeMsg, qWakeFuzzy, qWakeCalls = "GTNH_WAKE", false, 0
 component._register("mod-q", "modem", {
     isOpen = function() return true end, open = function() return true end,
-    isWireless = function() return true end, setStrength = function() return 400 end,
-    setWakeMessage = function() return "GTNH_WAKE" end,
-    send = function(a, p, mType, reqId, body) meshPkts[#meshPkts + 1] = { mType = mType, reqId = reqId, body = body }; return true end,
+    isWireless = function() return true end,
+    getStrength = function() return 400 end, setStrength = function() return 400 end,
+    getWakeMessage = function() return qWakeMsg, qWakeFuzzy end,
+    setWakeMessage = function(m, f) qWakeCalls = qWakeCalls + 1; qWakeMsg = m; qWakeFuzzy = (f == true); return qWakeMsg end,
+    send = function(a, p, mType, reqId, body) meshPkts[#meshPkts + 1] = { a = a, mType = mType, reqId = reqId, body = body }; return true end,
     broadcast = function(p, mType, reqId, body) meshPkts[#meshPkts + 1] = { mType = mType, reqId = reqId, body = body }; return true end,
 })
+Hardware.openMeshPort(cfg, component, st)
+Hardware.openMeshPort(cfg, component, st)
+assertEq(qWakeFuzzy, true, "QFT openMeshPort upgraded non-fuzzy GTNH_WAKE to fuzzy=true")
+assertEq(qWakeCalls, 1, "QFT openMeshPort skipped redundant setWakeMessage calls")
+meshPkts = {}
+Hardware.pushMeshMetrics(cfg, st, 20.0, component, true)
+meshPkts = {}
+Hardware.pushMeshMetrics(cfg, st, 85.0, component, true)
+local sawQftNeverWake = false
+for _, pk in ipairs(meshPkts) do if pk.mType == "GTNH_WAKE" and pk.a == nil and pk.reqId == nil then sawQftNeverWake = true end end
+assert(sawQftNeverWake, "QFT emits 1-arg broadcast GTNH_WAKE if Brain never seen for 60s")
+meshPkts = {}
 
 cfg.maintFreeCpus = 1 -- headroom 2 CPUs
 local resLocal = Scheduler.pushRecipeInputs(cfg, st, { recipeId = "adhesives_solder" })
@@ -485,13 +529,85 @@ assertEq(resMain.dispatched, "mainnet", "Online push dispatches straight to MAIN
 local resRet = Scheduler.retireRecipeInputs(cfg, st, { recipeId = "plastics_line", pauseOrphans = true })
 assertEq(resRet.mainnetNotified, true, "Retire sent untag command over mesh")
 
--- TEST 4: UI Render across all 4 tabs (zero wide glyphs)
-component.gpu = component._newMockGPU(160, 50)
+-- TEST 4: UI Render across all 4 tabs (including catalyst picker + Tab 3 interactive diagnostics)
+local baseGpu = component._newMockGPU(160, 50)
+local screenRows = {}
+local origSet = baseGpu.set
+baseGpu.set = function(x, y, s)
+    origSet(x, y, s)
+    screenRows[y] = (screenRows[y] or "") .. tostring(s)
+end
+component.gpu = baseGpu
 local ui = UI.new(cfg, st, function() end)
 for tab = 1, 4 do
     ui.tab = tab
     ui:render()
 end
+ui.tab = 1
+ui.pickingCatalyst = true
+ui:render()
+assert(#ui.hitboxes > 0, "Catalyst picker rendered hitboxes")
+ui.pickingCatalyst = false
+screenRows = {}
+for k = 1, #ui.curBuf do ui.curBuf[k] = -1 end
+ui:render()
+local fleetDump = ""
+for _, row in pairs(screenRows) do fleetDump = fleetDump .. row .. "\n" end
+assert(fleetDump:find("64A UV", 1, true), "Fleet overview renders unit E-Hatch 64A UV")
+assert(fleetDump:find("Rare-Earth Group", 1, true), "Unit control renders selected Catalyst name")
+assert(fleetDump:find("Rare Earth (Monazite)", 1, true), "Unit control renders filtered recipe options for multi-recipe catalyst")
+
+-- TEST 4b: Hardware Binding Pairing & Auto-Setup Diagnostics (duplicates, missing, unbound, non-QFT)
+component._reset()
+component._register("gt-c1", "gt_machine", { getName = function() return "QuantumForceTransformer" end, getCoordinates = function() return 0, 64, 0 end, getSensorInformation = function() return { "Max Energy Input: 33,554,432 EU/t (64A UV)" } end })
+component._register("gt-c2", "gt_machine", { getName = function() return "QuantumForceTransformer" end, getCoordinates = function() return 10, 64, 0 end, getSensorInformation = function() return { "Max Energy Input: 33,554,432 EU/t (64A UV)" } end })
+component._register("gt-other", "gt_machine", { getName = function() return "multimachine.blastfurnace" end })
+component._register("b-1", "me_inputbus", { getCircuitConfiguration = function() return 1 end })
+component._register("b-2", "me_inputbus", { getCircuitConfiguration = function() return 2 end })
+component._register("h-1", "me_inputhatch", { getSlotSize = function() return 16 end })
+component._register("h-2", "me_inputhatch", { getSlotSize = function() return 16 end })
+component._register("ae-d", "me_interface", {})
+
+local dCfg = Scheduler.defaultConfig()
+local dSt = Scheduler.newState()
+local dDisc = Scheduler.syncHardware(dCfg, dSt)
+assertEq(#dDisc.controllers, 2, "Found 2 QFT controllers")
+assertEq(#dDisc.otherMachines, 1, "Flagged 1 non-QFT gt_machine")
+local added2 = Scheduler.autoBindDiscoveredUnits(dCfg, dDisc)
+assertEq(added2, 2, "Auto-bound 2 QFT units")
+assertEq(dCfg.units[1].busAddr ~= dCfg.units[2].busAddr, true, "autoBind paired distinct buses")
+assertEq(dCfg.units[1].hatchAddr ~= dCfg.units[2].hatchAddr, true, "autoBind paired distinct hatches")
+
+local dClean = Scheduler.diagnoseHardware(dCfg, dDisc)
+assertEq(#dClean.errors, 0, "Clean auto-bound fleet has 0 errors")
+local sawOtherWarn = false
+for _, w in ipairs(dClean.warnings) do if w.code == "OTHER-GT" then sawOtherWarn = true end end
+assert(sawOtherWarn, "Diagnostics flagged non-QFT gt_machine touching adapter")
+
+-- Inject duplicate bus + offline hatch + unbound extra controller check
+dCfg.units[2].busAddr = dCfg.units[1].busAddr
+dCfg.units[2].hatchAddr = "offline-hatch-xyz"
+local dBad = Scheduler.diagnoseHardware(dCfg, dDisc)
+local sawDupBus, sawMissHatch = false, false
+for _, e in ipairs(dBad.errors) do
+    if e.code == "DUP-BUS" then sawDupBus = true end
+    if e.code == "MISS-HATCH" then sawMissHatch = true end
+end
+assert(sawDupBus, "Diagnostics caught duplicate ME Input Bus across QFT units")
+assert(sawMissHatch, "Diagnostics caught missing/offline ME Input Hatch")
+assertEq(dBad.unitFlags[dCfg.units[1].id].busErr, true, "Highlighted unit #1 bus button on duplicate")
+assertEq(dBad.unitFlags[dCfg.units[2].id].busErr, true, "Highlighted unit #2 bus button on duplicate")
+
+component.gpu = baseGpu
+dSt.hwDiag = dBad
+screenRows = {}
+local dUi = UI.new(dCfg, dSt, function() end)
+dUi.tab = 3
+dUi:render()
+local hwDump = ""
+for _, row in pairs(screenRows) do hwDump = hwDump .. row .. "\n" end
+assert(hwDump:find("Duplicate ME Input Bus", 1, true), "Tab 3 renders duplicate bus diagnostic clearly")
+assert(hwDump:find("[Ctrl:", 1, true) and hwDump:find("[Bus:", 1, true) and hwDump:find("[Hatch:", 1, true), "Tab 3 renders interactive Ctrl/Bus/Hatch cycle buttons")
 
 -- TEST 5: Deferred reboot & update_local guard
 local noInet = { list = function() return function() return nil end end, isAvailable = function() return false end }
