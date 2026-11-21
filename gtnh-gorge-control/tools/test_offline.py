@@ -314,9 +314,7 @@ package.loaded["computer"] = {{
     _setUptime = function(v) uptimeVal = v end,
     shutdown = function() end,
 }}
-package.loaded["shell"] = {{
-    getRunningProgram = function() return rootDir .. "/main.lua" end,
-}}
+package.loaded["shell"] = {{}}
 package.loaded["term"] = {{ clear = function() end }}
 package.loaded["event"] = {{
     pull = function() return "interrupted" end,

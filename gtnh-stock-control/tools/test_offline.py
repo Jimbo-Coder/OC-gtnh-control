@@ -313,7 +313,7 @@ package.loaded["computer"] = {{
     totalMemory = function() return 3686 * 1024 end,
     shutdown = function() end,
 }}
-package.loaded["shell"] = {{ getRunningProgram = function() return rootDir .. "/main.lua" end }}
+package.loaded["shell"] = {{}}
 package.loaded["term"] = {{ clear = function() end }}
 package.loaded["event"] = {{ pull = function() return "interrupted" end }}
 
@@ -1160,8 +1160,8 @@ end
 
 -- TEST 9: CLI (--check, --bench, --off)
 local mainSrc = __py_read_file(__STOCK_ROOT .. "/main.lua")
-local function runCli(arg)
-    local fn = assert(load(mainSrc, "@main.lua"))
+local function runCli(arg, chunkPath)
+    local fn = assert(load(mainSrc, chunkPath or ("@" .. __STOCK_ROOT .. "/main.lua")))
     fn(arg)
 end
 runCli("--check")
@@ -1214,7 +1214,6 @@ end
 do
     local evLib = require("event")
     local compLib = require("computer")
-    local shLib = require("shell")
     local noInetComp = { list = function() return function() return nil end end, isAvailable = function() return false end }
     local uSt0 = Scheduler.newState()
     local noInetRes = Scheduler.executeRpcTable(Scheduler.defaultConfig(), uSt0, {
@@ -1227,8 +1226,7 @@ do
     local updOrder = {}
     local updInjected = false
     local origList, origProxy, origIsAvail = component.list, component.proxy, component.isAvailable
-    local origPull, origShutdown, origProg = evLib.pull, compLib.shutdown, shLib.getRunningProgram
-    shLib.getRunningProgram = function() return "/home/stock/main.lua" end
+    local origPull, origShutdown = evLib.pull, compLib.shutdown
     __py_write_file("/home/stock/install.lua", [[
 local args = { ... }
 local out = rawget(_G, "__STOCK_UPD_ORDER")
@@ -1267,9 +1265,9 @@ return true
         end
         return nil
     end
-    runCli("--headless")
+    runCli("--headless", "@/home/stock/main.lua")
     component.list, component.proxy, component.isAvailable = origList, origProxy, origIsAvail
-    evLib.pull, compLib.shutdown, shLib.getRunningProgram = origPull, origShutdown, origProg
+    evLib.pull, compLib.shutdown = origPull, origShutdown
     rawset(_G, "__STOCK_UPD_ORDER", nil)
     assertEq(updOrder[1], "STOCK_REPLY:req-upd-1", "STOCK_REPLY sent BEFORE install & shutdown")
     assertEq(updOrder[2], "STOCK_INSTALL:--url|http://127.0.0.1:8765/oc-raw|--update|--yes", "Installer invoked with target bridge URL")

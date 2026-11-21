@@ -265,7 +265,7 @@ local function main(args)
             print(string.format("  [%d] %-10s %s %s", i, m.key, tag, m.desc))
         end
         print("  [u] update     Update all installed modules on this computer")
-        io.write("Select module (1-6 / name / u): ")
+        io.write(string.format("Select module (1-%d / name / u): ", #MODULES))
         if io.flush then pcall(io.flush) end
         local line = io.read and io.read() or ""
         line = tostring(line or ""):match("^%s*(.-)%s*$")

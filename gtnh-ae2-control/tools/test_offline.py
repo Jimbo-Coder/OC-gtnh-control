@@ -335,9 +335,7 @@ package.loaded["computer"] = {{
     totalMemory = function() return 2097152 end,
     shutdown = function() end,
 }}
-package.loaded["shell"] = {{
-    getRunningProgram = function() return "/home/exporter.lua" end,
-}}
+package.loaded["shell"] = {{}}
 package.loaded["term"] = {{ clear = function() end }}
 package.loaded["event"] = {{
     pull = function() return "interrupted" end,

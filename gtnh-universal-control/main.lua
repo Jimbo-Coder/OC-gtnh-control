@@ -14,14 +14,42 @@ local computer = require("computer")
 local event = require("event")
 local filesystem = require("filesystem")
 local serialization = require("serialization")
-local shell = require("shell")
 local term = require("term")
 
-local scriptDir = filesystem.path(shell.getRunningProgram() or "/home/universal/main.lua") or "/home/universal"
-if scriptDir == "" then scriptDir = "/home/universal" end
-if scriptDir:sub(-1) == "/" and #scriptDir > 1 then
-    scriptDir = scriptDir:sub(1, -2)
+local function resolveScriptDir(defaultDir)
+    local function checkCandidate(rawPath)
+        if type(rawPath) ~= "string" or rawPath == "" then return nil end
+        local canon = (filesystem.canonical and filesystem.canonical(rawPath)) or rawPath
+        local dir = filesystem.path(canon)
+        if type(dir) ~= "string" or dir == "" then return nil end
+        dir = dir:gsub("/+$", "")
+        if dir == "" then dir = "/" end
+        if filesystem.exists(filesystem.concat(dir, "lib/hardware.lua"))
+            or filesystem.exists(filesystem.concat(dir, "install.lua")) then
+            return dir
+        end
+        return nil
+    end
+    if debug and debug.getinfo then
+        for level = 1, 5 do
+            local ok, info = pcall(debug.getinfo, level, "S")
+            if ok and type(info) == "table" and type(info.source) == "string" then
+                local pfx = info.source:sub(1, 1)
+                if pfx == "@" or pfx == "=" then
+                    local d = checkCandidate(info.source:sub(2))
+                    if d then return d end
+                end
+            end
+        end
+    end
+    if os and os.getenv then
+        local d = checkCandidate(os.getenv("_"))
+        if d then return d end
+    end
+    return defaultDir
 end
+
+local scriptDir = resolveScriptDir("/home/universal")
 
 local CONFIG_PATH = filesystem.concat(scriptDir, "config.cfg")
 local BACKUP_CONFIG_PATH = "/home/config.universal.bak"

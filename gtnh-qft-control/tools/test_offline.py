@@ -257,7 +257,7 @@ package.loaded["computer"] = {{
     totalMemory = function() return 3686 * 1024 end,
     shutdown = function() end,
 }}
-package.loaded["shell"] = {{ getRunningProgram = function() return rootDir .. "/main.lua" end }}
+package.loaded["shell"] = {{}}
 package.loaded["term"] = {{ clear = function() end }}
 package.loaded["event"] = {{ pull = function() return "interrupted" end }}
 
@@ -539,10 +539,13 @@ return "OK"
                     local rootInst = assert(loadfile(__MONOREPO_ROOT .. "/install.lua"))
                     rootInst("--list")
                     assert(rootInst("--local", __MONOREPO_ROOT, "qft", "--yes", "--no-autostart"), "Root monorepo install qft failed")
+                    assert(loadfile("/usr/bin/qft.lua"))("--check")
                     """,
                     "qft_install_test",
                 )
-                assert "qft" in "\n".join(inst_host.stdout)
+                out_text = "\n".join(inst_host.stdout)
+                assert "qft" in out_text
+                assert "GTNH QFT CONTROL READ-ONLY CHECK" in out_text
             finally:
                 inst_host.close()
 
