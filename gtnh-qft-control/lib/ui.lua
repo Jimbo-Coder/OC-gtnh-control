@@ -3,6 +3,7 @@
 -- Packed 64-bit buffer, strictly width-1 glyphs.
 
 local component = require("component")
+local Common = require("gtnh_common")
 local unicode = require("unicode")
 local Hardware = require("lib.hardware")
 local Scheduler = require("lib.scheduler")
@@ -58,16 +59,7 @@ local function packMask(fg, bg)
 end
 
 local function padOrTrunc(str, width)
-    str = tostring(str or "")
-    if width <= 0 then return "" end
-    local len = unicode.wlen(str)
-    if len > width then
-        if width == 1 then return unicode.sub(str, 1, 1) end
-        return unicode.sub(str, 1, width - 1) .. "~"
-    elseif len < width then
-        return str .. string.rep(" ", width - len)
-    end
-    return str
+    return Common.padOrTrunc(str, width, "~")
 end
 
 function UI.formatNumber(n, suffix)
@@ -112,12 +104,23 @@ function UI.new(cfg, state, onSave, compLib, extras)
         nxtBuf = {},
         hitboxes = {},
     }, { __index = UI })
-    if self.gpu then
-        pcall(self.gpu.setResolution, self.w, self.h)
-        local empty = packMask(COLORS.fg, COLORS.bg) | 32
-        for i = 1, self.w * self.h do self.curBuf[i] = -1; self.nxtBuf[i] = empty end
-    end
+    local empty = packMask(COLORS.fg, COLORS.bg) | 32
+    for i = 1, self.w * self.h do self.curBuf[i] = -1; self.nxtBuf[i] = empty end
+    self:syncDisplay(true)
     return self
+end
+
+function UI:syncDisplay(forceRedraw)
+    return Common.syncDisplay(self, {
+        forceRedraw = forceRedraw,
+        onResize = function(aw, ah)
+            local empty = packMask(COLORS.fg, COLORS.bg) | 32
+            local cur, nxt = {}, {}
+            for i = 1, aw * ah do cur[i] = -1; nxt[i] = empty end
+            self.curBuf = cur
+            self.nxtBuf = nxt
+        end,
+    })
 end
 
 function UI:save(msg)
@@ -177,6 +180,9 @@ end
 function UI:flush()
     local gpu = self.gpu
     if not gpu then return end
+    if Common.checkViewportDrift(self, function(f) return self:syncDisplay(f) end, function() self:render() end) then
+        return
+    end
     local w, h, cur, nxt = self.w, self.h, self.curBuf, self.nxtBuf
     local lastFg, lastBg = -1, -1
     for y = 1, h do
@@ -783,7 +789,7 @@ function UI:render()
     elseif self.tab == TAB_SETUP then self:renderSetupTab() end
     self:drawText(1, self.h - 1, string.rep("─", self.w), COLORS.border, COLORS.bg)
     local keysStr = "Keys: 1-4 Tabs | / Search | Space Arm | R Poll | Q Quit"
-    local keysX = math.max(2, self.w - unicode.wlen(keysStr))
+    local keysX = Common.fitRightX(self.w, keysStr, 2)
     self:drawText(2, self.h, padOrTrunc(self.statusMsg or "", math.max(0, keysX - 4)), COLORS.fg, COLORS.bg)
     self:drawText(keysX, self.h, keysStr, COLORS.muted, COLORS.bg)
     self:renderSearchPrompt()

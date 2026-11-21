@@ -3,6 +3,7 @@
 -- Multi-Channel Colored-Hatch View, 16/32 NC Banks, MLFQ Tiers, and Strictly Width-1 Glyphs.
 
 local component = require("component")
+local Common = require("gtnh_common")
 local unicode = require("unicode")
 local okComp, computer = pcall(require, "computer")
 if not okComp then computer = nil end
@@ -125,18 +126,7 @@ local function packColorMask(fg, bg)
         | ((math.floor(bg or COLORS.bg) & 0xFFFFFF) << 16)
 end
 
-local function padOrTrunc(str, width)
-    str = tostring(str or "")
-    local len = unicode.wlen(str)
-    if width <= 0 then return "" end
-    if len > width then
-        if width == 1 then return unicode.sub(str, 1, 1) end
-        return unicode.sub(str, 1, width - 1) .. "…"
-    elseif len < width then
-        return str .. string.rep(" ", width - len)
-    end
-    return str
-end
+local padOrTrunc = Common.padOrTrunc
 
 function UI.formatNumber(n, isFluid)
     n = tonumber(n) or 0
@@ -166,12 +156,6 @@ function UI.new(cfg, state, onSave, compLib)
     local cl = compLib or component
     local gpu = cl.isAvailable and cl.isAvailable("gpu") and cl.gpu or (cl.list and cl.list("gpu", true)() and cl.proxy(cl.list("gpu", true)()))
     local w, h = 160, 50
-    if gpu and gpu.maxResolution and gpu.setResolution then
-        local mw, mh = gpu.maxResolution()
-        w = math.min(160, math.floor(mw or 160))
-        h = math.min(50, math.floor(mh or 50))
-        pcall(gpu.setResolution, w, h)
-    end
 
     local self = setmetatable({
         cfg = cfg,
@@ -210,7 +194,23 @@ function UI.new(cfg, state, onSave, compLib)
         curBuf[i] = -1
         nxtBuf[i] = 0
     end
+    self:syncDisplay(true)
     return self
+end
+
+function UI:syncDisplay(forceRedraw)
+    return Common.syncDisplay(self, {
+        forceRedraw = forceRedraw,
+        onResize = function(aw, ah)
+            local curBuf, nxtBuf = {}, {}
+            for i = 1, aw * ah do
+                curBuf[i] = -1
+                nxtBuf[i] = 0
+            end
+            self.curBuf = curBuf
+            self.nxtBuf = nxtBuf
+        end,
+    })
 end
 
 function UI:save(msg)
@@ -301,6 +301,9 @@ end
 function UI:flush()
     local gpu = self.gpu
     if not gpu then return end
+    if Common.checkViewportDrift(self, function(f) return self:syncDisplay(f) end, function() self:render() end) then
+        return
+    end
     local lastFg, lastBg = -1, -1
     local w = self.w
     local nxt, cur = self.nxtBuf, self.curBuf
@@ -1459,8 +1462,10 @@ function UI:render()
 
     self:drawText(1, self.h - 1, string.rep("─", self.w), COLORS.border, COLORS.bg)
     self:fillRect(1, self.h, self.w, 1, " ", COLORS.headerBg)
-    self:drawText(2, self.h, padOrTrunc(self.statusMsg, 108), COLORS.fg, COLORS.headerBg)
-    self:drawText(112, self.h, "1-4:Tabs  Space:Arm  L:Log  R:Scan  Q:Quit", COLORS.muted, COLORS.headerBg)
+    local keysStr = "1-4:Tabs  Space:Arm  L:Log  R:Scan  Q:Quit"
+    local keysX = Common.fitRightX(self.w, keysStr, 2)
+    self:drawText(2, self.h, padOrTrunc(self.statusMsg, math.max(0, keysX - 4)), COLORS.fg, COLORS.headerBg)
+    self:drawText(keysX, self.h, keysStr, COLORS.muted, COLORS.headerBg)
 
     if self.logModalActive then self:renderLogModal() end
     if self.promptActive then self:renderPromptModal() end

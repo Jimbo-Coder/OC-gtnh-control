@@ -59,12 +59,15 @@ local SHRC_PATH = "/home/.shrc"
 
 do
     local prevPath = package.path
-    package.path = string.format("%s/?.lua;%s/?/init.lua;%s", scriptDir, scriptDir, prevPath)
-    for _, modName in ipairs({ "lib.dtpf_catalog", "lib.hardware", "lib.scheduler", "lib.ui" }) do
+    local commonPat = "/usr/lib/?.lua"
+    local localCommonPat = filesystem.concat(scriptDir, "../common/?.lua")
+    package.path = string.format("%s/?.lua;%s/?/init.lua;%s;%s;%s", scriptDir, scriptDir, commonPat, localCommonPat, prevPath)
+    for _, modName in ipairs({ "gtnh_common", "lib.dtpf_catalog", "lib.hardware", "lib.scheduler", "lib.ui" }) do
         package.loaded[modName] = nil
     end
 end
 
+local Common = require("gtnh_common")
 local Hardware = require("lib.hardware")
 local Scheduler = require("lib.scheduler")
 local UI = require("lib.ui")
@@ -257,56 +260,17 @@ local function runImport()
         nBlocks, #slots, res.added, res.updated, res.skipped, res.disabled))
 end
 
-local function wdNow()
-    if computer and computer.uptime then return computer.uptime() end
-    return os.clock and os.clock() or 0
-end
-
 local function armShellReviveWatchdog(cfg)
-    local okEv, evLib = pcall(require, "event")
-    if not okEv or type(evLib) ~= "table" or type(evLib.listen) ~= "function" then
-        return false
-    end
-    local now = wdNow()
-    local wd = rawget(_G, "__gtnhReviveWd")
-    if type(wd) ~= "table" then
-        wd = { armed = false, exitAt = now, lastKeyAt = now, hooked = false }
-        rawset(_G, "__gtnhReviveWd", wd)
-    end
-    wd.exitAt = now
-    wd.lastKeyAt = now
-    wd.meshPort = tonumber(cfg and cfg.meshPort) or 4205
-    wd.armed = true
-    if not wd.hooked then
-        wd.hooked = true
-        evLib.listen("key_down", function()
-            wd.lastKeyAt = wdNow()
-        end)
-        evLib.listen("modem_message", function(_, _, _, port, _, msgType)
-            if not wd.armed then return end
-            if msgType ~= "GTNH_WAKE" then return end
-            if port ~= wd.meshPort and port ~= 0 then return end
-            if not isAutostartEnabled() then return end
-            local holdExists = (filesystem and filesystem.exists and filesystem.exists("/tmp/gtnh_hold")) == true
-            if not holdExists and io and io.open then
-                local f = io.open("/tmp/gtnh_hold", "r")
-                if f then f:close(); holdExists = true end
-            end
-            if holdExists then return end
-            local cur = wdNow()
-            if (cur - (wd.exitAt or cur)) < 30 or (cur - (wd.lastKeyAt or cur)) < 30 then
-                return
-            end
-            wd.armed = false
-            if computer and computer.shutdown then pcall(computer.shutdown, true) end
-        end)
-    end
-    return true
+    return Common.armShellReviveWatchdog({
+        isAutostartFn = isStockShrcLine,
+        shrcPath = SHRC_PATH,
+        meshPort = tonumber(cfg and cfg.meshPort) or Common.MESH_PORT,
+        wakeMsg = Common.WAKE_MSG,
+    })
 end
 
 local function disarmShellReviveWatchdog()
-    local wd = rawget(_G, "__gtnhReviveWd")
-    if type(wd) == "table" then wd.armed = false end
+    Common.disarmShellReviveWatchdog()
 end
 
 local function handlePendingRebootOrUpdate(state)
@@ -320,10 +284,8 @@ local function handlePendingRebootOrUpdate(state)
         if src then chunk, loadErr = load(src, "=" .. instPath) else loadErr = "missing " .. tostring(instPath) end
         if chunk then
             print("GTNH Stock Maintainer updating from " .. updUrl .. "...")
-            local hasInet = (component.isAvailable and component.isAvailable("internet"))
-                or (component.list and component.list("internet", true)() ~= nil)
-            local updArgs = { "--url", updUrl, "--update", "--yes" }
-            if not hasInet then updArgs[#updArgs + 1] = "--mesh-relay" end
+            local tx = Common.detectOtaTransport(component)
+            local updArgs = Common.buildInstallerArgs(updUrl, { viaMesh = tx.viaMesh, meshTarget = state._pendingUpdateRelay })
             local okU, okInst = pcall(chunk, table.unpack(updArgs))
             if okU and okInst ~= false then
                 pcall(os.sleep, 0.15)

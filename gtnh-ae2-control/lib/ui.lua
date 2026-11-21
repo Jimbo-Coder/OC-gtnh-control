@@ -3,6 +3,7 @@
 -- Uses 64-bit packed integer screen buffers (zero per-cell string allocations) and strictly width-1 glyphs.
 
 local component = require("component")
+local Common = require("gtnh_common")
 local unicode = require("unicode")
 
 local UI = {}
@@ -62,18 +63,7 @@ local function packColorMask(fg, bg)
         | ((math.floor(bg or COLORS.bg) & 0xFFFFFF) << 16)
 end
 
-local function padOrTrunc(str, width)
-    str = tostring(str or "")
-    if width <= 0 then return "" end
-    local len = unicode.wlen(str)
-    if len > width then
-        if width == 1 then return unicode.sub(str, 1, 1) end
-        return unicode.sub(str, 1, width - 1) .. "…"
-    elseif len < width then
-        return str .. string.rep(" ", width - len)
-    end
-    return str
-end
+local padOrTrunc = Common.padOrTrunc
 
 function UI.formatNumber(n, suffix)
     n = tonumber(n) or 0
@@ -108,14 +98,6 @@ function UI.new(cfg, hubState, callbacks, compLib)
     end
 
     local w, h = 160, 50
-    if gpu and gpu.maxResolution and gpu.setResolution then
-        local okM, mw, mh = pcall(gpu.maxResolution)
-        if okM and mw and mh then
-            w = math.min(160, math.floor(tonumber(mw) or 160))
-            h = math.min(50, math.floor(tonumber(mh) or 50))
-            pcall(gpu.setResolution, w, h)
-        end
-    end
 
     local self = setmetatable({
         cfg = cfg or {},
@@ -153,7 +135,24 @@ function UI.new(cfg, hubState, callbacks, compLib)
         self.curBuf[i] = -1
         self.nxtBuf[i] = empty
     end
+    self:syncDisplay(true)
     return self
+end
+
+function UI:syncDisplay(forceRedraw)
+    return Common.syncDisplay(self, {
+        forceRedraw = forceRedraw,
+        onResize = function(aw, ah)
+            local empty = packColorMask(COLORS.fg, COLORS.bg) | 32
+            local cur, nxt = {}, {}
+            for i = 1, aw * ah do
+                cur[i] = -1
+                nxt[i] = empty
+            end
+            self.curBuf = cur
+            self.nxtBuf = nxt
+        end,
+    })
 end
 
 function UI:clearNextBuffer(bg, fg)
@@ -250,6 +249,9 @@ end
 function UI:flush()
     local gpu = self.gpu
     if not gpu then return end
+    if Common.checkViewportDrift(self, function(f) return self:syncDisplay(f) end, function() self:render() end) then
+        return
+    end
     local w, h = self.w, self.h
     local cur, nxt = self.curBuf, self.nxtBuf
     local lastFg, lastBg = -1, -1
@@ -1787,7 +1789,7 @@ function UI:render()
 
     self:drawText(1, self.h - 1, string.rep("─", self.w), COLORS.border, COLORS.bg)
     local keysStr = "Keys: 1-9,0 Tabs | / Search | S Scan | P Ping | L Log | R Reset | Q Quit"
-    local keysX = math.max(2, self.w - unicode.wlen(keysStr))
+    local keysX = Common.fitRightX(self.w, keysStr, 2)
     self:drawText(2, self.h, padOrTrunc(self.statusMsg or "", math.max(0, keysX - 4)), COLORS.fg, COLORS.bg)
     self:drawText(keysX, self.h, keysStr, COLORS.muted, COLORS.bg)
 

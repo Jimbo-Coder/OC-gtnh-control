@@ -179,6 +179,7 @@ local function runInstaller(args)
         idx = idx + 1
     end
 
+    local origLocalDir = localDir
     if localDir and not filesystem.exists(filesystem.concat(localDir, "autoPump.lua")) then
         local sub = filesystem.concat(localDir, SUBDIR)
         if filesystem.exists(filesystem.concat(sub, "autoPump.lua")) then localDir = sub end
@@ -204,14 +205,21 @@ local function runInstaller(args)
         or ((optRepo and optRepo ~= "") and optRepo
         or ((sRepo and sRepo ~= "") and sRepo or DEFAULT_REPO))
     local branch = (optBranch and optBranch ~= "") and optBranch or ((sBranch and sBranch ~= "") and sBranch or DEFAULT_BRANCH)
-    local baseUrl
+    local baseUrl, repoRootUrl
     local repoMeta = rawSrc
     if rawSrc:match("^https?://") then
         local clean = rawSrc:gsub("/+$", "")
         repoMeta = clean
-        baseUrl = (clean:sub(-#SUBDIR) == SUBDIR) and (clean .. "/") or (clean .. "/" .. SUBDIR .. "/")
+        if clean:sub(-#SUBDIR) == SUBDIR then
+            baseUrl = clean .. "/"
+            repoRootUrl = clean:sub(1, -(#SUBDIR + 1)):gsub("/+$", "") .. "/"
+        else
+            baseUrl = clean .. "/" .. SUBDIR .. "/"
+            repoRootUrl = clean .. "/"
+        end
     else
         baseUrl = string.format("https://raw.githubusercontent.com/%s/%s/%s/", rawSrc, branch, SUBDIR)
+        repoRootUrl = string.format("https://raw.githubusercontent.com/%s/%s/", rawSrc, branch)
     end
     local url = baseUrl .. "autoPump.lua"
 
@@ -220,6 +228,28 @@ local function runInstaller(args)
         if useMesh then return fetchViaMesh(baseUrl .. rel, meshTarget) end
         return fetchUrl(internet, baseUrl .. rel)
     end
+    local commonBody, commonErr
+    if localDir then
+        for _, cp in ipairs({
+            origLocalDir and filesystem.concat(origLocalDir, "common/gtnh_common.lua") or nil,
+            filesystem.concat(filesystem.path(localDir), "common/gtnh_common.lua"),
+            filesystem.concat(localDir, "common/gtnh_common.lua"),
+        }) do
+            if cp then
+                local b = readWholeFile(cp)
+                if b then commonBody = b; break end
+            end
+        end
+        commonErr = commonBody and nil or "missing common/gtnh_common.lua"
+    elseif useMesh then
+        commonBody, commonErr = fetchViaMesh(repoRootUrl .. "common/gtnh_common.lua", meshTarget)
+    else
+        commonBody, commonErr = fetchUrl(internet, repoRootUrl .. "common/gtnh_common.lua")
+    end
+    if not commonBody then io.stderr:write("ERROR: " .. tostring(commonErr) .. "\n"); return false, commonErr end
+    local okCom, synCom = load(commonBody, "@common/gtnh_common.lua", "t")
+    if not okCom then io.stderr:write("ERROR: Invalid Lua in gtnh_common.lua: " .. tostring(synCom) .. "\n"); return false, synCom end
+
     local body, err
     if localDir then
         body = readWholeFile(filesystem.concat(localDir, "autoPump.lua"))
@@ -237,6 +267,10 @@ local function runInstaller(args)
         writeWholeFile(BACKUP_PATH, prev)
         print("[BACKUP]  Saved previous autoPump.lua -> " .. BACKUP_PATH .. " (runtime overrides live in pump_overrides.lua)")
     end
+
+    filesystem.makeDirectory("/usr/lib")
+    writeWholeFile("/usr/lib/gtnh_common.lua", commonBody)
+    print(string.format("[OK +] %s (%d bytes)", "/usr/lib/gtnh_common.lua", #commonBody))
 
     writeWholeFile(DEST_PATH, body)
     filesystem.makeDirectory("/usr/bin")

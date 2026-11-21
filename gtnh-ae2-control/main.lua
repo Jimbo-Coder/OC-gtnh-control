@@ -44,24 +44,16 @@ local function resolveScriptDir(defaultDir)
 end
 
 local scriptDir = resolveScriptDir("/home/brain")
-package.path = string.format("%s/?.lua;%s/?/init.lua;%s;/home/?.lua", scriptDir, scriptDir, package.path)
+package.path = string.format("%s/?.lua;%s/?/init.lua;/usr/lib/?.lua;%s/../common/?.lua;%s;/home/?.lua",
+    scriptDir, scriptDir, scriptDir, package.path)
+local Common = require("gtnh_common")
 
 local SHRC_PATH = "/home/.shrc"
-local function isBrainShrcLine(line)
-    if line:match("^%s*#") then return false end
-    local trimmed = line:match("^%s*(.-)%s*$") or ""
-    if trimmed == "" then return false end
-    local cmd = trimmed:match("^(%S+)") or ""
-    return cmd == "brain"
-        or cmd == "ae2"
-        or cmd == "/usr/bin/brain"
-        or cmd == "/usr/bin/brain.lua"
-        or cmd == "/usr/bin/ae2"
-        or cmd == "/usr/bin/ae2.lua"
-        or cmd == "/home/brain/main.lua"
-        or cmd == "/home/exporter.lua"
-        or cmd == "exporter"
-end
+local isBrainShrcLine = Common.makeShrcMatcher({
+    "brain", "ae2", "/usr/bin/brain", "/usr/bin/brain.lua",
+    "/usr/bin/ae2", "/usr/bin/ae2.lua", "/home/brain/main.lua",
+    "/home/exporter.lua", "exporter",
+})
 
 local function isAutostartEnabled()
     if not io or not io.open then return false end
@@ -213,8 +205,8 @@ end
 
 local maxInt = 9223372036854775807
 local AuthHeader = nil
-local LOCAL_UPDATE_URL = "http://127.0.0.1:8765/oc-raw"
-local GITHUB_UPDATE_URL = "https://raw.githubusercontent.com/Jimbo-Coder/OC-gtnh-control/main"
+local LOCAL_UPDATE_URL = Common.LOCAL_UPDATE_URL
+local GITHUB_UPDATE_URL = Common.GITHUB_UPDATE_URL
 
 local needExitFlag = false
 local pendingSelfReboot = false
@@ -224,79 +216,20 @@ local lastMeshRelayAt = 0
 local lastItemScanSec = 0
 local uiActive = false
 
-local MESH_PORT = tonumber(config.meshPort) or 4205
-local WAKE_MSG = "GTNH_WAKE"
-
-local function wdNow()
-    if computer and computer.uptime then return computer.uptime() end
-    return os.clock and os.clock() or 0
-end
+local MESH_PORT = tonumber(config.meshPort) or Common.MESH_PORT
+local WAKE_MSG = Common.WAKE_MSG
 
 local function armShellReviveWatchdog()
-    local okEv, evLib = pcall(require, "event")
-    if not okEv or type(evLib) ~= "table" or type(evLib.listen) ~= "function" then
-        return false
-    end
-    local now = wdNow()
-    local wd = rawget(_G, "__gtnhReviveWd")
-    if type(wd) ~= "table" then
-        wd = { armed = false, exitAt = now, lastKeyAt = now, hooked = false }
-        rawset(_G, "__gtnhReviveWd", wd)
-    end
-    wd.exitAt = now
-    wd.lastKeyAt = now
-    wd.meshPort = MESH_PORT
-    wd.wakeMsg = WAKE_MSG
-    wd.isAutostartFn = isBrainShrcLine
-    wd.armed = true
-    if not wd.hooked then
-        wd.hooked = true
-        evLib.listen("key_down", function()
-            wd.lastKeyAt = wdNow()
-        end)
-        evLib.listen("modem_message", function(_, _, _, port, _, msgType)
-            if not wd.armed then return end
-            if msgType ~= (wd.wakeMsg or "GTNH_WAKE") then return end
-            if port ~= wd.meshPort and port ~= 0 then return end
-            local autostartOn = false
-            if io and io.open then
-                local f = io.open(SHRC_PATH, "r")
-                if f then
-                    local raw = f:read("*a") or ""
-                    f:close()
-                    for line in raw:gmatch("[^\r\n]+") do
-                        if isBrainShrcLine(line) then
-                            autostartOn = true
-                            break
-                        end
-                    end
-                end
-            end
-            if not autostartOn then return end
-            local holdExists = (okFs and filesystem and filesystem.exists and filesystem.exists("/tmp/gtnh_hold")) == true
-            if not holdExists and io and io.open then
-                local f = io.open("/tmp/gtnh_hold", "r")
-                if f then f:close(); holdExists = true end
-            end
-            if holdExists then return end
-            local cur = wdNow()
-            if (cur - (wd.exitAt or cur)) < 30 or (cur - (wd.lastKeyAt or cur)) < 30 then
-                return
-            end
-            wd.armed = false
-            if computer and computer.shutdown then
-                pcall(computer.shutdown, true)
-            end
-        end)
-    end
-    return true
+    return Common.armShellReviveWatchdog({
+        isAutostartFn = isBrainShrcLine,
+        shrcPath = SHRC_PATH,
+        meshPort = MESH_PORT,
+        wakeMsg = WAKE_MSG,
+    })
 end
 
 local function disarmShellReviveWatchdog()
-    local wd = rawget(_G, "__gtnhReviveWd")
-    if type(wd) == "table" then
-        wd.armed = false
-    end
+    Common.disarmShellReviveWatchdog()
 end
 local PUMP_STALE_SEC = 240
 local PEER_STALE_SEC = 60
@@ -451,78 +384,16 @@ local function invalidateMeshCache()
     hubState.meshTunnelOk = false
 end
 
-local function configureModemProxy(m)
-    if not m then return end
-    local needOpen = true
-    if type(m.isOpen) == "function" then
-        local okO, isO = pcall(m.isOpen, MESH_PORT)
-        if okO and isO == true then needOpen = false end
-    end
-    if needOpen and m.open then pcall(m.open, MESH_PORT) end
-
-    local isW = false
-    if m.isWireless then
-        local okW, rW = pcall(m.isWireless)
-        isW = okW and (rW == true)
-    end
-    if isW and m.setStrength then
-        local needStr = true
-        if type(m.getStrength) == "function" then
-            local okG, curStr = pcall(m.getStrength)
-            if okG and tonumber(curStr) and tonumber(curStr) >= 400 then needStr = false end
-        end
-        if needStr then pcall(m.setStrength, 400) end
-    end
-    if type(m.setWakeMessage) == "function" then
-        local needWake = true
-        if type(m.getWakeMessage) == "function" then
-            local okWk, curWk, curFuzzy = pcall(m.getWakeMessage)
-            if okWk and curWk == WAKE_MSG and curFuzzy == true then needWake = false end
-        end
-        if needWake then pcall(m.setWakeMessage, WAKE_MSG, true) end
-    end
-    return isW
-end
-
-local function configureTunnelWake(t)
-    if t and type(t.setWakeMessage) == "function" then
-        local needWake = true
-        if type(t.getWakeMessage) == "function" then
-            local okWk, curWk, curFuzzy = pcall(t.getWakeMessage)
-            if okWk and curWk == WAKE_MSG and curFuzzy == true then needWake = false end
-        end
-        if needWake then pcall(t.setWakeMessage, WAKE_MSG, true) end
-    end
-end
-
 local function getMeshTransports()
     if config.enableMesh == false or not okSer then return nil, nil end
     if meshCacheInit then
         return cachedMeshModem, cachedMeshTunnel
     end
-    local firstModem, wirelessModem = nil, nil
-    if component.list then
-        for addr in component.list("modem", true) do
-            local m = component.proxy(addr)
-            if m then
-                local isW = configureModemProxy(m)
-                if not firstModem then firstModem = m end
-                if isW and not wirelessModem then wirelessModem = m end
-            end
-        end
-    elseif component.isAvailable and component.isAvailable("modem") and component.modem then
-        configureModemProxy(component.modem)
-        firstModem = component.modem
-    end
-    local modem = wirelessModem or firstModem
-    local tunnel = nil
-    if component.isAvailable and component.isAvailable("tunnel") and component.tunnel then
-        tunnel = component.tunnel
-    elseif component.list then
-        local tAddr = component.list("tunnel", true)()
-        if tAddr then tunnel = component.proxy(tAddr) end
-    end
-    configureTunnelWake(tunnel)
+    local modem, tunnel = Common.getMeshTransports(component, {
+        port = MESH_PORT,
+        wakeMsg = WAKE_MSG,
+        strength = 400,
+    })
     cachedMeshModem = modem
     cachedMeshTunnel = tunnel
     meshCacheInit = true
@@ -1895,13 +1766,8 @@ local function checkMeshWatchdog(upNow, dbUrl, writeLineFn)
     return changed
 end
 
-local function isAllowedOtaUrl(url)
-    if type(url) ~= "string" or url == "" or url:find("[%s%c]") then return false end
-    return url:match("^https?://[%w%.%-_:]+") ~= nil
-end
-
 local function fetchHttpBodyForRelay(fullUrl)
-    if not isAllowedOtaUrl(fullUrl) then
+    if not Common.isAllowedOtaUrl(fullUrl) then
         return nil, "Invalid relay URL"
     end
     local inet = (component.isAvailable and component.isAvailable("internet") and component.internet) or nil
@@ -2942,15 +2808,14 @@ local function handleBridgeCommand(sockWriteLine, interface, cmd)
         emitMeshHelloIfOnline(sockWriteLine)
         return reply({ ok = true, woken = woken, meshHealth = buildMeshHealth(now) })
     elseif op == "update_local" then
-        local hasInet = (component.isAvailable and component.isAvailable("internet"))
-            or (component.list and component.list("internet", true)() ~= nil)
-        if not hasInet then
+        local tx = Common.detectOtaTransport(component)
+        if not tx.hasInternet then
             return reply({ ok = false, error = "No Internet Card on AE2 Main OC" })
         end
         local src = tostring(cmd.source or ""):lower()
         local url = (type(cmd.url) == "string" and cmd.url ~= "") and cmd.url
             or ((src == "github") and GITHUB_UPDATE_URL or LOCAL_UPDATE_URL)
-        if not isAllowedOtaUrl(url) then
+        if not Common.isAllowedOtaUrl(url) then
             return reply({ ok = false, error = "Invalid update URL" })
         end
         local delaySec = tonumber(cmd.delaySec or cmd.delay) or 0
@@ -3541,7 +3406,9 @@ local function main()
                 uiDirty = true
             end
         elseif ui then
-            if evName == "touch" then
+            if evName == "screen_resized" then
+                if ui.syncDisplay and ui:syncDisplay(true) then uiDirty = true end
+            elseif evName == "touch" then
                 if ui:handleTouch(math.floor(tonumber(sAddr) or 0), math.floor(tonumber(port) or 0), a4) then
                     uiDirty = true
                 end
@@ -3754,7 +3621,8 @@ local function main()
             end
         end
         if chunk then
-            local okU, okInst = pcall(chunk, "--url", updUrl, "--update", "--yes")
+            local updArgs = Common.buildInstallerArgs(updUrl)
+            local okU, okInst = pcall(chunk, table.unpack(updArgs))
             if okU and okInst ~= false then
                 pendingSelfReboot = false
                 pcall(os.sleep, 0.1)

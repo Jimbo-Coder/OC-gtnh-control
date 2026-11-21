@@ -108,6 +108,7 @@ local function runInstaller(args)
         idx = idx + 1
     end
 
+    local origLocalDir = localDir
     if localDir and not filesystem.exists(filesystem.concat(localDir, "main.lua")) then
         local sub = filesystem.concat(localDir, SUBDIR)
         if filesystem.exists(filesystem.concat(sub, "main.lua")) then localDir = sub end
@@ -129,18 +130,21 @@ local function runInstaller(args)
         or ((optRepo and optRepo ~= "") and optRepo
         or ((sRepo and sRepo ~= "") and sRepo or DEFAULT_REPO))
     local branch = (optBranch and optBranch ~= "") and optBranch or ((sBranch and sBranch ~= "") and sBranch or DEFAULT_BRANCH)
-    local baseUrl
+    local baseUrl, repoRootUrl
     local repoMeta = rawSrc
     if rawSrc:match("^https?://") then
         local clean = rawSrc:gsub("/+$", "")
         repoMeta = clean
         if clean:sub(-#SUBDIR) == SUBDIR then
             baseUrl = clean .. "/"
+            repoRootUrl = clean:sub(1, -(#SUBDIR + 1)):gsub("/+$", "") .. "/"
         else
             baseUrl = clean .. "/" .. SUBDIR .. "/"
+            repoRootUrl = clean .. "/"
         end
     else
         baseUrl = string.format("https://raw.githubusercontent.com/%s/%s/%s/", rawSrc, branch, SUBDIR)
+        repoRootUrl = string.format("https://raw.githubusercontent.com/%s/%s/", rawSrc, branch)
     end
 
     print("=== GTNH MAINNET BRAIN & MESH HUB INSTALLER ===")
@@ -151,6 +155,29 @@ local function runInstaller(args)
         end
         return fetchUrl(internet, baseUrl .. rel)
     end
+
+    local function getCommonFile()
+        if localDir then
+            local cands = {
+                origLocalDir and filesystem.concat(origLocalDir, "common/gtnh_common.lua") or nil,
+                filesystem.concat(filesystem.path(localDir), "common/gtnh_common.lua"),
+                filesystem.concat(localDir, "common/gtnh_common.lua"),
+            }
+            for _, cp in ipairs(cands) do
+                if cp then
+                    local b = readWholeFile(cp)
+                    if b then return b end
+                end
+            end
+            return nil, "missing common/gtnh_common.lua"
+        end
+        return fetchUrl(internet, repoRootUrl .. "common/gtnh_common.lua")
+    end
+
+    local commonBody, commonErr = getCommonFile()
+    if not commonBody then io.stderr:write("ERROR: " .. tostring(commonErr) .. "\n"); return false, commonErr end
+    local okCom, synCom = load(commonBody, "@common/gtnh_common.lua", "t")
+    if not okCom then io.stderr:write("ERROR: Invalid Lua in gtnh_common.lua: " .. tostring(synCom) .. "\n"); return false, synCom end
 
     local mainBody, mainErr = getFile("main.lua")
     if not mainBody then io.stderr:write("ERROR: " .. tostring(mainErr) .. "\n"); return false, mainErr end
@@ -175,7 +202,11 @@ local function runInstaller(args)
 
     filesystem.makeDirectory(INSTALL_DIR)
     filesystem.makeDirectory(filesystem.concat(INSTALL_DIR, "lib"))
+    filesystem.makeDirectory("/usr/lib")
     filesystem.makeDirectory("/usr/bin")
+
+    writeWholeFile("/usr/lib/gtnh_common.lua", commonBody)
+    print(string.format("[OK 0/3] %s (%d bytes)", "/usr/lib/gtnh_common.lua", #commonBody))
 
     writeWholeFile(MAIN_PATH, mainBody)
     print(string.format("[OK 1/3] %s (%d bytes)", MAIN_PATH, #mainBody))

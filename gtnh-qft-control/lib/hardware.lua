@@ -8,6 +8,7 @@
 
 local okComp, defaultComponent = pcall(require, "component")
 if not okComp then defaultComponent = nil end
+local Common = require("gtnh_common")
 local okComputer, computer = pcall(require, "computer")
 if not okComputer then computer = nil end
 local serialization = require("serialization")
@@ -701,60 +702,17 @@ function Hardware.applyUnitControl(unit, live, desired, compLib, state)
     return { ok = true, reconfiguring = false, action = "steady" }
 end
 
-local function configureMeshWake(m, wakeMsg)
-    if m and type(m.setWakeMessage) == "function" then
-        local needWake = true
-        if type(m.getWakeMessage) == "function" then
-            local okWk, curWk, curFuzzy = pcall(m.getWakeMessage)
-            if okWk and curWk == wakeMsg and curFuzzy == true then needWake = false end
-        end
-        if needWake then pcall(m.setWakeMessage, wakeMsg, true) end
-    end
-end
-
 local function getMeshTransports(compLib, state)
     local cl = compLib or defaultComponent or _G.component
     if not cl then return nil, nil, nil end
-    local firstModem, wModem = nil, nil
-    if cl.list then
-        for addr in cl.list("modem", true) do
-            local m = getProxy(cl, state, addr)
-            if m then
-                local needOpen = true
-                if type(m.isOpen) == "function" then
-                    local okO, isO = pcall(m.isOpen, Hardware.MESH_PORT)
-                    if okO and isO == true then needOpen = false end
-                end
-                if needOpen and m.open then pcall(m.open, Hardware.MESH_PORT) end
-                local isW = false
-                if m.isWireless then
-                    local okW, rW = pcall(m.isWireless)
-                    isW = okW and (rW == true)
-                end
-                if isW and m.setStrength then
-                    local needStr = true
-                    if type(m.getStrength) == "function" then
-                        local okG, curStr = pcall(m.getStrength)
-                        if okG and tonumber(curStr) and tonumber(curStr) >= 400 then needStr = false end
-                    end
-                    if needStr then pcall(m.setStrength, 400) end
-                end
-                configureMeshWake(m, Hardware.WAKE_MSG)
-                if not firstModem then firstModem = m end
-                if isW and not wModem then wModem = m end
-            end
-        end
-    elseif cl.isAvailable and cl.isAvailable("modem") and cl.modem then
-        local m = cl.modem
-        if m.open then pcall(m.open, Hardware.MESH_PORT) end
-        if m.isWireless and m.isWireless() and m.setStrength then pcall(m.setStrength, 400) end
-        configureMeshWake(m, Hardware.WAKE_MSG)
-        firstModem = m
-    end
-    local modem = wModem or firstModem
-    local tAddr = cl.list and cl.list("tunnel", true)() or nil
-    local tunnel = tAddr and getProxy(cl, state, tAddr) or nil
-    if tunnel then configureMeshWake(tunnel, Hardware.WAKE_MSG) end
+    local modem, tunnel, _, tAddr = Common.getMeshTransports(cl, {
+        port = Hardware.MESH_PORT,
+        wakeMsg = Hardware.WAKE_MSG,
+        strength = 400,
+        proxyFn = function(c, addr)
+            return getProxy(c, state, addr)
+        end,
+    })
     return modem, tunnel, tAddr
 end
 

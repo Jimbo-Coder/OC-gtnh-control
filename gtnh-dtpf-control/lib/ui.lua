@@ -4,6 +4,7 @@
 -- Sections: Formatters | DTPF Cards | Tab 1 Overview | Tab 2 Fleet | Tab 3 Recipes | Tab 4 Setup | Modals | Framebuffer
 
 local component = require("component")
+local Common = require("gtnh_common")
 local unicode = require("unicode")
 local Hardware = require("lib.hardware")
 local RecipesDB = require("lib.recipes_db")
@@ -304,18 +305,7 @@ local function getStockRatioColor(ratio, isEnabled)
     return COLORS.yellow
 end
 
-local function padOrTrunc(str, width)
-    str = tostring(str or "")
-    local len = unicode.wlen(str)
-    if len > width then
-        if width <= 0 then return "" end
-        if width == 1 then return unicode.sub(str, 1, 1) end
-        return unicode.sub(str, 1, width - 1) .. "…"
-    elseif len < width then
-        return str .. string.rep(" ", width - len)
-    end
-    return str
-end
+local padOrTrunc = Common.padOrTrunc
 
 local function centerText(str, width)
     str = tostring(str or "")
@@ -428,10 +418,7 @@ local COL_MUL = 16777216
 
 function UI.new(cfg, runtimeState, onSaveCallback)
     local gpu = component.gpu
-    local maxW, maxH = gpu.maxResolution()
-    local w = math.min(maxW, 160)
-    local h = math.min(maxH, 50)
-    gpu.setResolution(w, h)
+    local w, h = 160, 50
 
     local self = {
         gpu = gpu,
@@ -497,8 +484,28 @@ function UI.new(cfg, runtimeState, onSaveCallback)
         self.nxtCh[ry], self.nxtCol[ry] = rCh, rCol
     end
     setmetatable(self, { __index = UI })
+    self:syncDisplay(true)
     self:refreshDiscovery()
     return self
+end
+
+function UI:syncDisplay(forceRedraw)
+    return Common.syncDisplay(self, {
+        forceRedraw = forceRedraw,
+        onResize = function(aw, ah)
+            local defCol = COLORS.fg * COL_MUL + COLORS.bg
+            self.curCh, self.curCol, self.nxtCh, self.nxtCol = {}, {}, {}, {}
+            for ry = 1, ah do
+                self.curCh[ry], self.curCol[ry] = {}, {}
+                local rCh, rCol = {}, {}
+                for rx = 1, aw do
+                    rCh[rx] = " "
+                    rCol[rx] = defCol
+                end
+                self.nxtCh[ry], self.nxtCol[ry] = rCh, rCol
+            end
+        end,
+    })
 end
 
 function UI:invalidateScreen()
@@ -5770,15 +5777,14 @@ function UI:renderFooter()
     local sigPrefix = "│ "
     local sigGem = "◈ "
     local sigBy = "by "
-    local sigW = unicode.wlen(sigPrefix) + unicode.wlen(sigGem) + unicode.wlen(sigBy) + unicode.wlen(author)
-    local sigX = self.w - sigW
+    local sigX = Common.fitRightX(self.w, sigPrefix .. sigGem .. sigBy .. author, 2)
     self:drawText(sigX, self.h, sigPrefix, COLORS.border, COLORS.headerBg)
     self:drawText(sigX + 2, self.h, sigGem, COLORS.cyan, COLORS.headerBg)
     self:drawText(sigX + 4, self.h, sigBy, COLORS.muted, COLORS.headerBg)
     self:drawText(sigX + 7, self.h, author, COLORS.accent, COLORS.headerBg)
 
     local keysHint = "[1-4]Tab [[/]]DTPF [P]Pin [M]Maint [L]Log [A]Anim [R]Scan [Q]Quit"
-    local keysX = sigX - unicode.wlen(keysHint) - 1
+    local keysX = math.max(2, sigX - unicode.wlen(keysHint) - 1)
     self:drawText(keysX, self.h, keysHint, COLORS.muted, COLORS.headerBg)
 
     local stepDiff = ((self.state and self.state.stepCount) or 0) - (self.statusStep or 0)
@@ -5792,6 +5798,10 @@ function UI:renderFooter()
 end
 
 function UI:flushFramebuffer()
+    if not self.gpu then return end
+    if Common.checkViewportDrift(self, function(f) return self:syncDisplay(f) end, function() self:render() end) then
+        return
+    end
     local lastBg, lastFg = nil, nil
     local w = self.w
 

@@ -310,6 +310,114 @@ function Scheduler.syncHardware(cfg, state, compLib)
     return disc
 end
 
+function Scheduler.autoBindDiscovered(cfg, disc)
+    Scheduler.normalizeConfig(cfg)
+    disc = disc or {}
+    local boundCount = 0
+    if (not cfg.godforge.controllerAddr or cfg.godforge.controllerAddr == "") and disc.machines then
+        for _, m in ipairs(disc.machines) do
+            if m.role == "godforge" and m.address then
+                cfg.godforge.controllerAddr = m.address
+                boundCount = boundCount + 1
+                break
+            end
+        end
+    end
+
+    local outIfs, inIfs, allIfs = {}, {}, {}
+    for _, inf in ipairs(disc.interfaces or {}) do
+        if inf and inf.address and inf.address ~= "" then
+            allIfs[#allIfs + 1] = inf
+            if inf.roleHint == "OUT" then
+                outIfs[#outIfs + 1] = inf
+            elseif inf.roleHint == "IN" then
+                inIfs[#inIfs + 1] = inf
+            end
+        end
+    end
+
+    local allUnbound = true
+    for _, ex in ipairs(cfg.exoticizers or {}) do
+        if (ex.outputMeInterfaceAddress and ex.outputMeInterfaceAddress ~= "")
+            or (ex.inputMeInterfaceAddress and ex.inputMeInterfaceAddress ~= "")
+            or (ex.transposerAddress and ex.transposerAddress ~= "")
+            or (ex.redstoneIoAddress and ex.redstoneIoAddress ~= "") then
+            allUnbound = false
+            break
+        end
+    end
+    if allUnbound then
+        local discCount = math.min(8, math.max(#outIfs, #inIfs, #(disc.transposers or {})))
+        if discCount >= 1 then
+            local resized = {}
+            for i = 1, discCount do
+                local ex = cfg.exoticizers[i] or Scheduler.newExoticizer(i, (i == 1) and "magmatter" or "gluon")
+                ex.id = i
+                resized[i] = ex
+            end
+            cfg.exoticizers = resized
+        end
+    end
+
+    local usedIf, usedTp, usedRs = {}, {}, {}
+    for _, ex in ipairs(cfg.exoticizers or {}) do
+        if ex.outputMeInterfaceAddress and ex.outputMeInterfaceAddress ~= "" then usedIf[ex.outputMeInterfaceAddress] = true end
+        if ex.inputMeInterfaceAddress and ex.inputMeInterfaceAddress ~= "" then usedIf[ex.inputMeInterfaceAddress] = true end
+        if ex.transposerAddress and ex.transposerAddress ~= "" then usedTp[ex.transposerAddress] = true end
+        if ex.redstoneIoAddress and ex.redstoneIoAddress ~= "" then usedRs[ex.redstoneIoAddress] = true end
+    end
+
+    local function pickNext(list, used)
+        for _, entry in ipairs(list or {}) do
+            local addr = entry and entry.address
+            if addr and addr ~= "" and not used[addr] then
+                used[addr] = true
+                return entry
+            end
+        end
+        return nil
+    end
+
+    for _, ex in ipairs(cfg.exoticizers or {}) do
+        if not ex.outputMeInterfaceAddress or ex.outputMeInterfaceAddress == "" then
+            local ent = pickNext(outIfs, usedIf) or pickNext(allIfs, usedIf)
+            if ent then
+                ex.outputMeInterfaceAddress = ent.address
+                boundCount = boundCount + 1
+            end
+        end
+        if not ex.inputMeInterfaceAddress or ex.inputMeInterfaceAddress == "" then
+            local ent = pickNext(inIfs, usedIf) or pickNext(allIfs, usedIf)
+            if ent then
+                ex.inputMeInterfaceAddress = ent.address
+                boundCount = boundCount + 1
+            end
+        end
+        if not ex.transposerAddress or ex.transposerAddress == "" then
+            local tp = pickNext(disc.transposers, usedTp)
+            if tp then
+                ex.transposerAddress = tp.address
+                if tp.ioPortSide ~= nil then ex.meIoPortSide = tp.ioPortSide end
+                if tp.driveSide ~= nil then ex.meDriveSide = tp.driveSide end
+                boundCount = boundCount + 1
+            end
+        end
+        if not ex.redstoneIoAddress or ex.redstoneIoAddress == "" then
+            local rs = pickNext(disc.redstones, usedRs)
+            if rs then
+                ex.redstoneIoAddress = rs.address
+                if rs.activeSide ~= nil then ex.redstoneIoSide = rs.activeSide end
+                boundCount = boundCount + 1
+            elseif allUnbound and #(disc.redstones or {}) == 0 and ex.expectRedstone ~= false then
+                ex.expectRedstone = false
+                boundCount = boundCount + 1
+            end
+        end
+    end
+
+    return boundCount, #(cfg.exoticizers or {})
+end
+
 function Scheduler.unstickExoticizer(cfg, state, targetExIdOrNil, compLib, reason, opts)
     opts = opts or {}
     reason = reason or "manual"

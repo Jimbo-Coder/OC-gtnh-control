@@ -58,11 +58,15 @@ local BACKUP_RATES_PATH = "/home/rates.universal.bak"
 
 do
     local prevPath = package.path
-    package.path = string.format("%s/?.lua;%s/?/init.lua;%s", scriptDir, scriptDir, prevPath)
-    for _, modName in ipairs({ "lib.hardware", "lib.policy", "lib.scheduler", "lib.ui" }) do
+    local commonPat = "/usr/lib/?.lua"
+    local localCommonPat = filesystem.concat(scriptDir, "../common/?.lua")
+    package.path = string.format("%s/?.lua;%s/?/init.lua;%s;%s;%s", scriptDir, scriptDir, commonPat, localCommonPat, prevPath)
+    for _, modName in ipairs({ "gtnh_common", "lib.hardware", "lib.policy", "lib.scheduler", "lib.ui" }) do
         package.loaded[modName] = nil
     end
 end
+
+local Common = require("gtnh_common")
 
 local Hardware = require("lib.hardware")
 local Scheduler = require("lib.scheduler")
@@ -151,6 +155,9 @@ local function dispatchEvent(cfg, state, evTbl, nowSec, ui)
     elseif evName == "modem_message" then
         local handled = Hardware.handleMeshMessage(cfg, state, evTbl[2], evTbl[3], evTbl[4], evTbl[6], evTbl[7], evTbl[8])
         return handled, false
+    elseif evName == "screen_resized" then
+        if ui and ui.syncDisplay then ui:syncDisplay(true) end
+        return true, false
     elseif ui then
         if evName == "touch" then
             return ui:handleTouch(math.floor(tonumber(evTbl[3]) or 0), math.floor(tonumber(evTbl[4]) or 0), evTbl[5]), false
@@ -205,69 +212,21 @@ local function runCheck()
     print("=== CHECK COMPLETE (NO REDSTONE MODIFIED) ===")
 end
 
-local function wdNow()
-    if computer and computer.uptime then return computer.uptime() end
-    return os.clock and os.clock() or 0
-end
-
-local function isUnivShrcLine(line)
-    if line:match("^%s*#") then return false end
-    local t = line:match("^%s*(.-)%s*$") or ""
-    if t == "" then return false end
-    local cmd = t:match("^(%S+)") or ""
-    return cmd == "universal" or cmd == "/usr/bin/universal" or cmd == "/usr/bin/universal.lua" or cmd == "/home/universal/main.lua"
-end
+local isUnivShrcLine = Common.makeShrcMatcher({
+    "universal", "/usr/bin/universal", "/usr/bin/universal.lua", "/home/universal/main.lua",
+})
 
 local function armShellReviveWatchdog(cfg)
-    local okEv, evLib = pcall(require, "event")
-    if not okEv or type(evLib) ~= "table" or type(evLib.listen) ~= "function" then
-        return false
-    end
-    local now = wdNow()
-    local wd = rawget(_G, "__gtnhReviveWd")
-    if type(wd) ~= "table" then
-        wd = { armed = false, exitAt = now, lastKeyAt = now, hooked = false }
-        rawset(_G, "__gtnhReviveWd", wd)
-    end
-    wd.exitAt = now
-    wd.lastKeyAt = now
-    wd.meshPort = tonumber(cfg and cfg.meshPort) or 4205
-    wd.armed = true
-    if not wd.hooked then
-        wd.hooked = true
-        evLib.listen("key_down", function()
-            wd.lastKeyAt = wdNow()
-        end)
-        evLib.listen("modem_message", function(_, _, _, port, _, msgType)
-            if not wd.armed then return end
-            if msgType ~= "GTNH_WAKE" then return end
-            if port ~= wd.meshPort and port ~= 0 then return end
-            local raw = readWholeFile("/home/.shrc") or ""
-            local autostartOn = false
-            for line in raw:gmatch("[^\r\n]+") do
-                if isUnivShrcLine(line) then autostartOn = true; break end
-            end
-            if not autostartOn then return end
-            local holdExists = (filesystem and filesystem.exists and filesystem.exists("/tmp/gtnh_hold")) == true
-            if not holdExists and io and io.open then
-                local f = io.open("/tmp/gtnh_hold", "r")
-                if f then f:close(); holdExists = true end
-            end
-            if holdExists then return end
-            local cur = wdNow()
-            if (cur - (wd.exitAt or cur)) < 30 or (cur - (wd.lastKeyAt or cur)) < 30 then
-                return
-            end
-            wd.armed = false
-            if computer and computer.shutdown then pcall(computer.shutdown, true) end
-        end)
-    end
-    return true
+    return Common.armShellReviveWatchdog({
+        isAutostartFn = isUnivShrcLine,
+        shrcPath = "/home/.shrc",
+        meshPort = tonumber(cfg and cfg.meshPort) or Common.MESH_PORT,
+        wakeMsg = Common.WAKE_MSG,
+    })
 end
 
 local function disarmShellReviveWatchdog()
-    local wd = rawget(_G, "__gtnhReviveWd")
-    if type(wd) == "table" then wd.armed = false end
+    Common.disarmShellReviveWatchdog()
 end
 
 local function handlePendingRebootOrUpdate(state)
@@ -286,10 +245,8 @@ local function handlePendingRebootOrUpdate(state)
         end
         if chunk then
             print("Universal Control updating from " .. updUrl .. "...")
-            local hasInet = (component.isAvailable and component.isAvailable("internet"))
-                or (component.list and component.list("internet", true)() ~= nil)
-            local updArgs = { "--url", updUrl, "--update", "--yes" }
-            if not hasInet then updArgs[#updArgs + 1] = "--mesh-relay" end
+            local tx = Common.detectOtaTransport(component)
+            local updArgs = Common.buildInstallerArgs(updUrl, { viaMesh = tx.viaMesh })
             local okU, okInst = pcall(chunk, table.unpack(updArgs))
             if okU and okInst ~= false then
                 pcall(os.sleep, 0.15)

@@ -3,6 +3,7 @@
 -- Raw Delta Accounting, Built-in NC Filtering, Trunk Auto-Pairing, and Optional OC Mesh (port 4205).
 
 local component = require("component")
+local Common = require("gtnh_common")
 local computer = require("computer")
 local serialization = require("serialization")
 
@@ -966,59 +967,11 @@ end
 -- ============================================================================
 
 local function getMeshTransports(compLib)
-    local cl = compLib or component
-    local firstModem, wModem = nil, nil
-    if cl.list then
-        for addr in cl.list("modem", true) do
-            local m = cl.proxy(addr)
-            if m then
-                local needOpen = true
-                if type(m.isOpen) == "function" then
-                    local okO, isO = pcall(m.isOpen, Hardware.MESH_PORT)
-                    if okO and isO == true then needOpen = false end
-                end
-                if needOpen and m.open then pcall(m.open, Hardware.MESH_PORT) end
-
-                local isW = false
-                if m.isWireless then
-                    local okW, rW = pcall(m.isWireless)
-                    isW = okW and (rW == true)
-                end
-                if isW and m.setStrength then
-                    local needStr = true
-                    if type(m.getStrength) == "function" then
-                        local okG, curStr = pcall(m.getStrength)
-                        if okG and tonumber(curStr) and tonumber(curStr) >= 400 then needStr = false end
-                    end
-                    if needStr then pcall(m.setStrength, 400) end
-                end
-                if type(m.setWakeMessage) == "function" then
-                    local needWake = true
-                    if type(m.getWakeMessage) == "function" then
-                        local okWk, curWk, curFuzzy = pcall(m.getWakeMessage)
-                        if okWk and curWk == Hardware.WAKE_MSG and curFuzzy == true then needWake = false end
-                    end
-                    if needWake then pcall(m.setWakeMessage, Hardware.WAKE_MSG, true) end
-                end
-                if not firstModem then firstModem = m end
-                if isW and not wModem then wModem = m end
-            end
-        end
-    end
-    local modem = wModem or firstModem
-    local tunnel, tAddr = nil, nil
-    local ta = cl.list and cl.list("tunnel", true)() or nil
-    if ta then
-        tunnel, tAddr = cl.proxy(ta), ta
-        if tunnel and type(tunnel.setWakeMessage) == "function" then
-            local needWake = true
-            if type(tunnel.getWakeMessage) == "function" then
-                local okWk, curWk, curFuzzy = pcall(tunnel.getWakeMessage)
-                if okWk and curWk == Hardware.WAKE_MSG and curFuzzy == true then needWake = false end
-            end
-            if needWake then pcall(tunnel.setWakeMessage, Hardware.WAKE_MSG, true) end
-        end
-    end
+    local modem, tunnel, _, tAddr = Common.getMeshTransports(compLib, {
+        port = Hardware.MESH_PORT,
+        wakeMsg = Hardware.WAKE_MSG,
+        strength = 400,
+    })
     return modem, tunnel, tAddr
 end
 
@@ -1188,14 +1141,12 @@ function Hardware.handleMeshMessage(cfg, state, localAddr, sender, port, msgType
                 end
                 reply = { ok = true }
             elseif cmd.action == "update_local" then
-                local hasInet = cl and ((cl.isAvailable and cl.isAvailable("internet")) or (cl.list and cl.list("internet", true)() ~= nil))
-                local hasMesh = cl and ((cl.isAvailable and (cl.isAvailable("modem") or cl.isAvailable("tunnel")))
-                    or (cl.list and (cl.list("modem", true)() ~= nil or cl.list("tunnel", true)() ~= nil)))
-                if not hasInet and not hasMesh then
+                local tx = Common.detectOtaTransport(cl)
+                if not tx.hasInternet and not tx.hasMesh then
                     reply = { ok = false, error = "No Internet Card or OC Mesh modem/tunnel" }
                 else
-                    local u = (type(cmd.url) == "string" and cmd.url ~= "") and cmd.url or "http://127.0.0.1:8765/oc-raw"
-                    if not u:match("^https?://[%w%.%-_:]+") then
+                    local u = (type(cmd.url) == "string" and cmd.url ~= "") and cmd.url or Common.LOCAL_UPDATE_URL
+                    if not Common.isAllowedOtaUrl(u) then
                         reply = { ok = false, error = "Invalid update URL" }
                     else
                         if state then
@@ -1203,7 +1154,7 @@ function Hardware.handleMeshMessage(cfg, state, localAddr, sender, port, msgType
                             state._pendingReboot = true
                             state._forcePollNow = true
                         end
-                        reply = { ok = true, updating = true, viaMesh = (not hasInet), url = u }
+                        reply = { ok = true, updating = true, viaMesh = tx.viaMesh, url = u }
                     end
                 end
             elseif cmd.action == "reboot" then

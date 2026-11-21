@@ -242,7 +242,7 @@ function loadfile(path, mode, env)
     return load(src, "=" .. tostring(path), mode or "t", env or _G)
 end
 
-package = {{ path = rootDir .. "/?.lua", loaded = {{ io = io }}, preload = {{}} }}
+package = {{ path = rootDir .. "/?.lua;/usr/lib/?.lua;{GORGE_ROOT.parent}/common/?.lua", loaded = {{ io = io }}, preload = {{}} }}
 function require(name)
     if package.loaded[name] ~= nil then return package.loaded[name] end
     local rel = name:gsub("%.", "/")
@@ -1067,6 +1067,51 @@ rawset(_G, "__HELD_OBJECTS", { cfg3, st3, cfg4, st4, cfg5, st5, ui6 })
             finally:
                 prod_host.close()
 
+            # Verify autoBindDiscovered maps transposer Drive/IO Port sides, IN/OUT IFs & expectRedstone=false
+            host.exec_lua(
+                """
+                local component = require("component")
+                local Scheduler = require("lib.scheduler")
+                component._reset()
+                component._register("gf-1", "gt_machine", { getName = function() return "multimachine.godforge" end })
+                component._register("if-in", "me_interface", {
+                    getItemsInNetwork = function() return {} end,
+                    setInterfacePatternInput = function() return true end,
+                    getInterfacePattern = function() return { inputs = {} } end,
+                    getCpus = function() return { { name = "CPU1" } } end,
+                })
+                component._register("if-out", "me_interface", {
+                    getItemsInNetwork = function() return {} end,
+                })
+                component._register("tp-1", "transposer", {
+                    getInventoryName = function(s)
+                        if s == 2 then return "tile.appliedenergistics2.BlockDrive" end
+                        if s == 3 then return "tile.appliedenergistics2.BlockIOPort" end
+                        return nil
+                    end,
+                    getInventorySize = function(s)
+                        if s == 2 then return 10 end
+                        if s == 3 then return 12 end
+                        return 0
+                    end,
+                })
+                local ac = Scheduler.defaultConfig()
+                local ast = Scheduler.newState()
+                local adisc = Scheduler.syncHardware(ac, ast)
+                local nb, nex = Scheduler.autoBindDiscovered(ac, adisc)
+                assert(nb >= 4, "Expected autoBindDiscovered to bind >= 4 fields, got " .. tostring(nb))
+                assert(nex == 1, "Expected unbound 1-unit discovery to size exoticizers=1, got " .. tostring(nex))
+                assert(ac.godforge.controllerAddr == "gf-1", "Expected godforge controller auto-bound")
+                assert(ac.exoticizers[1].outputMeInterfaceAddress == "if-out", "Expected OUT interface auto-bound")
+                assert(ac.exoticizers[1].inputMeInterfaceAddress == "if-in", "Expected IN interface auto-bound")
+                assert(ac.exoticizers[1].transposerAddress == "tp-1", "Expected transposer auto-bound")
+                assert(ac.exoticizers[1].meDriveSide == 2, "Expected driveSide=2 detected from BlockDrive")
+                assert(ac.exoticizers[1].meIoPortSide == 3, "Expected ioPortSide=3 detected from BlockIOPort")
+                assert(ac.exoticizers[1].expectRedstone == false, "Expected expectRedstone=false with 0 redstones")
+                """,
+                "gorge_autobind_test",
+            )
+
             # Verify --check & --off CLI output
             cli_out = "\n".join(host.stdout)
             assert "=== GTNH GORGE & EXOTICIZER READ-ONLY CHECK ===" in cli_out, "Missing --check header"
@@ -1088,6 +1133,7 @@ rawset(_G, "__HELD_OBJECTS", { cfg3, st3, cfg4, st4, cfg5, st5, ui6 })
                     assert(__py_exists("/home/gorge/lib/hardware.lua"), "Missing /home/gorge/lib/hardware.lua")
                     assert(__py_exists("/home/gorge/lib/scheduler.lua"), "Missing /home/gorge/lib/scheduler.lua")
                     assert(__py_exists("/home/gorge/lib/ui.lua"), "Missing /home/gorge/lib/ui.lua")
+                    assert(__py_exists("/usr/lib/gtnh_common.lua"), "Missing /usr/lib/gtnh_common.lua")
                     assert(__py_exists("/usr/bin/gorge.lua"), "Missing /usr/bin/gorge.lua")
                     local f = io.open("/home/gorge/config.cfg", "w")
                     f:write("{armed=false,customGorge=777}")

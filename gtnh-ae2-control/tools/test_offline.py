@@ -246,7 +246,7 @@ function loadfile(path, mode, env)
     return load(src, "=" .. tostring(path), mode or "t", env or _G)
 end
 
-package = {{ path = rootDir .. "/?.lua;/home/?.lua", loaded = {{ io = io }}, preload = {{}} }}
+package = {{ path = rootDir .. "/?.lua;/home/?.lua;/usr/lib/?.lua;{AE2_ROOT.parent}/common/?.lua", loaded = {{ io = io }}, preload = {{}} }}
 function require(name)
     if package.loaded[name] ~= nil then return package.loaded[name] end
     if package.preload[name] then
@@ -461,9 +461,10 @@ end
 local cfgSrc = __py_read_file(__AE2_ROOT .. "/config.example.lua")
 __py_write_file("/home/brain/config.lua", cfgSrc:gsub("enableEnergyAE2 = false", "enableEnergyAE2 = true"):gsub("enableResilience = true", "enableResilience = false"):gsub("enableItems = true", "enableItems = false"):gsub("enableFluids = true", "enableFluids = false"):gsub("enableEssentia = true", "enableEssentia = false"))
 __py_write_file("/home/brain/main.lua", __py_read_file(__AE2_ROOT .. "/main.lua"))
+__py_write_file("/usr/lib/gtnh_common.lua", __py_read_file(__MONOREPO_ROOT .. "/common/gtnh_common.lua"))
 -- Intentionally omit /home/brain/lib/ui.lua initially & temporarily hide AE2_ROOT from package.path to prove headless runs WITHOUT lib/ui.lua!
 local savedPkgPath = package.path
-package.path = "/home/brain/?.lua;/home/?.lua"
+package.path = "/home/brain/?.lua;/home/?.lua;/usr/lib/?.lua"
 
 -- =====================================================================
 -- TEST 2: Headless Run Without lib/ui.lua + Cached Mesh Transports
@@ -1257,6 +1258,26 @@ do
     component.modem = origModem
     component.internet = origInet
     if origMod1 then component._register("mod-1", "modem", origMod1) end
+
+    -- Verify shared gtnh_common viewport drift recovery on Brain UI
+    local dvpW, dvpH = 160, 50
+    local driftGpu = {
+        getScreen = function() return "scr-1" end,
+        maxResolution = function() return 160, 50 end,
+        getResolution = function() return dvpW, dvpH end,
+        setResolution = function(w, h) dvpW, dvpH = w, h; return true end,
+        getViewport = function() return dvpW, dvpH end,
+        setViewport = function(w, h) dvpW, dvpH = w, h; return true end,
+        setForeground = function() end,
+        setBackground = function() end,
+        set = function() end,
+    }
+    local uiDrift = Ae2UI.new(cfg3, hub3, {}, { isAvailable = function(k) return k == "gpu" end, gpu = driftGpu })
+    assertEq(uiDrift.w, 160, "Brain UI initialized at 160x50")
+    dvpW, dvpH = 80, 25
+    uiDrift:flush()
+    assertEq(dvpW, 160, "Brain UI flush restored drifted viewport width to 160")
+    assertEq(dvpH, 50, "Brain UI flush restored drifted viewport height to 50")
 end
 
 rawset(_G, "__HELD_OBJECTS", { cfg3, hub3, ui3 })
@@ -1340,6 +1361,7 @@ rawset(_G, "__HELD_OBJECTS", { cfg3, hub3, ui3 })
                     assert(inst("--local", __AE2_ROOT, "--yes", "--no-autostart"), "Standalone Brain install failed")
                     assert(__py_exists("/home/brain/main.lua"), "Missing /home/brain/main.lua")
                     assert(__py_exists("/home/brain/lib/ui.lua"), "Missing /home/brain/lib/ui.lua")
+                    assert(__py_exists("/usr/lib/gtnh_common.lua"), "Missing /usr/lib/gtnh_common.lua")
                     assert(__py_exists("/home/brain/config.lua"), "Missing /home/brain/config.lua")
                     assert(__py_exists("/home/brain/install.lua"), "Missing /home/brain/install.lua for --update")
                     assert(__py_exists("/usr/bin/brain.lua"), "Missing /usr/bin/brain.lua")

@@ -3,6 +3,7 @@
 -- Uses 64-bit packed integer screen buffers (zero per-cell string allocations) and strictly width-1 glyphs.
 
 local component = require("component")
+local Common = require("gtnh_common")
 local unicode = require("unicode")
 local Hardware = require("lib.hardware")
 local Scheduler = require("lib.scheduler")
@@ -59,18 +60,7 @@ local function packColorMask(fg, bg)
         | ((math.floor(bg or COLORS.bg) & 0xFFFFFF) << 16)
 end
 
-local function padOrTrunc(str, width)
-    str = tostring(str or "")
-    if width <= 0 then return "" end
-    local len = unicode.wlen(str)
-    if len > width then
-        if width == 1 then return unicode.sub(str, 1, 1) end
-        return unicode.sub(str, 1, width - 1) .. "…"
-    elseif len < width then
-        return str .. string.rep(" ", width - len)
-    end
-    return str
-end
+local padOrTrunc = Common.padOrTrunc
 
 function UI.formatNumber(n, suffix)
     n = tonumber(n) or 0
@@ -87,12 +77,6 @@ function UI.new(cfg, state, onSave, compLib, extras)
     local cl = compLib or component
     local gpu = cl.isAvailable and cl.isAvailable("gpu") and cl.gpu or (cl.list and cl.list("gpu", true)() and cl.proxy(cl.list("gpu", true)()))
     local w, h = 160, 50
-    if gpu and gpu.maxResolution and gpu.setResolution then
-        local mw, mh = gpu.maxResolution()
-        w = math.min(160, math.floor(mw or 160))
-        h = math.min(50, math.floor(mh or 50))
-        pcall(gpu.setResolution, w, h)
-    end
 
     local self = setmetatable({
         cfg = cfg,
@@ -120,7 +104,23 @@ function UI.new(cfg, state, onSave, compLib, extras)
         self.curBuf[i] = -1
         self.nxtBuf[i] = 0
     end
+    self:syncDisplay(true)
     return self
+end
+
+function UI:syncDisplay(forceRedraw)
+    return Common.syncDisplay(self, {
+        forceRedraw = forceRedraw,
+        onResize = function(aw, ah)
+            local cur, nxt = {}, {}
+            for i = 1, aw * ah do
+                cur[i] = -1
+                nxt[i] = 0
+            end
+            self.curBuf = cur
+            self.nxtBuf = nxt
+        end,
+    })
 end
 
 function UI:save(msg)
@@ -210,6 +210,9 @@ end
 function UI:flush()
     local gpu = self.gpu
     if not gpu then return end
+    if Common.checkViewportDrift(self, function(f) return self:syncDisplay(f) end, function() self:render() end) then
+        return
+    end
     local lastFg, lastBg = -1, -1
     local w = self.w
     local nxt, cur = self.nxtBuf, self.curBuf
@@ -568,13 +571,19 @@ function UI:renderSetupTab()
         end
     end) + 1
     if #exList > 1 and ex then
-        self:drawButton(bx, 5, "[- Remove]", COLORS.red, COLORS.btnBg, function()
+        bx = self:drawButton(bx, 5, "[- Remove]", COLORS.red, COLORS.btnBg, function()
             table.remove(self.cfg.exoticizers, exIdx)
             self.selectedExIdx = math.max(1, exIdx - 1)
             Scheduler.normalizeConfig(self.cfg)
             self:save("Removed Exoticizer #" .. exIdx)
-        end)
+        end) + 1
     end
+    self:drawButton(bx, 5, "[Auto-Bind]", COLORS.cyan, COLORS.btnBg, function()
+        local d = Scheduler.syncHardware(self.cfg, self.state, self.comp)
+        local nBound, nEx = Scheduler.autoBindDiscovered(self.cfg, d)
+        self.selectedExIdx = math.min(math.max(1, self.selectedExIdx or 1), math.max(1, nEx))
+        self:save(string.format("Auto-Bind complete (%d field(s) mapped across %d Exoticizer(s)).", nBound, nEx))
+    end)
 
     -- Left Card: Selected Exoticizer Component & Side Mapping
     self:drawFrame(2, 7, 78, 40, COLORS.border, COLORS.panelBg, "round")
@@ -780,8 +789,10 @@ function UI:render()
 
     self:drawText(1, self.h - 1, string.rep("─", self.w), COLORS.border, COLORS.bg)
     self:fillRect(1, self.h, self.w, 1, " ", COLORS.headerBg)
-    self:drawText(2, self.h, padOrTrunc(self.statusMsg, 108), COLORS.fg, COLORS.headerBg)
-    self:drawText(112, self.h, "1-3:Tabs  Space:Arm  L:Log  R:Scan  Q:Quit", COLORS.muted, COLORS.headerBg)
+    local keysStr = "1-3:Tabs  Space:Arm  L:Log  R:Scan  Q:Quit"
+    local keysX = Common.fitRightX(self.w, keysStr, 2)
+    self:drawText(2, self.h, padOrTrunc(self.statusMsg, math.max(0, keysX - 4)), COLORS.fg, COLORS.headerBg)
+    self:drawText(keysX, self.h, keysStr, COLORS.muted, COLORS.headerBg)
 
     if self.logModalActive then self:renderLogModal() end
     self:flush()

@@ -7,6 +7,7 @@
 --   - Zero-tick cached OC Mesh (`port 4205`: `GORGE_METRICS` / `GORGE_CMD`)
 
 local component = require("component")
+local Common = require("gtnh_common")
 local okComp, computer = pcall(require, "computer")
 if not okComp then computer = nil end
 local serialization = require("serialization")
@@ -147,16 +148,57 @@ function Hardware.discover(compLib, state)
         table.sort(interfaces, function(a, b) return a.address < b.address end)
 
         for addr in cl.list("transposer", true) do
-            transposers[#transposers + 1] = { address = addr, shortAddr = Hardware.shortAddr(addr) }
+            local p = getProxy(addr, cl, state)
+            local driveSide, ioPortSide, sz10Side, sz12Side = nil, nil, nil, nil
+            if p then
+                for s = 0, 5 do
+                    local iname = ""
+                    if type(p.getInventoryName) == "function" then
+                        local okN, rn = pcall(p.getInventoryName, s)
+                        if okN and type(rn) == "string" then iname = rn:lower() end
+                    end
+                    local isz = 0
+                    if type(p.getInventorySize) == "function" then
+                        local okS, rs = pcall(p.getInventorySize, s)
+                        if okS and tonumber(rs) then isz = math.floor(tonumber(rs)) end
+                    end
+                    if iname:find("drive", 1, true) then
+                        driveSide = driveSide or s
+                    elseif iname:find("ioport", 1, true) or iname:find("io_port", 1, true) or iname:find("io port", 1, true) then
+                        ioPortSide = ioPortSide or s
+                    elseif isz == 10 and not sz10Side then
+                        sz10Side = s
+                    elseif isz == 12 and not sz12Side then
+                        sz12Side = s
+                    end
+                end
+            end
+            transposers[#transposers + 1] = {
+                address = addr,
+                shortAddr = Hardware.shortAddr(addr),
+                driveSide = driveSide or sz10Side,
+                ioPortSide = ioPortSide or sz12Side,
+            }
         end
         table.sort(transposers, function(a, b) return a.address < b.address end)
 
         for addr in cl.list("redstone", true) do
             local p = getProxy(addr, cl, state)
+            local activeSide = nil
+            if p and type(p.getInput) == "function" then
+                for s = 0, 5 do
+                    local okI, iv = pcall(p.getInput, s)
+                    if okI and tonumber(iv) and tonumber(iv) > 0 then
+                        activeSide = s
+                        break
+                    end
+                end
+            end
             redstones[#redstones + 1] = {
                 address = addr,
                 shortAddr = Hardware.shortAddr(addr),
                 bundled = (p ~= nil and type(p.setBundledOutput) == "function"),
+                activeSide = activeSide,
             }
         end
         table.sort(redstones, function(a, b) return a.address < b.address end)
@@ -727,64 +769,17 @@ local function getMeshTransports(compLib, state)
     if state and (state._meshModem ~= nil or state._meshTunnel ~= nil) then
         return state._meshModem, state._meshTunnel, state._meshTunnelAddr
     end
-    local firstModem, wModem = nil, nil
-    if cl.list then
-        for addr in cl.list("modem", true) do
-            local m = cl.proxy(addr)
-            if m then
-                local needOpen = true
-                if type(m.isOpen) == "function" then
-                    local okO, isO = pcall(m.isOpen, Hardware.MESH_PORT)
-                    if okO and isO == true then needOpen = false end
-                end
-                if needOpen and m.open then pcall(m.open, Hardware.MESH_PORT) end
-
-                local isW = false
-                if m.isWireless then
-                    local okW, rW = pcall(m.isWireless)
-                    isW = okW and (rW == true)
-                end
-                if isW and m.setStrength then
-                    local needStr = true
-                    if type(m.getStrength) == "function" then
-                        local okG, curStr = pcall(m.getStrength)
-                        if okG and tonumber(curStr) and tonumber(curStr) >= 400 then needStr = false end
-                    end
-                    if needStr then pcall(m.setStrength, 400) end
-                end
-                if type(m.setWakeMessage) == "function" then
-                    local needWake = true
-                    if type(m.getWakeMessage) == "function" then
-                        local okW, curW, curFuzzy = pcall(m.getWakeMessage)
-                        if okW and curW == Hardware.WAKE_MSG and curFuzzy == true then needWake = false end
-                    end
-                    if needWake then pcall(m.setWakeMessage, Hardware.WAKE_MSG, true) end
-                end
-                if not firstModem then firstModem = m end
-                if isW and not wModem then wModem = m end
-            end
-        end
-    end
-    local modem = wModem or firstModem
-    local tunnel, tAddr = nil, nil
-    local ta = cl.list and cl.list("tunnel", true)() or nil
-    if ta then
-        tunnel, tAddr = cl.proxy(ta), ta
-        if tunnel and type(tunnel.setWakeMessage) == "function" then
-            local needWake = true
-            if type(tunnel.getWakeMessage) == "function" then
-                local okW, curW, curFuzzy = pcall(tunnel.getWakeMessage)
-                if okW and curW == Hardware.WAKE_MSG and curFuzzy == true then needWake = false end
-            end
-            if needWake then pcall(tunnel.setWakeMessage, Hardware.WAKE_MSG, true) end
-        end
-    end
+    local modem, tunnel, _, tAddr = Common.getMeshTransports(cl, {
+        port = Hardware.MESH_PORT,
+        wakeMsg = Hardware.WAKE_MSG,
+        strength = 400,
+    })
     if state then
         state._meshModem = modem or false
         state._meshTunnel = tunnel or false
         state._meshTunnelAddr = tAddr
     end
-    return modem or nil, tunnel or nil, tAddr
+    return modem, tunnel, tAddr
 end
 
 function Hardware.openMeshPort(cfg, compLib, state)
@@ -957,14 +952,12 @@ function Hardware.handleMeshMessage(cfg, state, localAddr, sender, port, msgType
                     reply = { ok = false, error = "Invalid mode (magmatter|gluon|auto)" }
                 end
             elseif cmd.action == "update_local" then
-                local hasInet = cl and ((cl.isAvailable and cl.isAvailable("internet")) or (cl.list and cl.list("internet", true)() ~= nil))
-                local hasMesh = cl and ((cl.isAvailable and (cl.isAvailable("modem") or cl.isAvailable("tunnel")))
-                    or (cl.list and (cl.list("modem", true)() ~= nil or cl.list("tunnel", true)() ~= nil)))
-                if not hasInet and not hasMesh then
+                local tx = Common.detectOtaTransport(cl)
+                if not tx.hasInternet and not tx.hasMesh then
                     reply = { ok = false, error = "No Internet Card or OC Mesh modem/tunnel" }
                 else
-                    local u = (type(cmd.url) == "string" and cmd.url ~= "") and cmd.url or "http://127.0.0.1:8765/oc-raw"
-                    if not u:match("^https?://[%w%.%-_:]+") then
+                    local u = (type(cmd.url) == "string" and cmd.url ~= "") and cmd.url or Common.LOCAL_UPDATE_URL
+                    if not Common.isAllowedOtaUrl(u) then
                         reply = { ok = false, error = "Invalid update URL" }
                     else
                         if state then
@@ -972,7 +965,7 @@ function Hardware.handleMeshMessage(cfg, state, localAddr, sender, port, msgType
                             state._pendingReboot = true
                             state._forcePollNow = true
                         end
-                        reply = { ok = true, updating = true, viaMesh = (not hasInet), url = u }
+                        reply = { ok = true, updating = true, viaMesh = tx.viaMesh, url = u }
                     end
                 end
             elseif cmd.action == "reboot" then

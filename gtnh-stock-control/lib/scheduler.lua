@@ -6,6 +6,7 @@ local okComp, computer = pcall(require, "computer")
 if not okComp then computer = nil end
 
 local Hardware = require("lib.hardware")
+local Common = require("gtnh_common")
 local DtpfCatalog = require("lib.dtpf_catalog")
 
 local Scheduler = {}
@@ -1406,22 +1407,20 @@ function Scheduler.executeRpcTable(cfg, state, cmd, compLib, onMutate)
                 local okC, cMod = pcall(require, "component")
                 if okC then cl = cMod end
             end
-            local hasInet = cl and ((cl.isAvailable and cl.isAvailable("internet")) or (cl.list and cl.list("internet", true)() ~= nil))
-            local hasModem = cl and ((cl.isAvailable and (cl.isAvailable("modem") or cl.isAvailable("tunnel")))
-                or (cl.list and (cl.list("modem", true)() ~= nil or cl.list("tunnel", true)() ~= nil)))
-            if not hasInet and not hasModem then
+            local tx = Common.detectOtaTransport(cl)
+            if not tx.hasInternet and not tx.hasMesh then
                 return { id = id, ok = false, error = "No Internet Card or Mesh Modem on Stock Maintainer OC" }
             end
-            local url = (type(cmd.url) == "string" and cmd.url ~= "") and cmd.url or "http://127.0.0.1:8765/oc-raw"
-            if not url:match("^https?://[%w%.%-_:]+") then
+            local url = (type(cmd.url) == "string" and cmd.url ~= "") and cmd.url or Common.LOCAL_UPDATE_URL
+            if not Common.isAllowedOtaUrl(url) then
                 return { id = id, ok = false, error = "Invalid update URL" }
             end
             state._pendingUpdateUrl = url
-            if not hasInet and type(cmd.relayFrom) == "string" and cmd.relayFrom ~= "" then
+            if tx.viaMesh and type(cmd.relayFrom) == "string" and cmd.relayFrom ~= "" then
                 state._pendingUpdateRelay = cmd.relayFrom
             end
             state._pendingReboot = true
-            return { id = id, ok = true, updating = true, url = url, viaMesh = (not hasInet) }
+            return { id = id, ok = true, updating = true, url = url, viaMesh = tx.viaMesh }
         elseif act == "reboot" then
             state._pendingReboot = true
             return { id = id, ok = true, rebooting = true }

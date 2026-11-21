@@ -29,6 +29,12 @@ local term = require('term')
 local filesystem = require('filesystem')
 local computer = require('computer')
 local okSer, serialization = pcall(require, 'serialization')
+local Common = (function()
+  local ok, m = pcall(require, 'gtnh_common')
+  if ok and type(m) == 'table' then return m end
+  package.path = '/usr/lib/?.lua;/lib/?.lua;./common/?.lua;../common/?.lua;' .. tostring(package.path or '')
+  return require('gtnh_common')
+end)()
 local pumps = {}
 local refreshRequested = false
 local reloadRequested = false
@@ -151,70 +157,23 @@ local function logMsg(msg)
   if #statusLogs > 16 then table.remove(statusLogs, 1) end
 end
 
-local WAKE_MSG = 'GTNH_WAKE'
+local WAKE_MSG = Common.WAKE_MSG
 local lastMainnetSeen = nil
 local lastMainnetWakeAt = -1000
 local meshStartedAt = nil
 local mainnetWakeAttempts = 0
-
-local function configureModemWake(m)
-  if m and type(m.setWakeMessage) == 'function' then
-    local needWake = true
-    if type(m.getWakeMessage) == 'function' then
-      local okWk, curWk, curFuzzy = pcall(m.getWakeMessage)
-      if okWk and curWk == WAKE_MSG and curFuzzy == true then needWake = false end
-    end
-    if needWake then pcall(m.setWakeMessage, WAKE_MSG, true) end
-  end
-end
 
 local function getMeshModem(forceRefresh)
   if not enableMesh then return nil, nil end
   if (not forceRefresh) and (cachedModem ~= nil or cachedTunnel ~= nil) then
     return cachedModem or nil, cachedTunnel or nil
   end
-  local firstModem, wirelessModem = nil, nil
-  local function prepModem(m)
-    if not m then return end
-    local needOpen = true
-    if type(m.isOpen) == 'function' then
-      local okO, isO = pcall(m.isOpen, MESH_PORT)
-      if okO and isO == true then needOpen = false end
-    end
-    if needOpen and m.open then pcall(m.open, MESH_PORT) end
-    local isW = false
-    if m.isWireless then
-      local okW, rW = pcall(m.isWireless)
-      isW = okW and (rW == true)
-    end
-    if isW and m.setStrength then
-      local needStr = true
-      if type(m.getStrength) == 'function' then
-        local okG, curStr = pcall(m.getStrength)
-        if okG and tonumber(curStr) and tonumber(curStr) >= 400 then needStr = false end
-      end
-      if needStr then pcall(m.setStrength, 400) end
-    end
-    configureModemWake(m)
-    return isW
-  end
-  if component.list then
-    for addr in component.list('modem', true) do
-      local m = component.proxy(addr)
-      if m then
-        local isW = prepModem(m)
-        if not firstModem then firstModem = m end
-        if isW and not wirelessModem then wirelessModem = m end
-      end
-    end
-  elseif component.isAvailable('modem') and component.modem then
-    local m = component.modem
-    prepModem(m)
-    firstModem = m
-  end
-  local tunnel = (component.isAvailable('tunnel') and component.tunnel) or nil
-  configureModemWake(tunnel)
-  cachedModem = (wirelessModem or firstModem) or false
+  local modem, tunnel = Common.getMeshTransports(component, {
+    port = MESH_PORT,
+    wakeMsg = WAKE_MSG,
+    strength = 400,
+  })
+  cachedModem = modem or false
   cachedTunnel = tunnel or false
   return cachedModem or nil, cachedTunnel or nil
 end
@@ -476,16 +435,13 @@ local function handleMeshMessage(localAddr, sender, port, msgType, reqId, rawPay
       elseif act == 'reload' then
         reloadRequested = true
       elseif act == 'update_local' then
-        local hasInet = (component.isAvailable and component.isAvailable('internet'))
-          or (component.list and component.list('internet', true)() ~= nil)
-        local hasMesh = (component.isAvailable and (component.isAvailable('modem') or component.isAvailable('tunnel')))
-          or (component.list and (component.list('modem', true)() ~= nil or component.list('tunnel', true)() ~= nil))
-        if not hasInet and not hasMesh then
+        local tx = Common.detectOtaTransport(component)
+        if not tx.hasInternet and not tx.hasMesh then
           replyCmd({ ok = false, error = 'No Internet Card or OC Mesh modem/tunnel' })
           return true
         end
-        local u = (type(cmd.url) == 'string' and cmd.url ~= '') and cmd.url or 'http://127.0.0.1:8765/oc-raw'
-        if not u:match('^https?://[%w%.%-_:]+') then
+        local u = (type(cmd.url) == 'string' and cmd.url ~= '') and cmd.url or Common.LOCAL_UPDATE_URL
+        if not Common.isAllowedOtaUrl(u) then
           replyCmd({ ok = false, error = 'Invalid update URL' })
           return true
         end
@@ -493,7 +449,7 @@ local function handleMeshMessage(localAddr, sender, port, msgType, reqId, rawPay
         rebootRequested = true
         wakeRequested = true
         logMsg('Remote update requested via OC mesh')
-        replyCmd({ ok = true, updating = true, viaMesh = (not hasInet), url = u })
+        replyCmd({ ok = true, updating = true, viaMesh = tx.viaMesh, url = u })
         return true
       elseif act == 'reboot' then
         rebootRequested = true
@@ -507,16 +463,13 @@ local function handleMeshMessage(localAddr, sender, port, msgType, reqId, rawPay
       end
       replyCmd({ ok = true, queuedAction = act, status = buildStatusPayload(lastStateName, lastCycleNum) })
     elseif op == 'update_local' then
-      local hasInet = (component.isAvailable and component.isAvailable('internet'))
-        or (component.list and component.list('internet', true)() ~= nil)
-      local hasMesh = (component.isAvailable and (component.isAvailable('modem') or component.isAvailable('tunnel')))
-        or (component.list and (component.list('modem', true)() ~= nil or component.list('tunnel', true)() ~= nil))
-      if not hasInet and not hasMesh then
+      local tx = Common.detectOtaTransport(component)
+      if not tx.hasInternet and not tx.hasMesh then
         replyCmd({ ok = false, error = 'No Internet Card or OC Mesh modem/tunnel' })
         return true
       end
-      local u = (type(cmd.url) == 'string' and cmd.url ~= '') and cmd.url or 'http://127.0.0.1:8765/oc-raw'
-      if not u:match('^https?://[%w%.%-_:]+') then
+      local u = (type(cmd.url) == 'string' and cmd.url ~= '') and cmd.url or Common.LOCAL_UPDATE_URL
+      if not Common.isAllowedOtaUrl(u) then
         replyCmd({ ok = false, error = 'Invalid update URL' })
         return true
       end
@@ -524,7 +477,7 @@ local function handleMeshMessage(localAddr, sender, port, msgType, reqId, rawPay
       rebootRequested = true
       wakeRequested = true
       logMsg('Remote update requested via OC mesh')
-      replyCmd({ ok = true, updating = true, viaMesh = (not hasInet), url = u })
+      replyCmd({ ok = true, updating = true, viaMesh = tx.viaMesh, url = u })
     elseif op == 'reboot' then
       rebootRequested = true
       wakeRequested = true
@@ -841,16 +794,11 @@ local main = thread.create(function()
           end
         end
         if chunk then
-          local hasInet = (component.isAvailable and component.isAvailable('internet'))
-            or (component.list and component.list('internet', true)() ~= nil)
-          local updArgs = { '--url', updUrl, '--update', '--yes' }
-          if not hasInet then
-            updArgs[#updArgs + 1] = '--mesh-relay'
-            if mainnetAddr and not mainnetViaTunnel then
-              updArgs[#updArgs + 1] = '--mesh-target'
-              updArgs[#updArgs + 1] = tostring(mainnetAddr)
-            end
-          end
+          local tx = Common.detectOtaTransport(component)
+          local updArgs = Common.buildInstallerArgs(updUrl, {
+            viaMesh = tx.viaMesh,
+            meshTarget = (mainnetAddr and not mainnetViaTunnel) and tostring(mainnetAddr) or nil,
+          })
           local okU, okInst = pcall(chunk, table.unpack(updArgs))
           if okU and okInst ~= false then
             os.sleep(0.15)
@@ -882,73 +830,20 @@ local main = thread.create(function()
   end
 end)
 
-local function wdNow()
-  if computer and computer.uptime then return computer.uptime() end
-  return os.clock and os.clock() or 0
-end
-
-local function isPumpShrcLine(line)
-  if line:match('^%s*#') then return false end
-  local t = line:match('^%s*(.-)%s*$') or ''
-  if t == '' then return false end
-  local cmd = t:match('^(%S+)') or ''
-  return cmd == 'pump' or cmd == '/usr/bin/pump' or cmd == '/usr/bin/pump.lua' or cmd == '/home/autoPump.lua' or cmd == 'autoPump.lua'
-end
+local isPumpShrcLine = Common.makeShrcMatcher({
+  'pump', '/usr/bin/pump', '/usr/bin/pump.lua', '/home/autoPump.lua', 'autoPump.lua',
+})
 
 local function armShellReviveWatchdog()
-  if not (event and type(event.listen) == 'function') then return false end
-  local now = wdNow()
-  local wd = rawget(_G, '__gtnhReviveWd')
-  if type(wd) ~= 'table' then
-    wd = { armed = false, exitAt = now, lastKeyAt = now, hooked = false }
-    rawset(_G, '__gtnhReviveWd', wd)
-  end
-  wd.exitAt = now
-  wd.lastKeyAt = now
-  wd.meshPort = MESH_PORT
-  wd.armed = true
-  if not wd.hooked then
-    wd.hooked = true
-    event.listen('key_down', function()
-      wd.lastKeyAt = wdNow()
-    end)
-    event.listen('modem_message', function(_, _, _, port, _, msgType)
-      if not wd.armed then return end
-      if msgType ~= 'GTNH_WAKE' then return end
-      if port ~= wd.meshPort and port ~= 0 then return end
-      local autostartOn = false
-      if io and io.open then
-        local f = io.open('/home/.shrc', 'r')
-        if f then
-          local raw = f:read('*a') or ''
-          f:close()
-          for line in raw:gmatch('[^\r\n]+') do
-            if isPumpShrcLine(line) then autostartOn = true; break end
-          end
-        end
-      end
-      if not autostartOn then return end
-      local holdExists = (filesystem and filesystem.exists and filesystem.exists('/tmp/gtnh_hold')) == true
-      if not holdExists and io and io.open then
-        local f = io.open('/tmp/gtnh_hold', 'r')
-        if f then f:close(); holdExists = true end
-      end
-      if holdExists then return end
-      local cur = wdNow()
-      if (cur - (wd.exitAt or cur)) < 30 or (cur - (wd.lastKeyAt or cur)) < 30 then
-        return
-      end
-      wd.armed = false
-      if computer and computer.shutdown then pcall(computer.shutdown, true) end
-    end)
-  end
-  return true
+  return Common.armShellReviveWatchdog({
+    isAutostartFn = isPumpShrcLine,
+    shrcPath = '/home/.shrc',
+    meshPort = MESH_PORT,
+    wakeMsg = WAKE_MSG,
+  })
 end
 
-do
-  local wd = rawget(_G, '__gtnhReviveWd')
-  if type(wd) == 'table' then wd.armed = false end
-end
+Common.disarmShellReviveWatchdog()
 
 local cleanUp = thread.create(function()
     event.pull('interrupted')

@@ -367,6 +367,7 @@ local function runInstaller(args)
     end
     local repoArgs = { optRepo or pos[1], optBranch or pos[2] }
 
+    local origLocalDir = localDir
     if localDir and not filesystem.exists(filesystem.concat(localDir, "main.lua")) then
         local monorepoSub = filesystem.concat(localDir, SUBDIR)
         if filesystem.exists(filesystem.concat(monorepoSub, "main.lua")) then
@@ -386,9 +387,19 @@ local function runInstaller(args)
     end
     local useMesh = (not localDir) and (optMeshRelay or (not internet and hasMesh))
     local repo, branch = resolveRepoAndBranch(repoArgs)
-    local baseUrl = repo:match("^https?://")
-        and (repo:gsub("/+$", "") .. "/")
-        or string.format("https://raw.githubusercontent.com/%s/%s/", repo, branch)
+    local cleanRepo = repo:gsub("/+$", "")
+    local baseUrl, repoRootUrl
+    if cleanRepo:match("^https?://") then
+        if cleanRepo:sub(-#SUBDIR) == SUBDIR then
+            repoRootUrl = cleanRepo:sub(1, -(#SUBDIR + 1)):gsub("/+$", "") .. "/"
+        else
+            repoRootUrl = cleanRepo .. "/"
+        end
+        baseUrl = repoRootUrl
+    else
+        repoRootUrl = string.format("https://raw.githubusercontent.com/%s/%s/", cleanRepo, branch)
+        baseUrl = repoRootUrl
+    end
 
     print("=== GTNH DTPF AUTOMATION INSTALLER ===")
     print(string.format("Source : %s", localDir and ("local:" .. localDir) or ((useMesh and "mesh:" or "") .. string.format("%s (%s/%s)", repo, branch, SUBDIR))))
@@ -397,6 +408,7 @@ local function runInstaller(args)
 
     filesystem.makeDirectory(INSTALL_DIR)
     filesystem.makeDirectory(filesystem.concat(INSTALL_DIR, "lib"))
+    filesystem.makeDirectory("/usr/lib")
     filesystem.makeDirectory("/usr/bin")
 
     local cfgState = syncSettingsBackup()
@@ -414,6 +426,46 @@ local function runInstaller(args)
     local function fetchRemote(u)
         if useMesh then return fetchViaMesh(u, meshTarget) end
         return fetchUrl(internet, u)
+    end
+
+    do
+        local commonBody, commonErr
+        if localDir then
+            for _, cp in ipairs({
+                origLocalDir and filesystem.concat(origLocalDir, "common/gtnh_common.lua") or nil,
+                filesystem.concat(filesystem.path(localDir), "common/gtnh_common.lua"),
+                filesystem.concat(localDir, "common/gtnh_common.lua"),
+            }) do
+                if cp then
+                    local b = readWholeFile(cp)
+                    if b then commonBody = b; break end
+                end
+            end
+            if not commonBody then commonErr = "missing common/gtnh_common.lua" end
+        else
+            commonBody, commonErr = fetchRemote(repoRootUrl .. "common/gtnh_common.lua")
+        end
+        if not commonBody then
+            cleanupTempFiles()
+            io.stderr:write("ERROR: Failed to fetch common/gtnh_common.lua (" .. tostring(commonErr) .. ")\n")
+            return false, commonErr
+        end
+        local cChunk, cSynErr = load(commonBody, "@common/gtnh_common.lua", "t")
+        if not cChunk then
+            cleanupTempFiles()
+            io.stderr:write("ERROR: Invalid Lua in gtnh_common.lua (" .. tostring(cSynErr) .. ")\n")
+            return false, cSynErr
+        end
+        local comDst = "/usr/lib/gtnh_common.lua"
+        local comTmp = comDst .. ".tmp"
+        local okW, writeErr = writeWholeFile(comTmp, commonBody)
+        if not okW then
+            cleanupTempFiles()
+            io.stderr:write("ERROR: Failed writing " .. comTmp .. " (" .. tostring(writeErr) .. ")\n")
+            return false, writeErr
+        end
+        staged[#staged + 1] = { rel = "common/gtnh_common.lua", destPath = comDst, tmpPath = comTmp, bytes = #commonBody }
+        print(string.format("[OK +] %-20s (%d bytes)", comDst, #commonBody))
     end
 
     for i = 1, #FILES do

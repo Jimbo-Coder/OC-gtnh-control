@@ -212,6 +212,7 @@ class LuaHost:
         shim = f"""
 local rootDir = "{DTPF_ROOT}"
 __DTPF_ROOT = rootDir
+__MONOREPO_ROOT = "{DTPF_ROOT.parent}"
 __RENDERED_GPU_CALLS = {{}}
 -- OpenComputers' sandbox exposes no collectgarbage() to guest OpenOS scripts (host machine.lua runs GC automatically)
 collectgarbage = nil
@@ -261,7 +262,7 @@ function loadfile(path, mode, env)
 end
 
 package = {{
-    path = rootDir .. "/?.lua",
+    path = rootDir .. "/?.lua;/usr/lib/?.lua;" .. __MONOREPO_ROOT .. "/common/?.lua",
     loaded = {{}},
     preload = {{}},
 }}
@@ -2371,6 +2372,7 @@ do
     local origGetInfo = debug.getinfo
     local origPath = package.path
     local savedMods = {
+        ["gtnh_common"] = package.loaded["gtnh_common"],
         ["lib.hardware"] = package.loaded["lib.hardware"],
         ["lib.scheduler"] = package.loaded["lib.scheduler"],
         ["lib.ui"] = package.loaded["lib.ui"],
@@ -3420,18 +3422,21 @@ do
     assert(hSlots[1] and hSlots[1].name == "exciteddtec", "T18j injects exciteddtec into slot 1 once player enables GUI Conv")
 
     -- Installer & config.cfg backup/restore + atomic syntax rollback test
-    local fail404Url = nil
+    local fail404Suffix = nil
+    local function isFailUrl(u)
+        return fail404Suffix and (tostring(u):sub(-#fail404Suffix) == fail404Suffix)
+    end
     component._register("mock-inet", "internet", {
         request = function(url)
             local rel = tostring(url):match("https://raw%.githubusercontent%.com/[^/]+/[^/]+/[^/]+/(.+)$")
-            local body = (fail404Url and url == fail404Url) and "404: Not Found"
-                or (rel and __py_read_file(_G.__DTPF_ROOT .. "/" .. rel))
+            local body = isFailUrl(url) and "404: Not Found"
+                or (rel and (__py_read_file(_G.__DTPF_ROOT .. "/" .. rel) or __py_read_file(_G.__MONOREPO_ROOT .. "/" .. rel)))
                 or ""
             local sent = false
             return {
                 finishConnect = function() return true end,
                 response = function()
-                    if fail404Url and url == fail404Url then return 404, "Not Found" end
+                    if isFailUrl(url) then return 404, "Not Found" end
                     return (#body > 0) and 200 or 404, "OK"
                 end,
                 read = function()
@@ -3455,15 +3460,16 @@ do
     assertEq(__py_read_file("/home/dtpf/config.cfg"), customCfgStr, "T18j install.lua preserved existing config.cfg")
     assertEq(__py_read_file("/home/config.dtpf.bak"), customCfgStr, "T18j install.lua backed up /home/config.dtpf.bak")
     assert(__py_read_file("/usr/bin/dtpf.lua") ~= nil, "T18j install.lua created /usr/bin/dtpf.lua")
+    assert(__py_read_file("/usr/lib/gtnh_common.lua") ~= nil, "T18j install.lua installed /usr/lib/gtnh_common.lua")
     assertEq(__py_read_file("/home/dtpf/.repo"), "example/gtnh-dtpf-control\nmain\n", "T18j persisted custom repo/branch")
 
     -- Simulate broken remote Lua / 404 during update -> aborts without corrupting live lib/ui.lua
     local origUi = assert(__py_read_file("/home/dtpf/lib/ui.lua"))
-    fail404Url = "https://raw.githubusercontent.com/example/gtnh-dtpf-control/main/lib/ui.lua"
+    fail404Suffix = "/lib/ui.lua"
     local okFail = instChunk()
     assertEq(okFail, false, "T18j failed update aborts safely")
     assertEq(__py_read_file("/home/dtpf/lib/ui.lua"), origUi, "T18j rollback left live lib/ui.lua untouched")
-    fail404Url = nil
+    fail404Suffix = nil
 
     -- Simulate full wipe of config.cfg + fresh reinstall -> restores from /home/config.dtpf.bak
     os.remove("/home/dtpf/config.cfg")
@@ -3537,7 +3543,7 @@ do
         "/home/dtpf/install.lua", "/home/dtpf/main.lua", "/home/dtpf/lib/recipes_db.lua",
         "/home/dtpf/lib/hardware.lua", "/home/dtpf/lib/scheduler.lua", "/home/dtpf/lib/ui.lua",
         "/home/dtpf/config.cfg", "/home/dtpf/.repo", "/home/config.dtpf.bak", "/usr/bin/dtpf.lua",
-        "/home/.shrc",
+        "/usr/lib/gtnh_common.lua", "/home/.shrc",
     }) do
         os.remove(rp)
     end
@@ -3722,10 +3728,12 @@ do
     assertEq(__py_read_file("/home/dtpf/config.cfg"), "{ armed = true, logLevel = \"normal\", dtrReserveFloor = 777 }\n",
         "T18k install.lua --local restored /home/config.dtpf.bak into /home/dtpf/config.cfg")
     assert(__py_read_file("/usr/bin/dtpf.lua") ~= nil, "T18k install.lua --local created /usr/bin/dtpf.lua")
+    assert(__py_read_file("/usr/lib/gtnh_common.lua") ~= nil, "T18k install.lua --local installed /usr/lib/gtnh_common.lua")
     for _, rp in ipairs({
         "/home/dtpf/install.lua", "/home/dtpf/main.lua", "/home/dtpf/lib/recipes_db.lua",
         "/home/dtpf/lib/hardware.lua", "/home/dtpf/lib/scheduler.lua", "/home/dtpf/lib/ui.lua",
         "/home/dtpf/config.cfg", "/home/dtpf/.repo", "/home/config.dtpf.bak", "/usr/bin/dtpf.lua",
+        "/usr/lib/gtnh_common.lua",
     }) do
         os.remove(rp)
     end

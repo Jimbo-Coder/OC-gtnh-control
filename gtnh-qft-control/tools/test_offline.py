@@ -192,7 +192,7 @@ function loadfile(path, mode, env)
     return load(src, "=" .. tostring(path), mode or "t", env or _G)
 end
 
-package = {{ path = rootDir .. "/?.lua", loaded = {{ io = io }}, preload = {{}} }}
+package = {{ path = rootDir .. "/?.lua;/usr/lib/?.lua;{QFT_ROOT.parent}/common/?.lua", loaded = {{ io = io }}, preload = {{}} }}
 function require(name)
     if package.loaded[name] ~= nil then return package.loaded[name] end
     local rel = name:gsub("%.", "/")
@@ -673,7 +673,7 @@ return "OK"
                     for _, p in ipairs({
                         "/home/qft/main.lua", "/home/qft/lib/recipes_db.lua",
                         "/home/qft/lib/hardware.lua", "/home/qft/lib/scheduler.lua",
-                        "/home/qft/lib/ui.lua", "/usr/bin/qft.lua",
+                        "/home/qft/lib/ui.lua", "/usr/lib/gtnh_common.lua", "/usr/bin/qft.lua",
                     }) do
                         assert(__py_exists(p), "Missing installed QFT file: " .. p)
                     end

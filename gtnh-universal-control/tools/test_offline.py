@@ -241,7 +241,7 @@ function loadfile(path, mode, env)
     return load(src, "=" .. tostring(path), mode or "t", env or _G)
 end
 
-package = {{ path = rootDir .. "/?.lua", loaded = {{ io = io }}, preload = {{}} }}
+package = {{ path = rootDir .. "/?.lua;/usr/lib/?.lua;{UNIV_ROOT.parent}/common/?.lua", loaded = {{ io = io }}, preload = {{}} }}
 function require(name)
     if package.loaded[name] ~= nil then return package.loaded[name] end
     local rel = name:gsub("%.", "/")
@@ -1395,6 +1395,7 @@ rawset(_G, "__HELD_OBJECTS", { cfg, state, scanPool, evState, mSt2, mcSt, st32, 
                     assert(__py_exists("/home/rates.universal.bak"), "Missing backup /home/rates.universal.bak")
                     assert(__py_exists("/home/universal/main.lua"), "Missing installed main.lua")
                     assert(__py_exists("/home/universal/lib/policy.lua"), "Missing installed lib/policy.lua")
+                    assert(__py_exists("/usr/lib/gtnh_common.lua"), "Missing installed /usr/lib/gtnh_common.lua")
                     assert(__py_exists("/usr/bin/universal.lua"), "Missing /usr/bin/universal.lua")
                     """,
                     "standalone_install_test",

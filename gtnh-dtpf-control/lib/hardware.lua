@@ -8,6 +8,7 @@
 --   3. AE2 Stock & On-Demand Subnet monitoring via `me_interface`, adapted `fluid_interface` (ME Dual Interface), or `me_controller`
 
 local component = require("component")
+local Common = require("gtnh_common")
 local event = require("event")
 local serialization = require("serialization")
 local okComp, computer = pcall(require, "computer")
@@ -1968,56 +1969,13 @@ end
 -- Mainnet AE2 Maintainer & In-Game OC Mesh (`MESH_PORT = 4205`) Helpers
 -- ============================================================================
 
-local function configureMeshWake(m, wakeMsg)
-    if m and type(m.setWakeMessage) == "function" then
-        local needWake = true
-        if type(m.getWakeMessage) == "function" then
-            local okWk, curWk, curFuzzy = pcall(m.getWakeMessage)
-            if okWk and curWk == wakeMsg and curFuzzy == true then needWake = false end
-        end
-        if needWake then pcall(m.setWakeMessage, wakeMsg, true) end
-    end
-end
-
 local function getMeshTransports(compLib)
-    Hardware.WAKE_MSG = Hardware.WAKE_MSG or "GTNH_WAKE"
-    local cl = compLib or component
-    local firstModem, firstAddr, wModem, wAddr = nil, nil, nil, nil
-    if cl.list then
-        for addr in cl.list("modem", true) do
-            local m = cl.proxy(addr)
-            if m then
-                if m.open then pcall(m.open, Hardware.MESH_PORT) end
-                local isW = false
-                if m.isWireless then
-                    local okW, rW = pcall(m.isWireless)
-                    isW = okW and (rW == true)
-                end
-                if isW and m.setStrength then pcall(m.setStrength, 400) end
-                configureMeshWake(m, Hardware.WAKE_MSG)
-                if not firstModem then firstModem, firstAddr = m, addr end
-                if isW and not wModem then wModem, wAddr = m, addr end
-            end
-        end
-    elseif cl.isAvailable and cl.isAvailable("modem") and cl.modem then
-        local m = cl.modem
-        if m.open then pcall(m.open, Hardware.MESH_PORT) end
-        local isW = false
-        if m.isWireless then
-            local okW, rW = pcall(m.isWireless)
-            isW = okW and (rW == true)
-        end
-        if isW and m.setStrength then pcall(m.setStrength, 400) end
-        configureMeshWake(m, Hardware.WAKE_MSG)
-        firstModem, firstAddr = m, m.address or "modem"
-    end
-    local modem, mAddr = wModem or firstModem, wAddr or firstAddr
-    local tunnel, tAddr = nil, nil
-    local ta = cl.list and cl.list("tunnel", true)() or nil
-    if ta then
-        tunnel, tAddr = cl.proxy(ta), ta
-        configureMeshWake(tunnel, Hardware.WAKE_MSG)
-    end
+    Hardware.WAKE_MSG = Hardware.WAKE_MSG or Common.WAKE_MSG
+    local modem, tunnel, mAddr, tAddr = Common.getMeshTransports(compLib, {
+        port = Hardware.MESH_PORT,
+        wakeMsg = Hardware.WAKE_MSG,
+        strength = 400,
+    })
     return modem, mAddr, tunnel, tAddr
 end
 

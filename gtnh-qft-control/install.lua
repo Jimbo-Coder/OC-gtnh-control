@@ -180,6 +180,7 @@ local function runInstaller(args)
         elseif a == "--no-autostart" then optAutostart = false end
         i = i + 1
     end
+    local origLocalDir = localDir
     if localDir and not filesystem.exists(filesystem.concat(localDir, "main.lua")) then
         local sub = filesystem.concat(localDir, SUBDIR)
         if filesystem.exists(filesystem.concat(sub, "main.lua")) then localDir = sub end
@@ -203,15 +204,55 @@ local function runInstaller(args)
     end
     local repo = (optRepo and optRepo ~= "") and optRepo or DEFAULT_REPO
     local branch = (optBranch and optBranch ~= "") and optBranch or DEFAULT_BRANCH
-    local baseUrl = repo:match("^https?://")
-        and ((repo:sub(-#SUBDIR) == SUBDIR) and (repo .. "/") or (repo .. "/" .. SUBDIR .. "/"))
-        or string.format("https://raw.githubusercontent.com/%s/%s/%s/", repo, branch, SUBDIR)
+    local baseUrl, repoRootUrl
+    if repo:match("^https?://") then
+        local clean = repo:gsub("/+$", "")
+        if clean:sub(-#SUBDIR) == SUBDIR then
+            baseUrl = clean .. "/"
+            repoRootUrl = clean:sub(1, -(#SUBDIR + 1)):gsub("/+$", "") .. "/"
+        else
+            baseUrl = clean .. "/" .. SUBDIR .. "/"
+            repoRootUrl = clean .. "/"
+        end
+    else
+        baseUrl = string.format("https://raw.githubusercontent.com/%s/%s/%s/", repo, branch, SUBDIR)
+        repoRootUrl = string.format("https://raw.githubusercontent.com/%s/%s/", repo, branch)
+    end
 
     filesystem.makeDirectory(INSTALL_DIR)
     filesystem.makeDirectory(filesystem.concat(INSTALL_DIR, "lib"))
+    filesystem.makeDirectory("/usr/lib")
     filesystem.makeDirectory("/usr/bin")
     local cfgState = syncSettingsBackup()
     local staged = {}
+    do
+        local commonBody, err
+        if localDir then
+            for _, cp in ipairs({
+                origLocalDir and filesystem.concat(origLocalDir, "common/gtnh_common.lua") or nil,
+                filesystem.concat(filesystem.path(localDir), "common/gtnh_common.lua"),
+                filesystem.concat(localDir, "common/gtnh_common.lua"),
+            }) do
+                if cp then
+                    local b = readWholeFile(cp)
+                    if b then commonBody = b; break end
+                end
+            end
+            if not commonBody then err = "missing common/gtnh_common.lua" end
+        elseif useMesh then
+            commonBody, err = fetchViaMesh(repoRootUrl .. "common/gtnh_common.lua", meshTarget)
+        else
+            commonBody, err = fetchUrl(internet, repoRootUrl .. "common/gtnh_common.lua")
+        end
+        if not commonBody or not load(commonBody, "@common/gtnh_common.lua", "t") then
+            io.stderr:write("ERROR: QFT install failed at common/gtnh_common.lua: " .. tostring(err or "syntax") .. "\n")
+            return false, err or "syntax"
+        end
+        local dst = "/usr/lib/gtnh_common.lua"
+        local tmp = dst .. ".tmp"
+        writeWholeFile(tmp, commonBody)
+        staged[#staged + 1] = { dst = dst, tmp = tmp }
+    end
     for _, rel in ipairs(FILES) do
         local body, err
         if localDir then

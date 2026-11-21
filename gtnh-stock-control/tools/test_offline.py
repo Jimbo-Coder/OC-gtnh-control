@@ -240,7 +240,7 @@ function loadfile(path, mode, env)
     return load(src, "=" .. tostring(path), mode or "t", env or _G)
 end
 
-package = {{ path = rootDir .. "/?.lua", loaded = {{ io = io }}, preload = {{}} }}
+package = {{ path = rootDir .. "/?.lua;/usr/lib/?.lua;{STOCK_ROOT.parent}/common/?.lua", loaded = {{ io = io }}, preload = {{}} }}
 function require(name)
     if package.loaded[name] ~= nil then return package.loaded[name] end
     local rel = name:gsub("%.", "/")
@@ -1280,7 +1280,7 @@ return true
     evLib.pull, compLib.shutdown = origPull, origShutdown
     rawset(_G, "__STOCK_UPD_ORDER", nil)
     assertEq(updOrder[1], "STOCK_REPLY:req-upd-1", "STOCK_REPLY sent BEFORE install & shutdown")
-    assertEq(updOrder[2], "STOCK_INSTALL:--url|http://127.0.0.1:8765/oc-raw|--update|--yes", "Installer invoked with target bridge URL")
+    assertEq(updOrder[2], "STOCK_INSTALL:--update|--yes|--no-prompt|--url|http://127.0.0.1:8765/oc-raw", "Installer invoked with target bridge URL")
     assertEq(updOrder[3], "SHUTDOWN:true", "computer.shutdown(true) fired after clean install")
 end
 
@@ -1520,6 +1520,7 @@ return "OK"
                         "/home/stock/lib/hardware.lua",
                         "/home/stock/lib/scheduler.lua",
                         "/home/stock/lib/ui.lua",
+                        "/usr/lib/gtnh_common.lua",
                         "/usr/bin/stock.lua",
                     }) do
                         assert(__py_exists(p), "Missing installed file: " .. p)
@@ -1549,8 +1550,8 @@ return "OK"
                             if mType == "MESH_HTTP_GET" then
                                 local req = ser.unserialize(rawPayload)
                                 meshGets[#meshGets + 1] = req
-                                local rel = req.url:match("/oc%-raw/gtnh%-stock%-control/(.+)$")
-                                local src = rel and __py_read_file(__STOCK_ROOT .. "/" .. rel) or nil
+                                local rel = req.url:match("/oc%-raw/(.+)$")
+                                local src = rel and __py_read_file(__MONOREPO_ROOT .. "/" .. rel) or nil
                                 if not src then
                                     meshQueue[#meshQueue + 1] = { "modem_message", "mod-m", "ae2-r", 4205, 5, "MESH_HTTP_ERR", ser.serialize({ id = req.id, error = "404" }) }
                                 else

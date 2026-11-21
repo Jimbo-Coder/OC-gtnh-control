@@ -57,11 +57,15 @@ local SHRC_PATH = "/home/.shrc"
 
 do
     local prevPath = package.path
-    package.path = string.format("%s/?.lua;%s/?/init.lua;%s", scriptDir, scriptDir, prevPath)
-    for _, m in ipairs({ "lib.recipes_db", "lib.hardware", "lib.scheduler", "lib.ui" }) do
+    local commonPat = "/usr/lib/?.lua"
+    local localCommonPat = filesystem.concat(scriptDir, "../common/?.lua")
+    package.path = string.format("%s/?.lua;%s/?/init.lua;%s;%s;%s", scriptDir, scriptDir, commonPat, localCommonPat, prevPath)
+    for _, m in ipairs({ "gtnh_common", "lib.recipes_db", "lib.hardware", "lib.scheduler", "lib.ui" }) do
         package.loaded[m] = nil
     end
 end
+
+local Common = require("gtnh_common")
 
 local Hardware = require("lib.hardware")
 local Scheduler = require("lib.scheduler")
@@ -107,67 +111,21 @@ local function saveConfig(cfg)
     return false
 end
 
-local function wdNow()
-    if computer and computer.uptime then return computer.uptime() end
-    return os.clock and os.clock() or 0
-end
+local isQftShrcLine = Common.makeShrcMatcher({
+    "qft", "/usr/bin/qft", "/usr/bin/qft.lua", "/home/qft/main.lua",
+})
 
 local function armShellReviveWatchdog(cfg)
-    local okEv, evLib = pcall(require, "event")
-    if not okEv or type(evLib) ~= "table" or type(evLib.listen) ~= "function" then
-        return false
-    end
-    local now = wdNow()
-    local wd = rawget(_G, "__gtnhReviveWd")
-    if type(wd) ~= "table" then
-        wd = { armed = false, exitAt = now, lastKeyAt = now, hooked = false }
-        rawset(_G, "__gtnhReviveWd", wd)
-    end
-    wd.exitAt = now
-    wd.lastKeyAt = now
-    wd.meshPort = tonumber(cfg and cfg.meshPort) or 4205
-    wd.armed = true
-    if not wd.hooked then
-        wd.hooked = true
-        evLib.listen("key_down", function()
-            wd.lastKeyAt = wdNow()
-        end)
-        evLib.listen("modem_message", function(_, _, _, port, _, msgType)
-            if not wd.armed then return end
-            if msgType ~= "GTNH_WAKE" then return end
-            if port ~= wd.meshPort and port ~= 0 then return end
-            local sh = readWholeFile(SHRC_PATH) or ""
-            local autostartOn = false
-            for line in sh:gmatch("[^\r\n]+") do
-                if not line:match("^%s*#") and (line:find("qft", 1, true) ~= nil) then
-                    local cmd = line:match("^%s*(%S+)") or ""
-                    if cmd == "qft" or cmd == "/usr/bin/qft" or cmd == "/usr/bin/qft.lua" or cmd == "/home/qft/main.lua" then
-                        autostartOn = true
-                        break
-                    end
-                end
-            end
-            if not autostartOn then return end
-            local holdExists = (filesystem and filesystem.exists and filesystem.exists("/tmp/gtnh_hold")) == true
-            if not holdExists and io and io.open then
-                local f = io.open("/tmp/gtnh_hold", "r")
-                if f then f:close(); holdExists = true end
-            end
-            if holdExists then return end
-            local cur = wdNow()
-            if (cur - (wd.exitAt or cur)) < 30 or (cur - (wd.lastKeyAt or cur)) < 30 then
-                return
-            end
-            wd.armed = false
-            if computer and computer.shutdown then pcall(computer.shutdown, true) end
-        end)
-    end
-    return true
+    return Common.armShellReviveWatchdog({
+        isAutostartFn = isQftShrcLine,
+        shrcPath = SHRC_PATH,
+        meshPort = tonumber(cfg and cfg.meshPort) or Common.MESH_PORT,
+        wakeMsg = Common.WAKE_MSG,
+    })
 end
 
 local function disarmShellReviveWatchdog()
-    local wd = rawget(_G, "__gtnhReviveWd")
-    if type(wd) == "table" then wd.armed = false end
+    Common.disarmShellReviveWatchdog()
 end
 
 local function handlePendingRebootOrUpdate(state)
@@ -181,10 +139,8 @@ local function handlePendingRebootOrUpdate(state)
             state._pendingReboot = nil
             return false
         end
-        local hasInet = (component.isAvailable and component.isAvailable("internet"))
-            or (component.list and component.list("internet", true)() ~= nil)
-        local updArgs = { "--url", state._pendingUpdateUrl, "--update", "--yes" }
-        if not hasInet then updArgs[#updArgs + 1] = "--mesh-relay" end
+        local tx = Common.detectOtaTransport(component)
+        local updArgs = Common.buildInstallerArgs(state._pendingUpdateUrl, { viaMesh = tx.viaMesh })
         local okCall, instRes, instErr = pcall(chunk, table.unpack(updArgs))
         state._pendingUpdateUrl = nil
         if (not okCall) or instRes == false then
@@ -199,14 +155,6 @@ local function handlePendingRebootOrUpdate(state)
         return true
     end
     return false
-end
-
-local function isQftShrcLine(line)
-    if line:match("^%s*#") then return false end
-    return line:find("/home/qft/main.lua", 1, true) ~= nil
-        or line:find("/usr/bin/qft", 1, true) ~= nil
-        or line:match("^%s*qft%s*$") ~= nil
-        or line:match("^%s*qft%s+") ~= nil
 end
 
 local function isAutostartEnabled()
@@ -328,6 +276,8 @@ local function runGUI()
                 local dirty = false
                 if evName == "interrupted" or state._pendingReboot then
                     userExit = true; ui.running = false; break
+                elseif evName == "screen_resized" then
+                    if ui and ui.syncDisplay and ui:syncDisplay(true) then dirty = true end
                 elseif evName == "modem_message" then
                     if Hardware.handleMeshMessage(cfg, state, evTbl[2], evTbl[3], evTbl[4], evTbl[6], evTbl[7], evTbl[8], nil, rpcCall) then
                         dirty = true
