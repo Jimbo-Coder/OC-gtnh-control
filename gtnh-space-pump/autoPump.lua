@@ -478,8 +478,10 @@ local function handleMeshMessage(localAddr, sender, port, msgType, reqId, rawPay
       elseif act == 'update_local' then
         local hasInet = (component.isAvailable and component.isAvailable('internet'))
           or (component.list and component.list('internet', true)() ~= nil)
-        if not hasInet then
-          replyCmd({ ok = false, error = 'No Internet Card on Space Pump OC' })
+        local hasMesh = (component.isAvailable and (component.isAvailable('modem') or component.isAvailable('tunnel')))
+          or (component.list and (component.list('modem', true)() ~= nil or component.list('tunnel', true)() ~= nil))
+        if not hasInet and not hasMesh then
+          replyCmd({ ok = false, error = 'No Internet Card or OC Mesh modem/tunnel' })
           return true
         end
         local u = (type(cmd.url) == 'string' and cmd.url ~= '') and cmd.url or 'http://127.0.0.1:8765/oc-raw'
@@ -491,7 +493,7 @@ local function handleMeshMessage(localAddr, sender, port, msgType, reqId, rawPay
         rebootRequested = true
         wakeRequested = true
         logMsg('Remote update requested via OC mesh')
-        replyCmd({ ok = true, updating = true, url = u })
+        replyCmd({ ok = true, updating = true, viaMesh = (not hasInet), url = u })
         return true
       elseif act == 'reboot' then
         rebootRequested = true
@@ -507,8 +509,10 @@ local function handleMeshMessage(localAddr, sender, port, msgType, reqId, rawPay
     elseif op == 'update_local' then
       local hasInet = (component.isAvailable and component.isAvailable('internet'))
         or (component.list and component.list('internet', true)() ~= nil)
-      if not hasInet then
-        replyCmd({ ok = false, error = 'No Internet Card on Space Pump OC' })
+      local hasMesh = (component.isAvailable and (component.isAvailable('modem') or component.isAvailable('tunnel')))
+        or (component.list and (component.list('modem', true)() ~= nil or component.list('tunnel', true)() ~= nil))
+      if not hasInet and not hasMesh then
+        replyCmd({ ok = false, error = 'No Internet Card or OC Mesh modem/tunnel' })
         return true
       end
       local u = (type(cmd.url) == 'string' and cmd.url ~= '') and cmd.url or 'http://127.0.0.1:8765/oc-raw'
@@ -520,7 +524,7 @@ local function handleMeshMessage(localAddr, sender, port, msgType, reqId, rawPay
       rebootRequested = true
       wakeRequested = true
       logMsg('Remote update requested via OC mesh')
-      replyCmd({ ok = true, updating = true, url = u })
+      replyCmd({ ok = true, updating = true, viaMesh = (not hasInet), url = u })
     elseif op == 'reboot' then
       rebootRequested = true
       wakeRequested = true
@@ -837,7 +841,17 @@ local main = thread.create(function()
           end
         end
         if chunk then
-          local okU, okInst = pcall(chunk, '--url', updUrl, '--update', '--yes')
+          local hasInet = (component.isAvailable and component.isAvailable('internet'))
+            or (component.list and component.list('internet', true)() ~= nil)
+          local updArgs = { '--url', updUrl, '--update', '--yes' }
+          if not hasInet then
+            updArgs[#updArgs + 1] = '--mesh-relay'
+            if mainnetAddr and not mainnetViaTunnel then
+              updArgs[#updArgs + 1] = '--mesh-target'
+              updArgs[#updArgs + 1] = tostring(mainnetAddr)
+            end
+          end
+          local okU, okInst = pcall(chunk, table.unpack(updArgs))
           if okU and okInst ~= false then
             os.sleep(0.15)
             if computer.shutdown then pcall(computer.shutdown, true) end
@@ -868,6 +882,74 @@ local main = thread.create(function()
   end
 end)
 
+local function wdNow()
+  if computer and computer.uptime then return computer.uptime() end
+  return os.clock and os.clock() or 0
+end
+
+local function isPumpShrcLine(line)
+  if line:match('^%s*#') then return false end
+  local t = line:match('^%s*(.-)%s*$') or ''
+  if t == '' then return false end
+  local cmd = t:match('^(%S+)') or ''
+  return cmd == 'pump' or cmd == '/usr/bin/pump' or cmd == '/usr/bin/pump.lua' or cmd == '/home/autoPump.lua' or cmd == 'autoPump.lua'
+end
+
+local function armShellReviveWatchdog()
+  if not (event and type(event.listen) == 'function') then return false end
+  local now = wdNow()
+  local wd = rawget(_G, '__gtnhReviveWd')
+  if type(wd) ~= 'table' then
+    wd = { armed = false, exitAt = now, lastKeyAt = now, hooked = false }
+    rawset(_G, '__gtnhReviveWd', wd)
+  end
+  wd.exitAt = now
+  wd.lastKeyAt = now
+  wd.meshPort = MESH_PORT
+  wd.armed = true
+  if not wd.hooked then
+    wd.hooked = true
+    event.listen('key_down', function()
+      wd.lastKeyAt = wdNow()
+    end)
+    event.listen('modem_message', function(_, _, _, port, _, msgType)
+      if not wd.armed then return end
+      if msgType ~= 'GTNH_WAKE' then return end
+      if port ~= wd.meshPort and port ~= 0 then return end
+      local autostartOn = false
+      if io and io.open then
+        local f = io.open('/home/.shrc', 'r')
+        if f then
+          local raw = f:read('*a') or ''
+          f:close()
+          for line in raw:gmatch('[^\r\n]+') do
+            if isPumpShrcLine(line) then autostartOn = true; break end
+          end
+        end
+      end
+      if not autostartOn then return end
+      local holdExists = (filesystem and filesystem.exists and filesystem.exists('/tmp/gtnh_hold')) == true
+      if not holdExists and io and io.open then
+        local f = io.open('/tmp/gtnh_hold', 'r')
+        if f then f:close(); holdExists = true end
+      end
+      if holdExists then return end
+      local cur = wdNow()
+      if (cur - (wd.exitAt or cur)) < 30 or (cur - (wd.lastKeyAt or cur)) < 30 then
+        return
+      end
+      wd.armed = false
+      if computer and computer.shutdown then pcall(computer.shutdown, true) end
+    end)
+  end
+  return true
+end
+
+do
+  local wd = rawget(_G, '__gtnhReviveWd')
+  if type(wd) == 'table' then wd.armed = false end
+end
+
 local cleanUp = thread.create(function()
     event.pull('interrupted')
     if meshListenerId and event and event.ignore then
@@ -881,8 +963,10 @@ local cleanUp = thread.create(function()
     end
     main.kill()
     keyHandler.kill()
+    armShellReviveWatchdog()
     os.exit(0)
 end)
 
 thread.waitForAny({main, keyHandler, cleanUp})
+armShellReviveWatchdog()
 os.exit(0)

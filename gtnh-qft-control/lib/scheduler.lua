@@ -1144,12 +1144,16 @@ function Scheduler.executeRpcTable(cfg, state, cmd, compLib, onMutate)
         elseif act == "update_local" then
             local cl = compLib or rawget(_G, "component")
             local hasInet = cl and ((cl.isAvailable and cl.isAvailable("internet")) or (cl.list and cl.list("internet", true)() ~= nil))
-            if not hasInet then return { id = id, ok = false, error = "No Internet Card on QFT OC" } end
+            local hasMesh = cl and ((cl.isAvailable and (cl.isAvailable("modem") or cl.isAvailable("tunnel")))
+                or (cl.list and (cl.list("modem", true)() ~= nil or cl.list("tunnel", true)() ~= nil)))
+            if not hasInet and not hasMesh then
+                return { id = id, ok = false, error = "No Internet Card or OC Mesh modem/tunnel" }
+            end
             local url = (type(cmd.url) == "string" and cmd.url ~= "") and cmd.url or "http://127.0.0.1:8765/oc-raw"
             if not url:match("^https?://[%w%.%-_:]+") then return { id = id, ok = false, error = "Invalid update URL" } end
             state._pendingUpdateUrl = url
             state._pendingReboot = true
-            return { id = id, ok = true, updating = true, url = url }
+            return { id = id, ok = true, updating = true, viaMesh = (not hasInet), url = url }
         elseif act == "reboot" then
             state._pendingReboot = true
             return { id = id, ok = true, rebooting = true }

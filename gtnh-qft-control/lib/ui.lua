@@ -100,6 +100,9 @@ function UI.new(cfg, state, onSave, compLib, extras)
         tierFilter = 0,
         selectedRecipeId = (cfg.units[1] and cfg.units[1].recipeId) or RecipesDb.RECIPES[1].id,
         pickingCatalyst = false,
+        recipeSearch = "",
+        searchPromptActive = false,
+        searchPromptBuffer = "",
         recipeScroll = 0,
         hwScroll = 0,
         inputDrafts = {},
@@ -448,10 +451,42 @@ function UI:renderRecipesTab()
                 self.recipeScroll = 0
             end) + 1
     end
+    local rq = tostring(self.recipeSearch or "")
+    local sx = fx + 1
+    sx = self:drawButton(sx, 7, "[/: " .. padOrTrunc(rq ~= "" and rq or "Search", 16) .. "]",
+        (rq ~= "") and COLORS.cyan or COLORS.fg, COLORS.btnBg, function()
+            self.searchPromptActive = true
+            self.searchPromptBuffer = rq
+        end) + 1
+    if rq ~= "" then
+        self:drawButton(sx, 7, "[x]", COLORS.yellow, COLORS.btnBg, function()
+            self.recipeSearch = ""
+            self.recipeScroll = 0
+        end)
+    end
+    local qTerms = {}
+    for tok in string.lower(rq):gmatch("%S+") do qTerms[#qTerms + 1] = tok end
     local filtered = {}
     for _, r in ipairs(RecipesDb.RECIPES) do
         if self.tierFilter == 0 or r.tier == self.tierFilter then
-            filtered[#filtered + 1] = r
+            local okQ = true
+            if #qTerms > 0 then
+                local parts = {
+                    tostring(r.name or ""),
+                    tostring(r.id or ""),
+                    "t" .. tostring(r.tier or ""),
+                    tostring(r.catalyst and r.catalyst.label or ""),
+                }
+                for _, ii in ipairs(r.itemsIn or {}) do parts[#parts + 1] = tostring(ii.label or ii.name or "") end
+                for _, fi in ipairs(r.fluidsIn or {}) do parts[#parts + 1] = tostring(fi.label or fi.name or "") end
+                for _, io in ipairs(r.itemsOut or {}) do parts[#parts + 1] = tostring(io.label or io.name or "") end
+                for _, fo in ipairs(r.fluidsOut or {}) do parts[#parts + 1] = tostring(fo.label or fo.name or "") end
+                local hay = string.lower(table.concat(parts, " "))
+                for _, tok in ipairs(qTerms) do
+                    if not hay:find(tok, 1, true) then okQ = false; break end
+                end
+            end
+            if okQ then filtered[#filtered + 1] = r end
         end
     end
     local maxShow = 18
@@ -709,6 +744,35 @@ function UI:renderSetupTab()
     end
 end
 
+function UI:renderSearchPrompt()
+    if not self.searchPromptActive then return end
+    self.hitboxes = {}
+    local mx, my, mw, mh = 34, 17, 92, 11
+    self:drawFrame(mx, my, mw, mh, COLORS.cyan, COLORS.headerBg, "double")
+    self:fillRect(mx + 1, my + 1, mw - 2, mh - 2, " ", COLORS.headerBg)
+    self:drawText(mx + 3, my + 1, "SEARCH QFT RECIPES", COLORS.cyan, COLORS.headerBg)
+    self:drawText(mx + 3, my + 3, "Query (recipe name, tier, catalyst, input, or output):", COLORS.muted, COLORS.headerBg)
+    self:fillRect(mx + 3, my + 5, mw - 6, 1, " ", COLORS.fg, COLORS.bg)
+    self:drawText(mx + 4, my + 5, padOrTrunc(tostring(self.searchPromptBuffer or "") .. "_", mw - 8), COLORS.fg, COLORS.bg)
+    local bx = mx + 3
+    bx = self:drawButton(bx, my + 8, "[ Apply (Enter) ]", COLORS.fg, COLORS.darkGreen, function()
+        self.recipeSearch = tostring(self.searchPromptBuffer or "")
+        self.searchPromptActive = false
+        self.recipeScroll = 0
+        self.statusMsg = (self.recipeSearch ~= "") and ("Recipe filter: " .. self.recipeSearch) or "Cleared recipe filter."
+    end) + 2
+    bx = self:drawButton(bx, my + 8, "[ Clear ]", COLORS.yellow, COLORS.btnBg, function()
+        self.recipeSearch = ""
+        self.searchPromptBuffer = ""
+        self.searchPromptActive = false
+        self.recipeScroll = 0
+        self.statusMsg = "Cleared recipe filter."
+    end) + 2
+    self:drawButton(bx, my + 8, "[ Cancel (Esc) ]", COLORS.muted, COLORS.btnBg, function()
+        self.searchPromptActive = false
+    end)
+end
+
 function UI:render()
     self.hitboxes = {}
     self:clearNextBuffer(COLORS.bg, COLORS.fg)
@@ -718,8 +782,11 @@ function UI:render()
     elseif self.tab == TAB_HW then self:renderHardwareTab()
     elseif self.tab == TAB_SETUP then self:renderSetupTab() end
     self:drawText(1, self.h - 1, string.rep("─", self.w), COLORS.border, COLORS.bg)
-    self:drawText(2, self.h, padOrTrunc(self.statusMsg or "", self.w - 50), COLORS.fg, COLORS.bg)
-    self:drawText(self.w - 46, self.h, "Keys: 1-4 Tabs | Space Arm | R Poll | Q Quit", COLORS.muted, COLORS.bg)
+    local keysStr = "Keys: 1-4 Tabs | / Search | Space Arm | R Poll | Q Quit"
+    local keysX = math.max(2, self.w - unicode.wlen(keysStr))
+    self:drawText(2, self.h, padOrTrunc(self.statusMsg or "", math.max(0, keysX - 4)), COLORS.fg, COLORS.bg)
+    self:drawText(keysX, self.h, keysStr, COLORS.muted, COLORS.bg)
+    self:renderSearchPrompt()
     self:flush()
 end
 
@@ -745,8 +812,32 @@ function UI:handleScroll(dir)
     end
 end
 
-function UI:handleKeyDown(char)
-    if char == 113 or char == 81 then self.running = false
+function UI:handleKeyDown(char, code)
+    if self.searchPromptActive then
+        if code == 1 or char == 27 then
+            self.searchPromptActive = false
+        elseif code == 28 or char == 13 or char == 10 then
+            self.recipeSearch = tostring(self.searchPromptBuffer or "")
+            self.searchPromptActive = false
+            self.recipeScroll = 0
+            self.statusMsg = (self.recipeSearch ~= "") and ("Recipe filter: " .. self.recipeSearch) or "Cleared recipe filter."
+        elseif code == 14 or char == 8 or char == 127 then
+            local len = #(self.searchPromptBuffer or "")
+            if len > 0 then
+                self.searchPromptBuffer = self.searchPromptBuffer:sub(1, len - 1)
+            end
+        elseif type(char) == "number" and char >= 32 and char <= 126 then
+            if #(self.searchPromptBuffer or "") < 40 then
+                self.searchPromptBuffer = (self.searchPromptBuffer or "") .. string.char(char)
+            end
+        end
+        self:render()
+        return
+    end
+    if char == 47 and self.tab == TAB_RECIPES then
+        self.searchPromptActive = true
+        self.searchPromptBuffer = tostring(self.recipeSearch or "")
+    elseif char == 113 or char == 81 then self.running = false
     elseif char >= 49 and char <= 52 then self.tab = char - 48
     elseif char == 32 then
         self.cfg.armed = not (self.cfg.armed == true)

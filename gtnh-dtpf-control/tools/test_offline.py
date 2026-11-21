@@ -5294,6 +5294,36 @@ do
     assertEq(pOff.target, "local", "T24b push_recipe_inputs falls back to local when Stock offline")
     assertEq(env.maintEnabled, true, "T24b local fallback auto-enables maintEnabled")
 
+    -- T24c: DTPF update_local mesh relay fallback + maintModalSearch ('/' key)
+    component._reset()
+    local uNoNet = wb24:executeRpcTable({ id = "u-none", op = "update_local", url = "http://127.0.0.1:8765/oc-raw" })
+    assertEq(uNoNet.ok, false, "T24c update_local rejects missing Internet Card and missing Mesh Modem")
+    component._register("mod-u24", "modem", {
+        isWireless = function() return true end,
+        open = function() return true end,
+        setStrength = function() return 400 end,
+        getWakeMessage = function() return "GTNH_WAKE", true end,
+        setWakeMessage = function() return "GTNH_WAKE" end,
+        send = function() return true end,
+        broadcast = function() return true end,
+    })
+    local uMesh = wb24:executeRpcTable({ id = "u-mesh", op = "update_local", url = "http://127.0.0.1:8765/oc-raw" })
+    assertEq(uMesh.ok, true, "T24c update_local allows Mesh relay when modem is present")
+    assertEq(uMesh.viaMesh, true, "T24c update_local marks viaMesh=true without Internet Card")
+
+    component.gpu = component._newMockGPU(160, 50)
+    local ui24 = UI.new(env, st24, function() end)
+    ui24.maintModalActive = true
+    ui24:render()
+    ui24:handleKeyDown(47, 53) -- '/' opens Maintainer Search prompt
+    assertEq(ui24.promptActive, true, "T24c '/' inside maintModal opens prompt")
+    for _, ch in ipairs({ string.byte("p"), string.byte("h"), string.byte("o"), string.byte("t"), string.byte("o"), string.byte("n") }) do
+        ui24:handleKeyDown(ch, 0)
+    end
+    ui24:handleKeyDown(13, 28)
+    assertEq(ui24.maintModalSearch, "photon", "T24c Maintainer modal search set to 'photon'")
+    ui24:render()
+
     component.gpu = nil
     Hardware.resetClusterState()
     component._reset()

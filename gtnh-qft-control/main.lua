@@ -107,6 +107,69 @@ local function saveConfig(cfg)
     return false
 end
 
+local function wdNow()
+    if computer and computer.uptime then return computer.uptime() end
+    return os.clock and os.clock() or 0
+end
+
+local function armShellReviveWatchdog(cfg)
+    local okEv, evLib = pcall(require, "event")
+    if not okEv or type(evLib) ~= "table" or type(evLib.listen) ~= "function" then
+        return false
+    end
+    local now = wdNow()
+    local wd = rawget(_G, "__gtnhReviveWd")
+    if type(wd) ~= "table" then
+        wd = { armed = false, exitAt = now, lastKeyAt = now, hooked = false }
+        rawset(_G, "__gtnhReviveWd", wd)
+    end
+    wd.exitAt = now
+    wd.lastKeyAt = now
+    wd.meshPort = tonumber(cfg and cfg.meshPort) or 4205
+    wd.armed = true
+    if not wd.hooked then
+        wd.hooked = true
+        evLib.listen("key_down", function()
+            wd.lastKeyAt = wdNow()
+        end)
+        evLib.listen("modem_message", function(_, _, _, port, _, msgType)
+            if not wd.armed then return end
+            if msgType ~= "GTNH_WAKE" then return end
+            if port ~= wd.meshPort and port ~= 0 then return end
+            local sh = readWholeFile(SHRC_PATH) or ""
+            local autostartOn = false
+            for line in sh:gmatch("[^\r\n]+") do
+                if not line:match("^%s*#") and (line:find("qft", 1, true) ~= nil) then
+                    local cmd = line:match("^%s*(%S+)") or ""
+                    if cmd == "qft" or cmd == "/usr/bin/qft" or cmd == "/usr/bin/qft.lua" or cmd == "/home/qft/main.lua" then
+                        autostartOn = true
+                        break
+                    end
+                end
+            end
+            if not autostartOn then return end
+            local holdExists = (filesystem and filesystem.exists and filesystem.exists("/tmp/gtnh_hold")) == true
+            if not holdExists and io and io.open then
+                local f = io.open("/tmp/gtnh_hold", "r")
+                if f then f:close(); holdExists = true end
+            end
+            if holdExists then return end
+            local cur = wdNow()
+            if (cur - (wd.exitAt or cur)) < 30 or (cur - (wd.lastKeyAt or cur)) < 30 then
+                return
+            end
+            wd.armed = false
+            if computer and computer.shutdown then pcall(computer.shutdown, true) end
+        end)
+    end
+    return true
+end
+
+local function disarmShellReviveWatchdog()
+    local wd = rawget(_G, "__gtnhReviveWd")
+    if type(wd) == "table" then wd.armed = false end
+end
+
 local function handlePendingRebootOrUpdate(state)
     if not state or (not state._pendingReboot and not state._pendingUpdateUrl) then return false end
     if state._pendingUpdateUrl then
@@ -118,7 +181,11 @@ local function handlePendingRebootOrUpdate(state)
             state._pendingReboot = nil
             return false
         end
-        local okCall, instRes, instErr = pcall(chunk, "--url", state._pendingUpdateUrl, "--update", "--yes")
+        local hasInet = (component.isAvailable and component.isAvailable("internet"))
+            or (component.list and component.list("internet", true)() ~= nil)
+        local updArgs = { "--url", state._pendingUpdateUrl, "--update", "--yes" }
+        if not hasInet then updArgs[#updArgs + 1] = "--mesh-relay" end
+        local okCall, instRes, instErr = pcall(chunk, table.unpack(updArgs))
         state._pendingUpdateUrl = nil
         if (not okCall) or instRes == false then
             io.stderr:write("Remote QFT update failed: " .. tostring(okCall and instErr or instRes) .. "\n")
@@ -180,6 +247,7 @@ end
 
 local function runWorker()
     while true do
+        disarmShellReviveWatchdog()
         local cfg = loadConfig()
         local state = Scheduler.newState()
         local disc = Scheduler.syncHardware(cfg, state)
@@ -216,14 +284,21 @@ local function runWorker()
             if handlePendingRebootOrUpdate(state) then return end
             userExit = false; okLoop = false; errLoop = "remote update aborted"
         end
-        if userExit then print("QFT Control worker stopped cleanly."); return
+        if userExit then
+            print("QFT Control worker stopped cleanly.")
+            armShellReviveWatchdog(cfg)
+            return
         elseif not okLoop then io.stderr:write("QFT worker fault: " .. tostring(errLoop) .. "\n"); os.sleep(2)
-        else return end
+        else
+            armShellReviveWatchdog(cfg)
+            return
+        end
     end
 end
 
 local function runGUI()
     while true do
+        disarmShellReviveWatchdog()
         local cfg = loadConfig()
         local state = Scheduler.newState()
         local disc = Scheduler.syncHardware(cfg, state)
@@ -262,7 +337,7 @@ local function runGUI()
                 elseif evName == "scroll" then
                     ui:handleScroll(tonumber(evTbl[5]) or 0)
                 elseif evName == "key_down" then
-                    ui:handleKeyDown(tonumber(evTbl[3]) or 0)
+                    ui:handleKeyDown(tonumber(evTbl[3]) or 0, tonumber(evTbl[4]) or 0)
                 end
                 if ui.running and computer.uptime() >= nextPoll then
                     Scheduler.step(cfg, state, computer.uptime())
@@ -281,7 +356,10 @@ local function runGUI()
             if handlePendingRebootOrUpdate(state) then return end
             userExit = false; okLoop = false; errLoop = "remote update aborted"
         end
-        if userExit or okLoop then print("GTNH QFT Control stopped cleanly."); return
+        if userExit or okLoop then
+            print("GTNH QFT Control stopped cleanly.")
+            armShellReviveWatchdog(cfg)
+            return
         else io.stderr:write("GTNH QFT Control fault: " .. tostring(errLoop) .. "\n"); os.sleep(2) end
     end
 end

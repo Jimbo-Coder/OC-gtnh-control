@@ -609,10 +609,35 @@ for _, row in pairs(screenRows) do hwDump = hwDump .. row .. "\n" end
 assert(hwDump:find("Duplicate ME Input Bus", 1, true), "Tab 3 renders duplicate bus diagnostic clearly")
 assert(hwDump:find("[Ctrl:", 1, true) and hwDump:find("[Bus:", 1, true) and hwDump:find("[Hatch:", 1, true), "Tab 3 renders interactive Ctrl/Bus/Hatch cycle buttons")
 
--- TEST 5: Deferred reboot & update_local guard
+-- TEST 5: Deferred reboot, update_local mesh fallback, & Tab 2 recipeSearch
 local noInet = { list = function() return function() return nil end end, isAvailable = function() return false end }
 local uFail = Scheduler.executeRpcTable(cfg, st, { id = "u0", op = "qft_action", action = "update_local", url = "http://127.0.0.1:8765/oc-raw" }, noInet)
-assertEq(uFail.ok, false, "update_local rejects missing Internet Card")
+assertEq(uFail.ok, false, "update_local rejects missing Internet Card and missing Mesh Modem")
+local meshOnlyQ = {
+    isAvailable = function(k) return k == "modem" end,
+    list = function(k) local d = false; return function() if k == "modem" and not d then d = true; return "mq1" end return nil end end,
+}
+local uMesh = Scheduler.executeRpcTable(cfg, st, { id = "u1", op = "qft_action", action = "update_local", url = "http://127.0.0.1:8765/oc-raw" }, meshOnlyQ)
+assertEq(uMesh.ok, true, "update_local succeeds via Mesh when modem is present")
+assertEq(uMesh.viaMesh, true, "update_local marks viaMesh=true without Internet Card")
+
+dUi.tab = 2
+dUi:render()
+dUi:handleKeyDown(47, 53) -- '/' opens search modal on Tab 2
+assertEq(dUi.searchPromptActive, true, "'/' on QFT Tab 2 opens searchPromptActive")
+for _, c in ipairs({ string.byte("r"), string.byte("a"), string.byte("d"), string.byte("o"), string.byte("x") }) do
+    dUi:handleKeyDown(c, 0)
+end
+dUi:handleKeyDown(13, 28) -- Enter applies filter
+assertEq(dUi.searchPromptActive, false, "Enter closes QFT searchPromptActive")
+assertEq(dUi.recipeSearch, "radox", "QFT recipeSearch updated to radox")
+screenRows = {}
+for k = 1, #dUi.curBuf do dUi.curBuf[k] = -1 end
+dUi:render()
+local recDump = ""
+for _, row in pairs(screenRows) do recDump = recDump .. row .. "\n" end
+assert(recDump:find("Xenoxene", 1, true), "QFT recipeSearch filtered to matching Xenoxene / Radox recipe")
+assert(screenRows[50] and screenRows[50]:find("Q Quit", 1, true), "QFT footer unclipped on row 50")
 
 return "OK"
 """

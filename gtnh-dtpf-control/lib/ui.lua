@@ -463,6 +463,7 @@ function UI.new(cfg, runtimeState, onSaveCallback)
         logStageFilter = "ALL",
         maintModalActive = false,
         maintModalScroll = 0,
+        maintModalSearch = "",
         maintFilterActive = true,
         hitboxes = {},
         running = true,
@@ -5523,6 +5524,24 @@ function UI:renderMaintModal()
         mModeLbl, mSt.activeCount or 0, mSt.lowCount or 0, mSt.craftingCount or 0, mSt.freeCpus or 0, mSt.totalCpus or 0, freeRes, peerInfo)
     self:drawText(mx + 2, my + 2, padOrTrunc(sub, mw - 4), (mSt.overlapCount or 0) > 0 and COLORS.yellow or COLORS.muted, COLORS.headerBg)
 
+    local mq = tostring(self.maintModalSearch or "")
+    local sx = mx + 2
+    sx = self:drawButton(sx, my + 3, "[/: " .. padOrTrunc(mq ~= "" and mq or "Search rules...", 28) .. "]",
+        (mq ~= "") and COLORS.cyan or COLORS.fg, COLORS.btnBg, function()
+            self:openPrompt("Search Level Maintainer Rules (name, mode, status):", mq,
+                "Type query & press [Enter] / [APPLY], or blank to clear.", function(txt)
+                    self.maintModalSearch = tostring(txt or "")
+                    self.maintModalScroll = 0
+                    self:setStatus((self.maintModalSearch ~= "") and ("Maintainer filter: " .. self.maintModalSearch) or "Cleared Maintainer search.")
+                end)
+        end) + 1
+    if mq ~= "" then
+        self:drawButton(sx, my + 3, "[Clr]", COLORS.yellow, COLORS.btnBg, function()
+            self.maintModalSearch = ""
+            self.maintModalScroll = 0
+        end)
+    end
+
     local hdrY = my + 4
     self:fillRect(mx + 1, hdrY, mw - 2, 1, " ", COLORS.panelBg)
     self:drawText(mx + 2, hdrY, "MODE", COLORS.muted, COLORS.panelBg)
@@ -5540,6 +5559,8 @@ function UI:renderMaintModal()
         if sr and sr.id then rMap[sr.id] = sr end
     end
 
+    local mTerms = {}
+    for tok in string.lower(mq):gmatch("%S+") do mTerms[#mTerms + 1] = tok end
     local visRules = {}
     for i = 1, #rules do
         local r = rules[i]
@@ -5548,7 +5569,23 @@ function UI:renderMaintModal()
             local isAct = (r.mode == "always") or (sr.demanded == true)
                 or (sr.stockKnown and (sr.stock or 0) < (r.target or 1) and r.mode ~= "off")
             if (not filtAct) or isAct then
-                visRules[#visRules + 1] = { rule = r, realIdx = i, sr = sr }
+                local okQ = true
+                if #mTerms > 0 then
+                    local hay = string.lower(table.concat({
+                        tostring(r.label or ""),
+                        tostring(r.name or ""),
+                        tostring(r.type or ""),
+                        tostring(r.mode or ""),
+                        tostring(sr.status or ""),
+                        tostring(sr.err or ""),
+                    }, " "))
+                    for _, tok in ipairs(mTerms) do
+                        if not hay:find(tok, 1, true) then okQ = false; break end
+                    end
+                end
+                if okQ then
+                    visRules[#visRules + 1] = { rule = r, realIdx = i, sr = sr }
+                end
             end
         end
     end
@@ -5961,7 +5998,14 @@ function UI:handleKeyDown(char, code)
         return
     end
     if self.maintModalActive then
-        if code == 1 or char == string.byte("m") or char == string.byte("M") then
+        if char == 47 then -- '/' search filter
+            self:openPrompt("Search Level Maintainer Rules (name, mode, status):", self.maintModalSearch or "",
+                "Type query & press [Enter] / [APPLY], or blank to clear.", function(txt)
+                    self.maintModalSearch = tostring(txt or "")
+                    self.maintModalScroll = 0
+                    self:setStatus((self.maintModalSearch ~= "") and ("Maintainer filter: " .. self.maintModalSearch) or "Cleared Maintainer search.")
+                end)
+        elseif code == 1 or char == string.byte("m") or char == string.byte("M") then
             self.maintModalActive = false
         elseif code == 200 then
             self.maintModalScroll = math.max(0, (self.maintModalScroll or 0) - 1)

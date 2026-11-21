@@ -871,6 +871,17 @@ local ui3 = Ae2UI.new(cfg3, hub3, {
         peerActionsLog[#peerActionsLog + 1] = tag
         return tag .. " OK"
     end,
+    onUpdateFleet = function(src)
+        peerActionsLog[#peerActionsLog + 1] = "fleet:" .. tostring(src)
+        return true, "Fleet " .. tostring(src) .. " queued"
+    end,
+    onStockSearch = function(q, flt)
+        peerActionsLog[#peerActionsLog + 1] = "search:" .. tostring(flt) .. ":" .. tostring(q)
+        return {
+            ok = true, total = 12, matched = 1, filter = flt, query = q,
+            rules = { { id = "r_qft", label = "Oxygen Gas", type = "fluid", stock = 5000, target = 64000, state = "LOW", cpu = "CPU-1", stateDetail = "QFT: Plastics" } },
+        }
+    end,
 })
 
 for t = 1, 10 do
@@ -973,6 +984,55 @@ assertEq(#peerActionsLog, preAe2Rbt, "Setup 1st click must NOT reboot AE2")
 ui3:handleTouch(46, 40, 0)
 assertEq(peerActionsLog[#peerActionsLog], "ae2:reboot", "Setup 2nd click triggered ae2:reboot")
 
+-- Brain Tab 8 live Stock Search + Setup Fleet OTA Local/GitHub + Peer [↑ Upd] + Footer Col Bounds
+ui3:handleKeyDown(56, 9) -- Key '8': Stock tab
+assertEq(ui3.tab, 8, "Switched to TAB_STOCK")
+ui3:handleTouch(46, 14, 0) -- [QFT] pill
+assertEq(ui3.stockSearchFilter, "QFT", "Clicked [QFT] pill on Brain Tab 8")
+assertEq(peerActionsLog[#peerActionsLog], "search:QFT:", "Clicked [QFT] invoked onStockSearch")
+ui3:handleKeyDown(47, 53) -- '/' opens Stock Search prompt
+assertEq(ui3.searchPromptActive, true, "'/' on Tab 8 opens searchPromptActive")
+for _, ch in ipairs({ string.byte("o"), string.byte("x"), string.byte("y") }) do
+    ui3:handleKeyDown(ch, 0)
+end
+ui3:handleKeyDown(13, 28) -- Enter applies search
+assertEq(ui3.searchPromptActive, false, "Enter closed search prompt")
+assertEq(ui3.stockSearchQuery, "oxy", "Applied search query 'oxy'")
+assertEq(peerActionsLog[#peerActionsLog], "search:QFT:oxy", "Enter invoked onStockSearch('oxy', 'QFT')")
+-- Peer [↑ Upd] 2-click button on Tab 8 (y=9, x=92..98)
+ui3:handleTouch(94, 9, 0)
+assertEq(ui3.confirmUpdateKey, "upd_stock", "1st click [↑ Upd] armed confirmUpdateKey=upd_stock")
+ui3:handleTouch(94, 9, 0)
+assertEq(peerActionsLog[#peerActionsLog], "stock:update_local", "2nd click [↑ Upd] triggered stock:update_local")
+-- Tab 0 Setup 2-click [↑ Update All: Local] (83..103, y=45) & [↑ Update All: GitHub] (106..127, y=45)
+ui3:handleKeyDown(48, 11)
+ui3:handleTouch(85, 45, 0)
+assertEq(ui3.confirmUpdateKey, "fleet_local", "1st click armed fleet_local")
+ui3:handleTouch(85, 45, 0)
+assertEq(peerActionsLog[#peerActionsLog], "fleet:local", "2nd click triggered onUpdateFleet('local')")
+ui3:handleTouch(108, 45, 0)
+assertEq(ui3.confirmUpdateKey, "fleet_github", "1st click armed fleet_github")
+ui3:handleTouch(108, 45, 0)
+assertEq(peerActionsLog[#peerActionsLog], "fleet:github", "2nd click triggered onUpdateFleet('github')")
+
+-- Audit Brain row 50 footer fits within col 160 without clipping "Q Quit"
+do
+    local uni = require("unicode")
+    local fRow50, fMaxCol = "", 0
+    local origGpuSet = ui3.gpu.set
+    ui3.gpu.set = function(x, y, s)
+        local endC = x + uni.wlen(tostring(s or "")) - 1
+        if endC > fMaxCol then fMaxCol = endC end
+        if y == 50 then fRow50 = fRow50 .. tostring(s or "") end
+        return origGpuSet(x, y, s)
+    end
+    for i = 1, #ui3.curBuf do ui3.curBuf[i] = -1 end
+    ui3:render()
+    ui3.gpu.set = origGpuSet
+    assert(fMaxCol <= 160, "Brain UI exceeded column 160: " .. tostring(fMaxCol))
+    assert(fRow50:find("Q Quit", 1, true), "Brain footer row 50 clipped 'Q Quit': " .. tostring(fRow50))
+end
+
 -- =====================================================================
 -- TEST 4: Live main.lua GUI Integration + Overrides Persistence + Pause Export + Autostart
 -- =====================================================================
@@ -1058,6 +1118,145 @@ do
     rbtChunk()
     computer.shutdown = origShutdown
     assertEq(shutdownArg, true, "GUI 2-click [Reboot Brain] invoked computer.shutdown(true)")
+end
+
+-- TEST 4b: Brain MESH_HTTP_GET chunked relay + armShellReviveWatchdog (Ctrl+C / idle-shell GTNH_WAKE)
+do
+    local evMod = require("event")
+    local origListen = evMod.listen
+    local origUptime = computer.uptime
+    local origShutdown = computer.shutdown
+    local origModem = component.modem
+    local origInet = component.internet
+    local bigBody = string.rep("-- lua payload line for chunked mesh ota relay\n", 105) -- > 4800 bytes (> 2 chunks of 2048B)
+    local sentPackets = {}
+    local origMod1 = component.proxy("mod-1")
+    local relayQueue = {
+        { "modem_message", "mod-1", "stock-addr", 4205, 5, "MESH_HTTP_GET",
+            serialization.serialize({ id = "ota_1", url = "http://127.0.0.1:8765/oc-raw/gtnh-stock-control/main.lua" }) },
+        { "modem_message", "mod-1", "stock-addr", 4205, 5, "MESH_HTTP_GET",
+            serialization.serialize({ id = "ota_2", url = "http://127.0.0.1:8765/oc-raw/gtnh-stock-control/missing.lua" }) },
+    }
+    component._register("mod-1", "modem", {
+        isOpen = function() return true end,
+        isWireless = function() return true end,
+        open = function() return true end,
+        getStrength = function() return 400 end,
+        setStrength = function() return 400 end,
+        getWakeMessage = function() return "GTNH_WAKE", true end,
+        setWakeMessage = function() return "GTNH_WAKE", true end,
+        send = function(addr, port, mType, arg1)
+            sentPackets[#sentPackets + 1] = { addr = addr, port = port, mType = mType, arg1 = arg1 }
+            return true
+        end,
+        broadcast = function(port, mType, arg1)
+            sentPackets[#sentPackets + 1] = { port = port, mType = mType, arg1 = arg1 }
+            return true
+        end,
+    })
+    component._register("inet-rly", "internet", {
+        request = function(url)
+            if url:find("missing%.lua") then
+                return { finishConnect = function() return true end, read = function() return nil end, response = function() return 404 end, close = function() end }
+            end
+            local done = false
+            return {
+                finishConnect = function() return true end,
+                read = function() if not done then done = true; return bigBody end return nil end,
+                response = function() return 200 end,
+                close = function() end,
+            }
+        end,
+    })
+
+    local kdListeners, mmListeners = {}, {}
+    evMod.listen = function(evName, fn)
+        if evName == "key_down" then kdListeners[#kdListeners + 1] = fn
+        elseif evName == "modem_message" then mmListeners[#mmListeners + 1] = fn end
+        return true
+    end
+
+    local mockClk = 1000.0
+    computer.uptime = function() return mockClk end
+    local wdShutdownArg = "none"
+    computer.shutdown = function(rbt) wdShutdownArg = rbt end
+
+    local qExit = false
+    event.pull = function(_, filter)
+        if #relayQueue > 0 and ((not filter) or filter == "modem_message") then
+            return table.unpack(table.remove(relayQueue, 1))
+        end
+        if #relayQueue == 0 and (not qExit) and ((not filter) or filter == "key_down") then
+            qExit = true
+            return "key_down", "kbd-1", 113, 16 -- 'Q' clean exit into idle shell
+        end
+        return nil
+    end
+
+    __py_write_file("/home/.shrc", "brain\n")
+    local relayChunk = assert(load(__py_read_file("/home/brain/main.lua"), "@/home/brain/main.lua"))
+    relayChunk()
+
+    -- Verify multi-chunk MESH_HTTP_CHUNK relay + MESH_HTTP_ERR on 404
+    local reasm, chunkCnt, sawErr = {}, 0, false
+    for _, pkt in ipairs(sentPackets) do
+        if pkt.mType == "MESH_HTTP_CHUNK" and pkt.addr == "stock-addr" then
+            assert(type(pkt.arg1) == "string" and #pkt.arg1 <= 8192, "Serialized chunk must be <= 8192B string")
+            local dec = serialization.unserialize(pkt.arg1)
+            if dec.id == "ota_1" then
+                chunkCnt = chunkCnt + 1
+                reasm[dec.seq] = dec.data
+            end
+        elseif pkt.mType == "MESH_HTTP_ERR" and pkt.addr == "stock-addr" then
+            local dec = serialization.unserialize(pkt.arg1)
+            if dec.id == "ota_2" and tostring(dec.error):find("404", 1, true) then sawErr = true end
+        end
+    end
+    assert(chunkCnt >= 3, "Expected >=3 MESH_HTTP_CHUNK packets for >4KB file, got " .. tostring(chunkCnt))
+    assertEq(table.concat(reasm), bigBody, "Reassembled MESH_HTTP_CHUNK body matches source byte-for-byte")
+    assert(sawErr, "Expected MESH_HTTP_ERR on 404 relay request")
+
+    -- Verify armShellReviveWatchdog boundaries
+    assertEq(#kdListeners, 1, "Watchdog registered exactly 1 key_down listener")
+    assertEq(#mmListeners, 1, "Watchdog registered exactly 1 modem_message listener")
+    local kdFn, mmFn = kdListeners[1], mmListeners[1]
+    mockClk = 1015.0 -- < 30s since exit
+    mmFn("modem_message", "mod-rly", "dtpf-addr", 4205, 5, "GTNH_WAKE")
+    assertEq(wdShutdownArg, "none", "GTNH_WAKE ignored before 30s exit grace")
+
+    mockClk = 1035.0 -- user types in shell -> resets idle timer
+    kdFn("key_down", "kbd-1", 97, 30)
+    mockClk = 1045.0 -- > 30s since exit, only 10s since key_down
+    mmFn("modem_message", "mod-rly", "dtpf-addr", 4205, 5, "GTNH_WAKE")
+    assertEq(wdShutdownArg, "none", "GTNH_WAKE ignored when key_down < 30s ago")
+
+    mockClk = 1100.0 -- idle >= 30s, but hold file blocks revive
+    __py_write_file("/tmp/gtnh_hold", "1")
+    mmFn("modem_message", "mod-rly", "dtpf-addr", 4205, 5, "GTNH_WAKE")
+    assertEq(wdShutdownArg, "none", "GTNH_WAKE suppressed while /tmp/gtnh_hold exists")
+    require("filesystem").remove("/tmp/gtnh_hold")
+
+    __py_write_file("/home/.shrc", "")
+    mmFn("modem_message", "mod-rly", "dtpf-addr", 4205, 5, "GTNH_WAKE")
+    assertEq(wdShutdownArg, "none", "GTNH_WAKE suppressed when autostart is OFF")
+
+    __py_write_file("/home/.shrc", "brain\n")
+    mmFn("modem_message", "mod-rly", "dtpf-addr", 4205, 5, "GTNH_WAKE")
+    assertEq(wdShutdownArg, true, "GTNH_WAKE reboots idle shell when >=30s idle + autostart ON + no hold")
+
+    -- Re-running main.lua and exiting again re-arms idempotently without duplicate listeners
+    qExit = false
+    local relayChunk2 = assert(load(__py_read_file("/home/brain/main.lua"), "@/home/brain/main.lua"))
+    relayChunk2()
+    assertEq(#kdListeners, 1, "Idempotent watchdog did NOT add duplicate key_down listener")
+    assertEq(#mmListeners, 1, "Idempotent watchdog did NOT add duplicate modem_message listener")
+
+    evMod.listen = origListen
+    computer.uptime = origUptime
+    computer.shutdown = origShutdown
+    component.modem = origModem
+    component.internet = origInet
+    if origMod1 then component._register("mod-1", "modem", origMod1) end
 end
 
 rawset(_G, "__HELD_OBJECTS", { cfg3, hub3, ui3 })

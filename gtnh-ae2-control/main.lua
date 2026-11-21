@@ -213,14 +213,91 @@ end
 
 local maxInt = 9223372036854775807
 local AuthHeader = nil
+local LOCAL_UPDATE_URL = "http://127.0.0.1:8765/oc-raw"
+local GITHUB_UPDATE_URL = "https://raw.githubusercontent.com/Jimbo-Coder/OC-gtnh-control/main"
+
 local needExitFlag = false
 local pendingSelfReboot = false
 local pendingSelfUpdateUrl = nil
+local pendingSelfUpdateReadyAt = nil
+local lastMeshRelayAt = 0
 local lastItemScanSec = 0
 local uiActive = false
 
 local MESH_PORT = tonumber(config.meshPort) or 4205
 local WAKE_MSG = "GTNH_WAKE"
+
+local function wdNow()
+    if computer and computer.uptime then return computer.uptime() end
+    return os.clock and os.clock() or 0
+end
+
+local function armShellReviveWatchdog()
+    local okEv, evLib = pcall(require, "event")
+    if not okEv or type(evLib) ~= "table" or type(evLib.listen) ~= "function" then
+        return false
+    end
+    local now = wdNow()
+    local wd = rawget(_G, "__gtnhReviveWd")
+    if type(wd) ~= "table" then
+        wd = { armed = false, exitAt = now, lastKeyAt = now, hooked = false }
+        rawset(_G, "__gtnhReviveWd", wd)
+    end
+    wd.exitAt = now
+    wd.lastKeyAt = now
+    wd.meshPort = MESH_PORT
+    wd.wakeMsg = WAKE_MSG
+    wd.isAutostartFn = isBrainShrcLine
+    wd.armed = true
+    if not wd.hooked then
+        wd.hooked = true
+        evLib.listen("key_down", function()
+            wd.lastKeyAt = wdNow()
+        end)
+        evLib.listen("modem_message", function(_, _, _, port, _, msgType)
+            if not wd.armed then return end
+            if msgType ~= (wd.wakeMsg or "GTNH_WAKE") then return end
+            if port ~= wd.meshPort and port ~= 0 then return end
+            local autostartOn = false
+            if io and io.open then
+                local f = io.open(SHRC_PATH, "r")
+                if f then
+                    local raw = f:read("*a") or ""
+                    f:close()
+                    for line in raw:gmatch("[^\r\n]+") do
+                        if isBrainShrcLine(line) then
+                            autostartOn = true
+                            break
+                        end
+                    end
+                end
+            end
+            if not autostartOn then return end
+            local holdExists = (okFs and filesystem and filesystem.exists and filesystem.exists("/tmp/gtnh_hold")) == true
+            if not holdExists and io and io.open then
+                local f = io.open("/tmp/gtnh_hold", "r")
+                if f then f:close(); holdExists = true end
+            end
+            if holdExists then return end
+            local cur = wdNow()
+            if (cur - (wd.exitAt or cur)) < 30 or (cur - (wd.lastKeyAt or cur)) < 30 then
+                return
+            end
+            wd.armed = false
+            if computer and computer.shutdown then
+                pcall(computer.shutdown, true)
+            end
+        end)
+    end
+    return true
+end
+
+local function disarmShellReviveWatchdog()
+    local wd = rawget(_G, "__gtnhReviveWd")
+    if type(wd) == "table" then
+        wd.armed = false
+    end
+end
 local PUMP_STALE_SEC = 240
 local PEER_STALE_SEC = 60
 local dtpfMesh = { addr = nil, viaTunnel = false, lastSeen = -1000, status = nil, wasOnline = false, recoveryAttempts = 0, lastRecoveryAt = -1000 }
@@ -1818,6 +1895,89 @@ local function checkMeshWatchdog(upNow, dbUrl, writeLineFn)
     return changed
 end
 
+local function isAllowedOtaUrl(url)
+    if type(url) ~= "string" or url == "" or url:find("[%s%c]") then return false end
+    return url:match("^https?://[%w%.%-_:]+") ~= nil
+end
+
+local function fetchHttpBodyForRelay(fullUrl)
+    if not isAllowedOtaUrl(fullUrl) then
+        return nil, "Invalid relay URL"
+    end
+    local inet = (component.isAvailable and component.isAvailable("internet") and component.internet) or nil
+    if not inet and component.list then
+        local a = component.list("internet", true)()
+        if a then inet = component.proxy(a) end
+    end
+    if not inet or not inet.request then
+        return nil, "No Internet Card on Brain OC"
+    end
+    local okReq, req, reqErr = pcall(inet.request, fullUrl)
+    if not okReq or not req then
+        return nil, tostring(req or reqErr or "HTTP request failed")
+    end
+    local function briefYield()
+        local osLib = rawget(_G, "os")
+        if type(osLib) == "table" and osLib.sleep then pcall(osLib.sleep, 0.05) end
+    end
+    if req.finishConnect then
+        local conn = false
+        for _ = 1, 200 do
+            local okFin, done, ferr = pcall(req.finishConnect)
+            if not okFin then
+                if req.close then pcall(req.close) end
+                return nil, tostring(done or "Connect failed")
+            end
+            if done == true then conn = true; break
+            elseif done == nil then
+                if req.close then pcall(req.close) end
+                return nil, tostring(ferr or "Connect failed")
+            end
+            briefYield()
+        end
+        if not conn then
+            if req.close then pcall(req.close) end
+            return nil, "Connect timeout"
+        end
+    end
+    local chunks, emptyCount, totalLen = {}, 0, 0
+    for _ = 1, 8192 do
+        local okRd, ch, rErr = pcall(req.read)
+        if not okRd then
+            if req.close then pcall(req.close) end
+            return nil, tostring(ch or "Read failed")
+        end
+        if ch == nil then
+            if rErr then
+                if req.close then pcall(req.close) end
+                return nil, tostring(rErr)
+            end
+            break
+        elseif ch == "" then
+            emptyCount = emptyCount + 1
+            if emptyCount >= 200 then
+                if req.close then pcall(req.close) end
+                return nil, "Read timeout"
+            end
+            briefYield()
+        else
+            emptyCount = 0
+            chunks[#chunks + 1] = ch
+            totalLen = totalLen + #ch
+            if totalLen > 1048576 then
+                if req.close then pcall(req.close) end
+                return nil, "Relay payload too large"
+            end
+        end
+    end
+    local code = req.response and req.response() or nil
+    if req.close then pcall(req.close) end
+    if type(code) == "number" and code >= 400 then
+        return nil, "HTTP " .. tostring(code)
+    end
+    return table.concat(chunks)
+end
+
 local function handleMeshModemEvent(interface, writeLineFn, localAddr, sender, port, msgType, arg1, arg2)
     if not sender or config.enableMesh == false or not okSer then return false end
     local modem, tunnel = getMeshTransports()
@@ -1828,6 +1988,54 @@ local function handleMeshModemEvent(interface, writeLineFn, localAddr, sender, p
 
     if msgType == WAKE_MSG then
         sendMeshPacket(sender, isTunnel, "MESH_MAINNET_HELLO", "wake_ack")
+        return true
+    elseif msgType == "MESH_HTTP_GET" then
+        local reqTbl = nil
+        if type(arg1) == "table" then
+            reqTbl = arg1
+        elseif type(arg1) == "string" and arg1:sub(1, 1) == "{" and okSer and serialization and serialization.unserialize then
+            local okU, dec = pcall(serialization.unserialize, arg1)
+            if okU and type(dec) == "table" then reqTbl = dec end
+        end
+        local reqId = reqTbl and tostring(reqTbl.id or "") or tostring(arg1 or "")
+        local reqUrl = reqTbl and tostring(reqTbl.url or "") or tostring(arg2 or "")
+        lastMeshRelayAt = now
+        local body, err = fetchHttpBodyForRelay(reqUrl)
+        lastMeshRelayAt = uptimeNow()
+        if body == nil then
+            sendMeshPacket(sender, isTunnel, "MESH_HTTP_ERR", serialization.serialize({
+                id = reqId,
+                url = reqUrl,
+                error = tostring(err or "Fetch failed"),
+            }))
+        else
+            local CHUNK_SZ = 2048
+            local total = #body
+            local seq = 0
+            if total == 0 then
+                sendMeshPacket(sender, isTunnel, "MESH_HTTP_CHUNK", serialization.serialize({
+                    id = reqId, seq = 1, eof = true, total = 0, data = "",
+                }))
+                seq = 1
+            else
+                local pos = 1
+                while pos <= total do
+                    seq = seq + 1
+                    local nxt = math.min(total, pos + CHUNK_SZ - 1)
+                    sendMeshPacket(sender, isTunnel, "MESH_HTTP_CHUNK", serialization.serialize({
+                        id = reqId,
+                        seq = seq,
+                        eof = (nxt >= total),
+                        total = total,
+                        data = body:sub(pos, nxt),
+                    }))
+                    lastMeshRelayAt = uptimeNow()
+                    pos = nxt + 1
+                end
+            end
+            logMsg("MESH", string.format("Relayed %d bytes (%d chunk%s) -> %s",
+                total, seq, seq == 1 and "" or "s", reqUrl:match("([^/]+/[^/]+)$") or reqUrl))
+        end
         return true
     elseif msgType == "PUMP_STATUS" and type(arg1) == "string" then
         local okU, st = pcall(serialization.unserialize, arg1)
@@ -2739,11 +2947,20 @@ local function handleBridgeCommand(sockWriteLine, interface, cmd)
         if not hasInet then
             return reply({ ok = false, error = "No Internet Card on AE2 Main OC" })
         end
-        local url = (type(cmd.url) == "string" and cmd.url ~= "") and cmd.url or "http://127.0.0.1:8765/oc-raw"
-        if not url:match("^https?://[%w%.%-_:]+") then
+        local src = tostring(cmd.source or ""):lower()
+        local url = (type(cmd.url) == "string" and cmd.url ~= "") and cmd.url
+            or ((src == "github") and GITHUB_UPDATE_URL or LOCAL_UPDATE_URL)
+        if not isAllowedOtaUrl(url) then
             return reply({ ok = false, error = "Invalid update URL" })
         end
+        local delaySec = tonumber(cmd.delaySec or cmd.delay) or 0
         pendingSelfUpdateUrl = url
+        if delaySec > 0 then
+            pendingSelfUpdateReadyAt = uptimeNow() + delaySec
+            logMsg("OUT", string.format("Scheduled Brain OTA (%s) in %.0fs (relaying peers first).", src ~= "" and src or "local", delaySec))
+            return reply({ ok = true, updating = true, delayed = true, delaySec = delaySec, url = url })
+        end
+        pendingSelfUpdateReadyAt = nil
         pendingSelfReboot = true
         needExitFlag = true
         return reply({ ok = true, updating = true, url = url })
@@ -3022,6 +3239,10 @@ local function main()
             end,
             onPeerAction = function(peerKey, action, extra)
                 extra = extra or {}
+                local updUrl = (type(extra.url) == "string" and extra.url ~= "") and extra.url
+                    or ((tostring(extra.source or ""):lower() == "github")
+                        and "https://raw.githubusercontent.com/Jimbo-Coder/OC-gtnh-control/main"
+                        or "http://127.0.0.1:8765/oc-raw")
                 if peerKey == "ae2" and action == "reboot" then
                     pcall(saveConfigOverrides)
                     logMsg("OUT", "Main Brain AE2 reboot requested via GUI.")
@@ -3029,6 +3250,16 @@ local function main()
                     needExitFlag = true
                     if ui then ui.running = false end
                     return "Rebooting AE2 Main Brain..."
+                elseif peerKey == "ae2" and action == "update_local" then
+                    local hasInet = (component.isAvailable and component.isAvailable("internet"))
+                        or (component.list and component.list("internet", true)() ~= nil)
+                    if not hasInet then
+                        return "AE2 Brain: No Internet Card on Brain OC."
+                    end
+                    pendingSelfUpdateUrl = updUrl
+                    pendingSelfUpdateReadyAt = uptimeNow() + (tonumber(extra.delaySec) or 0.5)
+                    logMsg("OUT", "Brain OTA update scheduled: " .. updUrl)
+                    return "Brain: updating from " .. (updUrl:find("127%.0%.0%.1", 1) and "Local" or "GitHub") .. "..."
                 elseif peerKey == "dtpf" then
                     local payload
                     if action == "pause" then
@@ -3037,6 +3268,8 @@ local function main()
                         payload = { op = "dtpf_patch", patch = { armed = true } }
                     elseif action == "reboot" then
                         payload = { op = "reboot" }
+                    elseif action == "update_local" then
+                        payload = { op = "update_local", url = updUrl }
                     elseif action == "maint_sync" or action == "flush_od" or action == "lock_autopull" or action == "poll" then
                         payload = { op = "dtpf_action", action = (action == "poll") and "poll_now" or action }
                     else
@@ -3046,7 +3279,9 @@ local function main()
                     if type(res) == "table" and res.ok then
                         if type(res.units) == "table" then dtpfMesh.status = res end
                         logMsg("MESH", "DTPF action '" .. tostring(action) .. "' acknowledged.")
-                        return (action == "reboot") and "DTPF: reboot triggered." or ("DTPF: " .. tostring(action) .. " OK.")
+                        if action == "reboot" then return "DTPF: reboot triggered."
+                        elseif action == "update_local" then return "DTPF: OTA update triggered."
+                        else return "DTPF: " .. tostring(action) .. " OK." end
                     end
                     return "DTPF: " .. tostring(type(res) == "table" and res.error or "No response")
                 elseif peerKey == "pump" then
@@ -3057,6 +3292,8 @@ local function main()
                     local pumpAct = tostring(action)
                     if action == "reboot" then
                         pumpCmd = { op = "reboot" }
+                    elseif action == "update_local" then
+                        pumpCmd = { op = "update_local", url = updUrl }
                     else
                         pumpAct = (action == "refresh_pumps" or action == "reload") and action or "wake"
                         pumpCmd = { op = "action", action = pumpAct }
@@ -3068,21 +3305,28 @@ local function main()
                             pumpMesh.statusUptime = uptimeNow()
                         end
                         logMsg("MESH", "Space Pump '" .. pumpAct .. "' OK.")
-                        return (action == "reboot") and "Space Pump: reboot triggered." or ("Space Pump: " .. pumpAct .. " OK.")
+                        if action == "reboot" then return "Space Pump: reboot triggered."
+                        elseif action == "update_local" then return "Space Pump: OTA update triggered."
+                        else return "Space Pump: " .. pumpAct .. " OK." end
                     end
                     return "Space Pump: " .. tostring(type(res) == "table" and res.error or "No response")
                 elseif peerKey == "univ" then
                     local act = (action == "poll") and "poll_now" or tostring(action)
-                    local res = callMeshRpc(interface, writeBridgeLine, univMesh, "UNIV_CMD", { action = act }, "UNIV_REPLY", 2.5)
+                    local uCmd = (action == "update_local") and { action = "update_local", url = updUrl } or { action = act }
+                    local res = callMeshRpc(interface, writeBridgeLine, univMesh, "UNIV_CMD", uCmd, "UNIV_REPLY", 2.5)
                     if type(res) == "table" and res.ok then
                         if res.armed ~= nil and type(univMesh.status) == "table" then univMesh.status.armed = res.armed end
                         logMsg("MESH", "Universal action '" .. act .. "' OK.")
-                        return (action == "reboot") and "Universal: reboot triggered." or ("Universal: " .. act .. " OK.")
+                        if action == "reboot" then return "Universal: reboot triggered."
+                        elseif action == "update_local" then return "Universal: OTA update triggered."
+                        else return "Universal: " .. act .. " OK." end
                     end
                     return "Universal: " .. tostring(type(res) == "table" and res.error or "No response")
                 elseif peerKey == "gorge" then
                     local act = (action == "poll") and "poll_now" or tostring(action)
-                    local cmdTbl = { action = act, exoticizerId = extra.exoticizerId, mode = extra.mode }
+                    local cmdTbl = (action == "update_local")
+                        and { action = "update_local", url = updUrl }
+                        or { action = act, exoticizerId = extra.exoticizerId, mode = extra.mode }
                     local res = callMeshRpc(interface, writeBridgeLine, gorgeMesh, "GORGE_CMD", cmdTbl, "GORGE_REPLY", 2.5)
                     if type(res) == "table" and res.ok then
                         if type(gorgeMesh.status) == "table" then
@@ -3094,7 +3338,9 @@ local function main()
                             end
                         end
                         logMsg("MESH", "Gorge action '" .. act .. "' OK.")
-                        return (action == "reboot") and "Gorge: reboot triggered." or ("Gorge: " .. act .. " OK.")
+                        if action == "reboot" then return "Gorge: reboot triggered."
+                        elseif action == "update_local" then return "Gorge: OTA update triggered."
+                        else return "Gorge: " .. act .. " OK." end
                     end
                     return "Gorge: " .. tostring(type(res) == "table" and res.error or "No response")
                 elseif peerKey == "stock" then
@@ -3105,6 +3351,8 @@ local function main()
                         stockCmd = { op = "stock_action", action = "arm" }
                     elseif action == "poll" then
                         stockCmd = { op = "stock_action", action = "poll_now" }
+                    elseif action == "update_local" then
+                        stockCmd = { op = "stock_action", action = "update_local", url = updUrl }
                     else
                         stockCmd = { op = "stock_action", action = tostring(action) }
                     end
@@ -3114,7 +3362,9 @@ local function main()
                             stockMesh.status.armed = res.armed
                         end
                         logMsg("MESH", "Stock Maintainer action '" .. tostring(action) .. "' OK.")
-                        return (action == "reboot") and "Stock: reboot triggered." or ("Stock: " .. tostring(action) .. " OK.")
+                        if action == "reboot" then return "Stock: reboot triggered."
+                        elseif action == "update_local" then return "Stock: OTA update triggered."
+                        else return "Stock: " .. tostring(action) .. " OK." end
                     end
                     return "Stock: " .. tostring(type(res) == "table" and res.error or "No response")
                 elseif peerKey == "qft" then
@@ -3125,6 +3375,8 @@ local function main()
                         qftCmd = { op = "qft_action", action = "arm" }
                     elseif action == "poll" then
                         qftCmd = { op = "qft_action", action = "poll_now" }
+                    elseif action == "update_local" then
+                        qftCmd = { op = "qft_action", action = "update_local", url = updUrl }
                     else
                         qftCmd = { op = "qft_action", action = tostring(action) }
                     end
@@ -3132,11 +3384,60 @@ local function main()
                     if type(res) == "table" and res.ok then
                         if type(res.units) == "table" then qftMesh.status = res end
                         logMsg("MESH", "QFT action '" .. tostring(action) .. "' OK.")
-                        return (action == "reboot") and "QFT: reboot triggered." or ("QFT: " .. tostring(action) .. " OK.")
+                        if action == "reboot" then return "QFT: reboot triggered."
+                        elseif action == "update_local" then return "QFT: OTA update triggered."
+                        else return "QFT: " .. tostring(action) .. " OK." end
                     end
                     return "QFT: " .. tostring(type(res) == "table" and res.error or "No response")
                 end
                 return "Unknown peer."
+            end,
+            onUpdateFleet = function(source)
+                local hasInet = (component.isAvailable and component.isAvailable("internet"))
+                    or (component.list and component.list("internet", true)() ~= nil)
+                if not hasInet then
+                    return false, "No Internet Card on Brain OC (required for OTA relay)."
+                end
+                local srcKey = (tostring(source or ""):lower() == "github") and "github" or "local"
+                local updUrl = (srcKey == "github")
+                    and "https://raw.githubusercontent.com/Jimbo-Coder/OC-gtnh-control/main"
+                    or "http://127.0.0.1:8765/oc-raw"
+                local specs = {
+                    { k = "dtpf", p = dtpfMesh, mt = "DTPF_CMD", rt = "DTPF_REPLY", pl = { op = "update_local", url = updUrl }, to = 2.5 },
+                    { k = "stock", p = stockMesh, mt = "STOCK_CMD", rt = "STOCK_REPLY", pl = { op = "stock_action", action = "update_local", url = updUrl }, to = 3.0 },
+                    { k = "gorge", p = gorgeMesh, mt = "GORGE_CMD", rt = "GORGE_REPLY", pl = { action = "update_local", url = updUrl }, to = 2.5 },
+                    { k = "univ", p = univMesh, mt = "UNIV_CMD", rt = "UNIV_REPLY", pl = { action = "update_local", url = updUrl }, to = 2.5 },
+                    { k = "qft", p = qftMesh, mt = "QFT_CMD", rt = "QFT_REPLY", pl = { op = "qft_action", action = "update_local", url = updUrl }, to = 3.0 },
+                    { k = "pump", p = pumpMesh, mt = "PUMP_CMD", rt = "PUMP_REPLY", pl = { op = "update_local", url = updUrl }, to = 2.5 },
+                }
+                local okCnt, tryCnt = 0, 0
+                for _, sp in ipairs(specs) do
+                    local p = sp.p
+                    if p and (p.online or p.seen or p.addr or p.tunnel) then
+                        tryCnt = tryCnt + 1
+                        local r = callMeshRpc(interface, writeBridgeLine, p, sp.mt, sp.pl, sp.rt, sp.to)
+                        if type(r) == "table" and r.ok then
+                            okCnt = okCnt + 1
+                        end
+                    end
+                end
+                local delay = (tryCnt > 0) and 10 or 0.5
+                pendingSelfUpdateUrl = updUrl
+                pendingSelfUpdateReadyAt = uptimeNow() + delay
+                local msg = string.format("OTA (%s): %d/%d peers triggered; Brain updates in %.0fs.", srcKey, okCnt, tryCnt, delay)
+                logMsg("OUT", msg)
+                return true, msg
+            end,
+            onStockSearch = function(query, filter)
+                if not (stockMesh and (stockMesh.addr or stockMesh.tunnel)) then
+                    return { ok = false, error = "Stock peer offline" }
+                end
+                return callMeshRpc(interface, writeBridgeLine, stockMesh, "STOCK_CMD", {
+                    op = "search_rules",
+                    q = tostring(query or ""),
+                    filter = tostring(filter or "ALL"),
+                    limit = 26,
+                }, "STOCK_REPLY", 3.0)
             end,
             onConfigChanged = function(kind, key, val)
                 if kind == "toggle" then
@@ -3270,6 +3571,7 @@ local function main()
     local lastUiRenderAt = uptimeNow()
 
     local okLoop, loopErr = xpcall(function()
+        disarmShellReviveWatchdog()
         while not needExitFlag do
             local upNow = uptimeNow()
             hubState.nowUptime = upNow
@@ -3398,6 +3700,14 @@ local function main()
                 uiDirty = true
             end
 
+            if pendingSelfUpdateUrl and pendingSelfUpdateReadyAt
+                and uptimeNow() >= pendingSelfUpdateReadyAt
+                and (uptimeNow() - (lastMeshRelayAt or 0)) >= 3.0 then
+                pendingSelfUpdateReadyAt = nil
+                pendingSelfReboot = true
+                needExitFlag = true
+            end
+
             if ui and not needExitFlag and (uiDirty or (uptimeNow() - lastUiRenderAt) >= 1.5) then
                 uiDirty = false
                 lastUiRenderAt = uptimeNow()
@@ -3422,11 +3732,17 @@ local function main()
         end
     end
     if not okLoop then
+        armShellReviveWatchdog()
+        if tostring(loopErr or ""):find("interrupted", 1, true) then
+            print("\nAE2 Brain interrupted (Ctrl+C). Idle shell auto-revive armed.")
+            return
+        end
         error(loopErr, 0)
     end
     if pendingSelfUpdateUrl then
         local updUrl = pendingSelfUpdateUrl
         pendingSelfUpdateUrl = nil
+        pendingSelfUpdateReadyAt = nil
         local instPath = INST_PATH
         local chunk, loadErr = loadfile and loadfile(instPath) or nil, nil
         if not chunk and io and io.open then
@@ -3458,6 +3774,7 @@ local function main()
             pcall(computer.shutdown, true)
         end
     end
+    armShellReviveWatchdog()
 end
 
 if config.dbUseAuth then

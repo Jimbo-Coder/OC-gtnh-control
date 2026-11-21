@@ -132,6 +132,13 @@ function UI.new(cfg, hubState, callbacks, compLib)
         cpuBusyOnly = false,
         confirmCancelCpu = nil,
         confirmRebootPeer = nil,
+        confirmUpdateKey = nil,
+        stockSearchQuery = "",
+        stockSearchFilter = "ALL",
+        stockSearchResults = nil,
+        stockSearchInfo = nil,
+        searchPromptActive = false,
+        searchPromptBuffer = "",
         logScroll = 0,
         logModalActive = false,
         logModalScroll = 0,
@@ -1037,6 +1044,23 @@ function UI:drawRebootBtn(bx, y, peerKey, normalLbl, confirmLbl)
     end, "reboot") + 2
 end
 
+function UI:drawUpdateBtn(bx, y, key, normalLbl, confirmLbl, fn)
+    local isConfirm = (self.confirmUpdateKey == key)
+    local cLbl = confirmLbl or "[Confirm Upd?]"
+    local lbl = isConfirm and cLbl or (normalLbl or "[↑ Upd]")
+    local fg = isConfirm and COLORS.fg or COLORS.cyan
+    local bg = isConfirm and COLORS.btnActiveBg or COLORS.btnBg
+    return self:drawButton(bx, y, lbl, fg, bg, function()
+        if self.confirmUpdateKey == key then
+            self.confirmUpdateKey = nil
+            if fn then fn() end
+        else
+            self.confirmUpdateKey = key
+            self.statusMsg = string.format("Click %s again to update + reboot %s.", cLbl, tostring(key))
+        end
+    end, "update") + 2
+end
+
 function UI:renderDtpfTab()
     local peer = self.hub and self.hub.peers and self.hub.peers.dtpf
     local st = peer and peer.status or nil
@@ -1072,7 +1096,12 @@ function UI:renderDtpfTab()
     bx = self:drawOrchestratorBtn(bx, 9, "[Maint Sync]", COLORS.fg, COLORS.btnBg, "dtpf", "maint_sync")
     bx = self:drawOrchestratorBtn(bx, 9, "[Toggle OD Flush]", COLORS.purple, COLORS.btnBg, "dtpf", "flush_od")
     bx = self:drawOrchestratorBtn(bx, 9, "[Lock AutoPull]", COLORS.red, COLORS.btnBg, "dtpf", "lock_autopull")
-    self:drawRebootBtn(bx, 9, "dtpf", "[Reboot DTPF]", "[Confirm Reboot?]")
+    bx = self:drawRebootBtn(bx, 9, "dtpf", "[Reboot DTPF]", "[Confirm Reboot?]")
+    self:drawUpdateBtn(bx, 9, "upd_dtpf", "[↑ Upd]", "[Confirm Upd?]", function()
+        if self.cb.onPeerAction then
+            self.statusMsg = tostring(self.cb.onPeerAction("dtpf", "update_local", { source = "local" }) or "Updating DTPF")
+        end
+    end)
 
     self:drawFrame(2, 13, 157, 35, COLORS.border, COLORS.panelBg, "round")
     self:drawText(4, 13, string.format(" ◈ DTPF UNITS (%d) ", #units), COLORS.accent, COLORS.panelBg)
@@ -1127,7 +1156,12 @@ function UI:renderUniversalTab()
     bx = self:drawOrchestratorBtn(bx, 9, "[Pause All]", COLORS.yellow, COLORS.amberBg, "univ", "pause")
     bx = self:drawOrchestratorBtn(bx, 9, "[Full Scan]", COLORS.cyan, COLORS.btnBg, "univ", "poll")
     bx = self:drawOrchestratorBtn(bx, 9, "[Clear Stalls]", COLORS.red, COLORS.btnBg, "univ", "clear_stalls")
-    self:drawRebootBtn(bx, 9, "univ", "[Reboot Univ]", "[Confirm Reboot?]")
+    bx = self:drawRebootBtn(bx, 9, "univ", "[Reboot Univ]", "[Confirm Reboot?]")
+    self:drawUpdateBtn(bx, 9, "upd_univ", "[↑ Upd]", "[Confirm Upd?]", function()
+        if self.cb.onPeerAction then
+            self.statusMsg = tostring(self.cb.onPeerAction("univ", "update_local", { source = "local" }) or "Updating Universal")
+        end
+    end)
 
     self:drawFrame(2, 13, 157, 35, COLORS.border, COLORS.panelBg, "round")
     self:drawText(4, 13, string.format(" ◈ MACHINE POOLS & CHANNELS (%d) ", #pools), COLORS.accent, COLORS.panelBg)
@@ -1201,7 +1235,12 @@ function UI:renderGorgeTab()
     bx = self:drawOrchestratorBtn(bx, 10, "[Unstick All]", COLORS.yellow, COLORS.btnBg, "gorge", "unstick")
     bx = self:drawOrchestratorBtn(bx, 10, "[Retry Errors]", COLORS.purple, COLORS.btnBg, "gorge", "retry_errors")
     bx = self:drawOrchestratorBtn(bx, 10, "[Poll Now]", COLORS.cyan, COLORS.btnBg, "gorge", "poll")
-    self:drawRebootBtn(bx, 10, "gorge", "[Reboot Gorge]", "[Confirm Reboot?]")
+    bx = self:drawRebootBtn(bx, 10, "gorge", "[Reboot Gorge]", "[Confirm Reboot?]")
+    self:drawUpdateBtn(bx, 10, "upd_gorge", "[↑ Upd]", "[Confirm Upd?]", function()
+        if self.cb.onPeerAction then
+            self.statusMsg = tostring(self.cb.onPeerAction("gorge", "update_local", { source = "local" }) or "Updating Gorge")
+        end
+    end)
 
     self:drawFrame(2, 14, 157, 34, COLORS.border, COLORS.panelBg, "round")
     self:drawText(4, 14, string.format(" ◈ EXOTICIZER MODULES (%d / 8) ", #exs), COLORS.accent, COLORS.panelBg)
@@ -1281,7 +1320,12 @@ function UI:renderPumpTab()
     bx = self:drawOrchestratorBtn(bx, 9, "[Wake / Poll]", COLORS.green, COLORS.darkGreen, "pump", "poll")
     bx = self:drawOrchestratorBtn(bx, 9, "[Refresh Pumps]", COLORS.cyan, COLORS.btnBg, "pump", "refresh_pumps")
     bx = self:drawOrchestratorBtn(bx, 9, "[Reload Config]", COLORS.yellow, COLORS.btnBg, "pump", "reload")
-    self:drawRebootBtn(bx, 9, "pump", "[Reboot Pump]", "[Confirm Reboot?]")
+    bx = self:drawRebootBtn(bx, 9, "pump", "[Reboot Pump]", "[Confirm Reboot?]")
+    self:drawUpdateBtn(bx, 9, "upd_pump", "[↑ Upd]", "[Confirm Upd?]", function()
+        if self.cb.onPeerAction then
+            self.statusMsg = tostring(self.cb.onPeerAction("pump", "update_local", { source = "local" }) or "Updating Space Pump")
+        end
+    end)
 
     self:drawFrame(2, 13, 157, 35, COLORS.border, COLORS.panelBg, "round")
     self:drawText(4, 13, string.format(" ◈ MANAGED FLUID TARGETS (%d) ", #flRows), COLORS.accent, COLORS.panelBg)
@@ -1315,7 +1359,8 @@ function UI:renderStockTab()
     local now = tonumber(self.hub.nowUptime) or 0
     local fresh = peer.addr and (now - (peer.lastSeen or -1000)) < 60
     local pf = type(st.perf) == "table" and st.perf or {}
-    local rows = type(st.rulesPreview) == "table" and st.rulesPreview or {}
+    local useSearch = (type(self.stockSearchResults) == "table")
+    local rows = useSearch and self.stockSearchResults or (type(st.rulesPreview) == "table" and st.rulesPreview or {})
 
     self:drawFrame(2, 5, 157, 7, COLORS.border, COLORS.panelBg, "round")
     self:drawText(4, 5, " ◈ MAINNET STOCK MAINTAINER ", COLORS.accent, COLORS.panelBg)
@@ -1336,21 +1381,72 @@ function UI:renderStockTab()
     bx = self:drawOrchestratorBtn(bx, 9, "[Retry Errors]", COLORS.purple, COLORS.btnBg, "stock", "retry_errors")
     bx = self:drawOrchestratorBtn(bx, 9, "[Import Phys]", COLORS.fg, COLORS.btnBg, "stock", "import_maintainers")
     bx = self:drawOrchestratorBtn(bx, 9, "[Benchmark]", COLORS.cyan, COLORS.btnBg, "stock", "run_bench")
-    self:drawRebootBtn(bx, 9, "stock", "[Reboot Stock]", "[Confirm Reboot?]")
+    bx = self:drawRebootBtn(bx, 9, "stock", "[Reboot Stock]", "[Confirm Reboot?]")
+    self:drawUpdateBtn(bx, 9, "upd_stock", "[↑ Upd]", "[Confirm Upd?]", function()
+        if self.cb.onPeerAction then
+            self.statusMsg = tostring(self.cb.onPeerAction("stock", "update_local", { source = "local" }) or "Updating Stock")
+        end
+    end)
 
     self:drawFrame(2, 13, 157, 35, COLORS.border, COLORS.panelBg, "round")
-    self:drawText(4, 13, string.format(" ◈ TOP PRIORITY & ACTIVE RULES (%d) ", #rows), COLORS.accent, COLORS.panelBg)
-    self:drawText(4, 15, padOrTrunc(string.format("%-34s %-6s %-14s %-14s %-8s %-9s %-16s %s",
-        "Rule Label", "Type", "In Stock", "Target", "Fill %", "State", "CPU", "Warning / Error"), 152), COLORS.muted, COLORS.panelBg)
-    self:drawText(4, 16, string.rep("─", 152), COLORS.border, COLORS.panelBg)
+    local hdrTxt
+    if useSearch and type(self.stockSearchInfo) == "table" then
+        hdrTxt = string.format(" ◈ ME STOCK SEARCH (%d/%d match | %s%s) ",
+            tonumber(self.stockSearchInfo.matched) or #rows,
+            tonumber(self.stockSearchInfo.total) or #rows,
+            tostring(self.stockSearchInfo.filter or "ALL"),
+            (self.stockSearchInfo.query and self.stockSearchInfo.query ~= "") and (" | " .. self.stockSearchInfo.query) or "")
+    else
+        hdrTxt = string.format(" ◈ TOP PRIORITY & ACTIVE RULES (%d) ", #rows)
+    end
+    self:drawText(4, 13, padOrTrunc(hdrTxt, 148), COLORS.accent, COLORS.panelBg)
 
-    local maxShow = 15
+    local fx = 4
+    self:drawText(fx, 14, "Filter:", COLORS.muted, COLORS.panelBg)
+    fx = fx + 8
+    local curFlt = tostring(self.stockSearchFilter or "ALL")
+    for _, flt in ipairs({ "ALL", "LOW", "CRAFT", "ERR", "WARN", "QFT" }) do
+        local isAct = (curFlt == flt)
+        fx = self:drawButton(fx, 14, "[" .. flt .. "]",
+            isAct and COLORS.fg or COLORS.muted, isAct and COLORS.btnActiveBg or COLORS.btnBg,
+            function()
+                self.stockSearchFilter = flt
+                if flt == "ALL" and tostring(self.stockSearchQuery or "") == "" and not self.cb.onStockSearch then
+                    self.stockSearchResults = nil
+                    self.stockSearchInfo = nil
+                else
+                    self:runStockSearch(true)
+                end
+            end) + 1
+    end
+    local sq = tostring(self.stockSearchQuery or "")
+    fx = self:drawButton(fx + 2, 14, "[Search: " .. padOrTrunc(sq ~= "" and sq or "press / to type", 24) .. "]",
+        (sq ~= "") and COLORS.cyan or COLORS.fg, COLORS.btnBg, function()
+            self.searchPromptActive = true
+            self.searchPromptBuffer = sq
+        end) + 1
+    if sq ~= "" or curFlt ~= "ALL" or useSearch then
+        self:drawButton(fx, 14, "[Clr]", COLORS.yellow, COLORS.btnBg, function()
+            self.stockSearchQuery = ""
+            self.stockSearchFilter = "ALL"
+            self.stockSearchResults = nil
+            self.stockSearchInfo = nil
+            self.tabScroll = 0
+            self.statusMsg = "Cleared Stock search filter."
+        end)
+    end
+
+    self:drawText(4, 16, padOrTrunc(string.format("%-34s %-6s %-14s %-14s %-8s %-9s %-16s %s",
+        "Rule Label", "Type", "In Stock", "Target", "Fill %", "State", "CPU", "Warning / Error"), 152), COLORS.muted, COLORS.panelBg)
+    self:drawText(4, 17, string.rep("─", 152), COLORS.border, COLORS.panelBg)
+
+    local maxShow = 14
     local maxScroll = math.max(0, #rows - maxShow)
     self.tabScroll = math.max(0, math.min(maxScroll, self.tabScroll or 0))
     for i = 1, math.min(maxShow, #rows - self.tabScroll) do
         local r = rows[self.tabScroll + i]
         if type(r) == "table" then
-            local ry = 16 + i * 2
+            local ry = 17 + i * 2
             local bg = (i % 2 == 0) and COLORS.rowAltBg or COLORS.panelBg
             self:fillRect(3, ry, 155, 1, " ", COLORS.fg, bg)
             local tgt = math.max(1, tonumber(r.target) or 1)
@@ -1358,14 +1454,17 @@ function UI:renderStockTab()
             local pct = math.min(999.9, (stk / tgt) * 100.0)
             local unit = (r.type == "fluid") and "L" or ""
             local stTag = tostring(r.state or "LOW")
+            local errTxt = (type(r.error) == "string" and r.error ~= "" and r.error)
+                or (type(r.err) == "string" and r.err ~= "" and r.err) or nil
+            local warnTxt = (type(r.warn) == "string" and r.warn ~= "" and r.warn) or nil
             local stCol = (stTag == "ERR") and COLORS.red or ((stTag == "OK") and COLORS.green or ((stTag == "CRAFT") and COLORS.cyan or COLORS.yellow))
-            local note = tostring(r.warn or r.err or "")
+            local note = tostring(warnTxt or errTxt or r.stateDetail or "")
             self:drawText(4, ry, string.format("%-34s %-6s %-14s %-14s %6.1f%%  %-9s %-16s ",
                 padOrTrunc(r.label or "?", 34), tostring(r.type or "item"),
                 UI.formatNumber(stk, unit), UI.formatNumber(tgt, unit),
                 pct, stTag, padOrTrunc(r.cpu or "-", 16)), stCol, bg)
             self:drawText(109, ry, padOrTrunc(note, 45),
-                (r.err and COLORS.red) or (r.warn and COLORS.purple or COLORS.muted), bg)
+                (errTxt and COLORS.red) or (warnTxt and COLORS.purple or COLORS.muted), bg)
         end
     end
 end
@@ -1408,7 +1507,12 @@ function UI:renderQftTab()
     bx = self:drawOrchestratorBtn(bx, 9, "[Poll Now]", COLORS.cyan, COLORS.btnBg, "qft", "poll")
     bx = self:drawOrchestratorBtn(bx, 9, "[Sync Mainnet]", COLORS.green, COLORS.btnBg, "qft", "sync_mainnet")
     bx = self:drawOrchestratorBtn(bx, 9, "[Rediscover]", COLORS.fg, COLORS.btnBg, "qft", "rediscover")
-    self:drawRebootBtn(bx, 9, "qft", "[Reboot QFT]", "[Confirm Reboot?]")
+    bx = self:drawRebootBtn(bx, 9, "qft", "[Reboot QFT]", "[Confirm Reboot?]")
+    self:drawUpdateBtn(bx, 9, "upd_qft", "[↑ Upd]", "[Confirm Upd?]", function()
+        if self.cb.onPeerAction then
+            self.statusMsg = tostring(self.cb.onPeerAction("qft", "update_local", { source = "local" }) or "Updating QFT")
+        end
+    end)
 
     self:drawFrame(2, 13, 157, 35, COLORS.border, COLORS.panelBg, "round")
     self:drawText(4, 13, string.format(" ◈ QFT UNITS (%d) ", #units), COLORS.accent, COLORS.panelBg)
@@ -1553,6 +1657,25 @@ function UI:renderSetupTab()
     self:drawText(83, 39, padOrTrunc(string.format("Bridge   : %s:%s", tostring(self.cfg.bridgeHost or "127.0.0.1"), tostring(self.cfg.bridgePort or 8766)), 72), COLORS.muted, COLORS.panelBg)
     self:drawText(83, 41, padOrTrunc(string.format("allItemsMode=%s   maxID=%s   batchSize=%s",
         tostring(self.cfg.allItemsMode or 0), tostring(self.cfg.maxID or 0), tostring(self.cfg.batchSize or 0)), 72), COLORS.muted, COLORS.panelBg)
+
+    self:drawText(83, 43, "Fleet OTA Update (Local skips git push; Brain relays Mesh):", COLORS.accent, COLORS.panelBg)
+    self:drawUpdateBtn(83, 45, "fleet_local", "[↑ Update All: Local]", "[Confirm Local All?]", function()
+        if self.cb.onUpdateFleet then
+            local _, msg = self.cb.onUpdateFleet("local")
+            self.statusMsg = tostring(msg or "Fleet local update dispatched.")
+        end
+    end)
+    self:drawUpdateBtn(106, 45, "fleet_github", "[↑ Update All: GitHub]", "[Confirm GH All?]", function()
+        if self.cb.onUpdateFleet then
+            local _, msg = self.cb.onUpdateFleet("github")
+            self.statusMsg = tostring(msg or "Fleet GitHub update dispatched.")
+        end
+    end)
+    self:drawUpdateBtn(130, 45, "upd_ae2", "[↻ Update Brain]", "[Confirm Brain?]", function()
+        if self.cb.onPeerAction then
+            self.statusMsg = tostring(self.cb.onPeerAction("ae2", "update_local", { source = "local" }) or "Updating Brain...")
+        end
+    end)
 end
 
 function UI:renderLogModal()
@@ -1580,6 +1703,59 @@ function UI:renderLogModal()
             self:drawText(mx + 3, my + 3 + i, padOrTrunc(txt, mw - 6), col, COLORS.headerBg)
         end
     end
+end
+
+function UI:runStockSearch(resetScroll)
+    if resetScroll then self.tabScroll = 0 end
+    if not (self.cb and self.cb.onStockSearch) then return end
+    local q = tostring(self.stockSearchQuery or "")
+    local flt = tostring(self.stockSearchFilter or "ALL")
+    local res = self.cb.onStockSearch(q, flt)
+    if type(res) == "table" and res.ok and type(res.rules) == "table" then
+        self.stockSearchResults = res.rules
+        self.stockSearchInfo = {
+            matched = tonumber(res.matched) or #res.rules,
+            total = tonumber(res.total) or #res.rules,
+            filter = res.filter or flt,
+            query = res.query or q,
+        }
+        self.statusMsg = string.format("Stock search [%s%s]: %d/%d match(es).",
+            flt, (q ~= "" and (" | " .. q) or ""),
+            tonumber(res.matched) or #res.rules, tonumber(res.total) or #res.rules)
+    else
+        self.statusMsg = "Stock search: " .. tostring(type(res) == "table" and res.error or "No response")
+    end
+end
+
+function UI:renderSearchPrompt()
+    if not self.searchPromptActive then return end
+    self.hitboxes = {}
+    local mx, my, mw, mh = 34, 17, 92, 11
+    self:drawFrame(mx, my, mw, mh, COLORS.cyan, COLORS.headerBg, "double")
+    self:fillRect(mx + 1, my + 1, mw - 2, mh - 2, " ", COLORS.headerBg)
+    self:drawText(mx + 3, my + 1, "SEARCH MAINNET STOCK MAINTAINER RULES", COLORS.cyan, COLORS.headerBg)
+    self:drawText(mx + 3, my + 3, "Query (label, ID, group, state, err, warn, tag, cpu):", COLORS.muted, COLORS.headerBg)
+    self:fillRect(mx + 3, my + 5, mw - 6, 1, " ", COLORS.fg, COLORS.bg)
+    local bufShown = padOrTrunc(tostring(self.searchPromptBuffer or "") .. "_", mw - 8)
+    self:drawText(mx + 4, my + 5, bufShown, COLORS.fg, COLORS.bg)
+    local bx = mx + 3
+    bx = self:drawButton(bx, my + 8, "[ Apply (Enter) ]", COLORS.fg, COLORS.darkGreen, function()
+        self.stockSearchQuery = tostring(self.searchPromptBuffer or "")
+        self.searchPromptActive = false
+        self:runStockSearch(true)
+    end) + 2
+    bx = self:drawButton(bx, my + 8, "[ Clear ]", COLORS.yellow, COLORS.btnBg, function()
+        self.stockSearchQuery = ""
+        self.stockSearchFilter = "ALL"
+        self.stockSearchResults = nil
+        self.stockSearchInfo = nil
+        self.searchPromptActive = false
+        self.tabScroll = 0
+        self.statusMsg = "Cleared stock search."
+    end) + 2
+    self:drawButton(bx, my + 8, "[ Cancel (Esc) ]", COLORS.muted, COLORS.btnBg, function()
+        self.searchPromptActive = false
+    end)
 end
 
 function UI:render()
@@ -1610,10 +1786,13 @@ function UI:render()
     end
 
     self:drawText(1, self.h - 1, string.rep("─", self.w), COLORS.border, COLORS.bg)
-    self:drawText(2, self.h, padOrTrunc(self.statusMsg or "", self.w - 64), COLORS.fg, COLORS.bg)
-    self:drawText(self.w - 60, self.h, "Keys: 1-9,0 Tabs | S Scan | P Ping | L Log | R Reset | Q Quit", COLORS.muted, COLORS.bg)
+    local keysStr = "Keys: 1-9,0 Tabs | / Search | S Scan | P Ping | L Log | R Reset | Q Quit"
+    local keysX = math.max(2, self.w - unicode.wlen(keysStr))
+    self:drawText(2, self.h, padOrTrunc(self.statusMsg or "", math.max(0, keysX - 4)), COLORS.fg, COLORS.bg)
+    self:drawText(keysX, self.h, keysStr, COLORS.muted, COLORS.bg)
 
     self:renderLogModal()
+    self:renderSearchPrompt()
     self:flush()
 end
 
@@ -1627,9 +1806,10 @@ function UI:handleTouch(x, y, _button)
         end
     end
     if not hit then
-        if self.confirmCancelCpu or self.confirmRebootPeer then
+        if self.confirmCancelCpu or self.confirmRebootPeer or self.confirmUpdateKey then
             self.confirmCancelCpu = nil
             self.confirmRebootPeer = nil
+            self.confirmUpdateKey = nil
             self:render()
             return true
         end
@@ -1640,6 +1820,9 @@ function UI:handleTouch(x, y, _button)
     end
     if hit.kind ~= "reboot" then
         self.confirmRebootPeer = nil
+    end
+    if hit.kind ~= "update" then
+        self.confirmUpdateKey = nil
     end
     hit.fn()
     if self.running then self:render() end
@@ -1661,23 +1844,49 @@ function UI:handleScroll(dir)
 end
 
 function UI:handleKeyDown(char, code)
-    if char == 113 or char == 81 then -- 'q'/'Q'
+    if self.searchPromptActive then
+        if code == 1 or char == 27 then
+            self.searchPromptActive = false
+        elseif code == 28 or char == 13 or char == 10 then
+            self.stockSearchQuery = tostring(self.searchPromptBuffer or "")
+            self.searchPromptActive = false
+            self:runStockSearch(true)
+        elseif code == 14 or char == 8 or char == 127 then
+            local len = #self.searchPromptBuffer
+            if len > 0 then
+                self.searchPromptBuffer = self.searchPromptBuffer:sub(1, len - 1)
+            end
+        elseif type(char) == "number" and char >= 32 and char <= 126 then
+            if #self.searchPromptBuffer < 42 then
+                self.searchPromptBuffer = self.searchPromptBuffer .. string.char(char)
+            end
+        end
+        self:render()
+        return
+    end
+    if char == 47 and self.tab == TAB_STOCK then -- '/' opens Stock Search
+        self.searchPromptActive = true
+        self.searchPromptBuffer = tostring(self.stockSearchQuery or "")
+    elseif char == 113 or char == 81 then -- 'q'/'Q'
         self.running = false
     elseif char >= 49 and char <= 57 then -- '1'..'9'
         self.tab = char - 48
         self.tabScroll = 0
         self.confirmCancelCpu = nil
         self.confirmRebootPeer = nil
+        self.confirmUpdateKey = nil
     elseif char == 48 then -- '0' -> Setup
         self.tab = TAB_SETUP
         self.tabScroll = 0
         self.confirmCancelCpu = nil
         self.confirmRebootPeer = nil
+        self.confirmUpdateKey = nil
     elseif code == 15 or char == 9 then -- Tab cycles 1..10
         self.tab = (self.tab % 10) + 1
         self.tabScroll = 0
         self.confirmCancelCpu = nil
         self.confirmRebootPeer = nil
+        self.confirmUpdateKey = nil
     elseif char == 108 or char == 76 then -- 'l'/'L'
         self.logModalActive = not self.logModalActive
     elseif char == 115 or char == 83 then -- 's'/'S'
@@ -1689,6 +1898,7 @@ function UI:handleKeyDown(char, code)
     elseif char == 114 or char == 82 then -- 'r'/'R'
         self.confirmCancelCpu = nil
         self.confirmRebootPeer = nil
+        self.confirmUpdateKey = nil
         self.logModalActive = false
     end
     if self.running then self:render() end

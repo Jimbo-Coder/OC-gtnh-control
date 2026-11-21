@@ -1407,22 +1407,165 @@ function Scheduler.executeRpcTable(cfg, state, cmd, compLib, onMutate)
                 if okC then cl = cMod end
             end
             local hasInet = cl and ((cl.isAvailable and cl.isAvailable("internet")) or (cl.list and cl.list("internet", true)() ~= nil))
-            if not hasInet then
-                return { id = id, ok = false, error = "No Internet Card on Stock Maintainer OC" }
+            local hasModem = cl and ((cl.isAvailable and (cl.isAvailable("modem") or cl.isAvailable("tunnel")))
+                or (cl.list and (cl.list("modem", true)() ~= nil or cl.list("tunnel", true)() ~= nil)))
+            if not hasInet and not hasModem then
+                return { id = id, ok = false, error = "No Internet Card or Mesh Modem on Stock Maintainer OC" }
             end
             local url = (type(cmd.url) == "string" and cmd.url ~= "") and cmd.url or "http://127.0.0.1:8765/oc-raw"
             if not url:match("^https?://[%w%.%-_:]+") then
                 return { id = id, ok = false, error = "Invalid update URL" }
             end
             state._pendingUpdateUrl = url
+            if not hasInet and type(cmd.relayFrom) == "string" and cmd.relayFrom ~= "" then
+                state._pendingUpdateRelay = cmd.relayFrom
+            end
             state._pendingReboot = true
-            return { id = id, ok = true, updating = true, url = url }
+            return { id = id, ok = true, updating = true, url = url, viaMesh = (not hasInet) }
         elseif act == "reboot" then
             state._pendingReboot = true
             return { id = id, ok = true, rebooting = true }
         else
             return { id = id, ok = false, error = "Unknown action: " .. tostring(act) }
         end
+    elseif op == "search_rules" then
+        local qRaw = tostring(cmd.q or cmd.query or "")
+        local flt = string.upper(tostring(cmd.filter or "ALL"))
+        if flt == "" then flt = "ALL" end
+        local limit = math.max(1, math.min(60, math.floor(tonumber(cmd.limit) or 26)))
+        local terms = {}
+        for tok in string.lower(qRaw):gmatch("%S+") do
+            terms[#terms + 1] = tok
+        end
+
+        local allRules = (cfg and cfg.rules) or {}
+        local stById = {}
+        for _, rs in ipairs((state and state.ruleStatuses) or {}) do
+            if rs and rs.id then stById[rs.id] = rs end
+        end
+
+        local sevRank = { ERR = 1, WARN = 2, LOW = 3, CRAFT = 4, OK = 5, OFF = 6 }
+        local matched = {}
+        for _, r in ipairs(allRules) do
+            local sr = stById[r.id] or {}
+            local st = sr.state or ((r.enabled == false) and "OFF" or "LOW")
+            local hasWarn = (sr.warnKind ~= nil) or (type(sr.warn) == "string" and sr.warn ~= "")
+            local hasErr = (st == "ERR") or (type(sr.error) == "string" and sr.error ~= "")
+            local tags = (type(r.tags) == "table" and #r.tags > 0) and r.tags or nil
+            local tagsStr = tags and table.concat(tags, " ") or ""
+            local isQft = false
+            local isDtpf = (sr.dtpfInfo ~= nil) or (r.allowDtpfOverlap == true)
+            if tags then
+                for _, tg in ipairs(tags) do
+                    local lt = string.lower(tostring(tg or ""))
+                    if lt == "dtpf" then isDtpf = true end
+                    if lt:sub(1, 3) == "qft" then isQft = true end
+                end
+            end
+            if not isQft then
+                local gLow = string.lower(tostring(r.group or ""))
+                local dLow = string.lower(tostring(sr.stateDetail or ""))
+                if gLow:find("qft", 1, true) or dLow:find("qft", 1, true) then
+                    isQft = true
+                end
+            end
+
+            local matchF = (flt == "ALL")
+                or (flt == "LOW" and st == "LOW")
+                or (flt == "CRAFT" and st == "CRAFT")
+                or (flt == "ERR" and hasErr)
+                or (flt == "WARN" and hasWarn)
+                or (flt == "OFF" and (r.enabled == false or st == "OFF"))
+                or (flt == "DTPF" and isDtpf)
+                or (flt == "QFT" and isQft)
+                or (flt == "ITEMS" and r.type == "item")
+                or (flt == "FLUIDS" and r.type == "fluid")
+
+            local matchQ = true
+            if matchF and #terms > 0 then
+                local hay = string.lower(table.concat({
+                    tostring(r.label or ""),
+                    tostring(r.name or ""),
+                    tostring(r.group or ""),
+                    tostring(r.type or ""),
+                    tostring(r.cpuFilter or ""),
+                    tagsStr,
+                    tostring(st),
+                    tostring(sr.stateDetail or ""),
+                    tostring(sr.error or ""),
+                    tostring(sr.warn or ""),
+                    tostring(sr.cpu or ""),
+                }, " "))
+                for _, t in ipairs(terms) do
+                    if not hay:find(t, 1, true) then
+                        matchQ = false
+                        break
+                    end
+                end
+            end
+
+            if matchF and matchQ then
+                local rk = sevRank[st] or 9
+                if hasWarn and rk > 2 then rk = 2 end
+                matched[#matched + 1] = {
+                    rk = rk,
+                    pri = tonumber(r.priority) or 50,
+                    lbl = tostring(r.label or r.name or ""),
+                    row = {
+                        id = r.id,
+                        type = r.type,
+                        name = r.name,
+                        damage = r.damage,
+                        label = r.label,
+                        group = r.group,
+                        priority = r.priority,
+                        target = r.target,
+                        batch = r.batch,
+                        cpuFilter = r.cpuFilter,
+                        enabled = r.enabled ~= false,
+                        tags = tags,
+                        stock = sr.stock or 0,
+                        pct = sr.pct or 0,
+                        state = st,
+                        stateDetail = (type(sr.stateDetail) == "string") and sr.stateDetail:sub(1, 56) or nil,
+                        cpu = sr.cpu,
+                        warn = (type(sr.warn) == "string") and sr.warn:sub(1, 56) or nil,
+                        error = (type(sr.error) == "string") and sr.error:sub(1, 56) or nil,
+                    },
+                }
+            end
+        end
+
+        table.sort(matched, function(a, b)
+            if a.rk ~= b.rk then return a.rk < b.rk end
+            if a.pri ~= b.pri then return a.pri < b.pri end
+            return a.lbl < b.lbl
+        end)
+
+        local out = {}
+        local okS, serMod = pcall(require, "serialization")
+        local byteTotal = 160
+        for i = 1, math.min(limit, #matched) do
+            local rw = matched[i].row
+            if okS and serMod and serMod.serialize then
+                local okSz, s = pcall(serMod.serialize, rw)
+                if okSz and type(s) == "string" then
+                    if i > 1 and (byteTotal + #s) > 6800 then break end
+                    byteTotal = byteTotal + #s
+                end
+            end
+            out[#out + 1] = rw
+        end
+
+        return {
+            id = id,
+            ok = true,
+            total = #allRules,
+            matched = #matched,
+            filter = flt,
+            query = qRaw,
+            rules = out,
+        }
     elseif op == "_dtpf_handoff_ack" then
         if Scheduler.applyDtpfHandoffAck(cfg, state, cmd.ack) > 0 then
             mutated = true

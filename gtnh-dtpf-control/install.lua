@@ -235,15 +235,95 @@ local function askYesNo(promptText, nonInteractiveDefault, optYes, optNoPrompt)
     return (tostring(line) .. "y"):match("^%s*[Yy]") ~= nil
 end
 
+local _meshReqSeq = 0
+local function fetchViaMesh(fullUrl, meshTarget)
+    local okEv, evLib = pcall(require, "event")
+    local okSer, serLib = pcall(require, "serialization")
+    local okComp, compLib = pcall(require, "computer")
+    if (not okEv or not evLib or not evLib.pull)
+        or (not okSer or not serLib or not serLib.serialize or not serLib.unserialize) then
+        return nil, "OpenOS event/serialization required for mesh relay"
+    end
+    local mAddr = component.list("modem", true)()
+    local modem = (mAddr and component.proxy(mAddr)) or (component.isAvailable("modem") and component.modem or nil)
+    local tAddr = component.list("tunnel", true)()
+    local tunnel = (tAddr and component.proxy(tAddr)) or (component.isAvailable("tunnel") and component.tunnel or nil)
+    if not modem and not tunnel then
+        return nil, "No modem or tunnel card for mesh relay"
+    end
+    local MESH_PORT = 4205
+    if modem and modem.open then pcall(modem.open, MESH_PORT) end
+
+    _meshReqSeq = _meshReqSeq + 1
+    local uptimeFn = (okComp and compLib and compLib.uptime) or function() return os.clock() end
+    local reqId = string.format("ota_%d_%d", math.floor(uptimeFn() * 1000), _meshReqSeq)
+    local payload = serLib.serialize({ id = reqId, url = fullUrl })
+
+    local sent = false
+    if type(meshTarget) == "string" and meshTarget ~= "" and meshTarget ~= "tunnel" and modem and modem.send then
+        sent = pcall(modem.send, meshTarget, MESH_PORT, "MESH_HTTP_GET", payload)
+    end
+    if not sent then
+        if modem and modem.broadcast then
+            sent = pcall(modem.broadcast, MESH_PORT, "MESH_HTTP_GET", payload) or sent
+        end
+        if tunnel and tunnel.send then
+            sent = pcall(tunnel.send, "MESH_HTTP_GET", payload) or sent
+        end
+    end
+    if not sent then
+        return nil, "Failed to transmit MESH_HTTP_GET"
+    end
+
+    local chunks, eofSeq = {}, nil
+    local deadline = uptimeFn() + 25.0
+    while uptimeFn() < deadline do
+        local rem = math.max(0.1, math.min(2.0, deadline - uptimeFn()))
+        local evName, _, _, _, _, msgType, rawBody = evLib.pull(rem, "modem_message")
+        if evName == "modem_message" then
+            local pkt = (type(rawBody) == "table") and rawBody or nil
+            if (not pkt) and type(rawBody) == "string" then
+                local okU, dec = pcall(serLib.unserialize, rawBody)
+                if okU and type(dec) == "table" then pkt = dec end
+            end
+            if type(pkt) == "table" and tostring(pkt.id or "") == reqId then
+                if msgType == "MESH_HTTP_ERR" then
+                    return nil, tostring(pkt.error or "mesh relay error")
+                elseif msgType == "MESH_HTTP_CHUNK" then
+                    local seq = tonumber(pkt.seq) or (#chunks + 1)
+                    chunks[seq] = tostring(pkt.data or "")
+                    deadline = uptimeFn() + 15.0
+                    if pkt.eof then
+                        eofSeq = seq
+                        break
+                    end
+                end
+            end
+        end
+    end
+    if not eofSeq then
+        return nil, "mesh relay timeout"
+    end
+    for k = 1, eofSeq do
+        if chunks[k] == nil then
+            return nil, "incomplete mesh relay transfer"
+        end
+    end
+    local body = table.concat(chunks, "", 1, eofSeq)
+    if #body == 0 then return nil, "empty response" end
+    return body
+end
+
 local function runInstaller(args)
     args = args or {}
     local pos = {}
     local localDir = nil
     local optRepo, optBranch = nil, nil
     local isUpdate = false
-    local optYes = false
-    local optNoPrompt = false
+    local optYes, optNoPrompt = false, false
     local optAutostart = nil
+    local optMeshRelay, meshTarget = false, nil
+
     local idx = 1
     while idx <= #args do
         local a = tostring(args[idx])
@@ -265,6 +345,11 @@ local function runInstaller(args)
         elseif a == "--branch" then
             idx = idx + 1
             optBranch = tostring(args[idx] or "")
+        elseif a == "--mesh-relay" then
+            optMeshRelay = true
+        elseif a == "--mesh-target" then
+            idx = idx + 1
+            meshTarget = tostring(args[idx] or "")
         elseif a == "--update" then
             isUpdate = true
         elseif a == "--yes" or a == "-y" then
@@ -290,17 +375,23 @@ local function runInstaller(args)
     end
 
     local internet = (not localDir) and getInternetProxy() or nil
-    if (not localDir) and (not internet) then
-        io.stderr:write("ERROR: Internet Card required for install/update (or use `install --local <dir>`).\n")
-        return false, "no internet card"
+    local hasMesh = false
+    if not localDir then
+        hasMesh = (component.list("modem", true)() ~= nil) or (component.list("tunnel", true)() ~= nil)
+            or component.isAvailable("modem") or component.isAvailable("tunnel")
+        if (not internet) and not (optMeshRelay or hasMesh) then
+            io.stderr:write("ERROR: Internet Card or Mesh Modem required for install/update (or use `install --local <dir>`).\n")
+            return false, "no internet card"
+        end
     end
+    local useMesh = (not localDir) and (optMeshRelay or (not internet and hasMesh))
     local repo, branch = resolveRepoAndBranch(repoArgs)
     local baseUrl = repo:match("^https?://")
         and (repo:gsub("/+$", "") .. "/")
         or string.format("https://raw.githubusercontent.com/%s/%s/", repo, branch)
 
     print("=== GTNH DTPF AUTOMATION INSTALLER ===")
-    print(string.format("Source : %s", localDir and ("local:" .. localDir) or string.format("%s (%s/%s)", repo, branch, SUBDIR)))
+    print(string.format("Source : %s", localDir and ("local:" .. localDir) or ((useMesh and "mesh:" or "") .. string.format("%s (%s/%s)", repo, branch, SUBDIR))))
     print(string.format("Target : %s", INSTALL_DIR))
     print("")
 
@@ -320,6 +411,11 @@ local function runInstaller(args)
         end
     end
 
+    local function fetchRemote(u)
+        if useMesh then return fetchViaMesh(u, meshTarget) end
+        return fetchUrl(internet, u)
+    end
+
     for i = 1, #FILES do
         local rel = FILES[i]
         local body, fetchErr
@@ -331,9 +427,9 @@ local function runInstaller(args)
             end
         else
             local primaryUrl = useRootFallback and (baseUrl .. rel) or (baseUrl .. SUBDIR .. "/" .. rel)
-            body, fetchErr = fetchUrl(internet, primaryUrl)
+            body, fetchErr = fetchRemote(primaryUrl)
             if (not body) and (not useRootFallback) and tostring(fetchErr):find("404", 1, true) then
-                body, fetchErr = fetchUrl(internet, baseUrl .. rel)
+                body, fetchErr = fetchRemote(baseUrl .. rel)
                 if body then
                     useRootFallback = true
                 end

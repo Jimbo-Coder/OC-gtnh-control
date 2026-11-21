@@ -1369,6 +1369,110 @@ do
     end
     assert(sawAck, "Emitted STOCK_PUSH_ACK back to sender")
 end
+
+-- TEST 9e: search_rules RPC, viaMesh update_local, QFT filter, Tab 3 [✓] importer, footer bounds & Tier-2 compact mode
+do
+    local sCfg = Scheduler.defaultConfig()
+    Scheduler.upsertRule(sCfg, { id = "r_ok", type = "item", name = "minecraft:iron_ingot", damage = 0, label = "Iron Ingot", group = "Metals", target = 64, batch = 16 })
+    Scheduler.upsertRule(sCfg, { id = "r_err", type = "item", name = "minecraft:diamond", damage = 0, label = "Diamond", group = "Gems", target = 64, batch = 16, cpuFilter = "badcpu" })
+    Scheduler.upsertTaggedRules(sCfg, {
+        tag = "QFT: Plastics",
+        group = "QFT",
+        source = "qft",
+        rules = {
+            { type = "fluid", name = "oxygen", damage = 0, label = "Oxygen Gas", target = 64000, batch = 16000 },
+        },
+    })
+    local qRule = Scheduler.findRule(sCfg, "fluid", "oxygen", 0)
+    local sSt = Scheduler.newState()
+    sSt.ruleStatuses = {
+        { id = "r_ok", stock = 64, state = "OK", stateDetail = "Satisfied" },
+        { id = "r_err", stock = 0, state = "ERR", stateDetail = "Waiting", error = "No CPU badcpu", cpu = "badcpu" },
+        { id = qRule.id, stock = 1000, state = "LOW", stateDetail = "QFT: Plastics active" },
+    }
+    local srAll = Scheduler.executeRpcTable(sCfg, sSt, { op = "search_rules", q = "", filter = "ALL" })
+    assertEq(srAll.ok, true, "search_rules ALL succeeds")
+    assertEq(srAll.rules[1].id, "r_err", "search_rules sorts ERR first ahead of LOW/OK")
+    local srQft = Scheduler.executeRpcTable(sCfg, sSt, { op = "search_rules", q = "oxy plast", filter = "QFT" })
+    assertEq(srQft.matched, 1, "search_rules QFT multi-token filter matches QFT rule")
+    assertEq(srQft.rules[1].id, qRule.id, "Matched Oxygen QFT rule")
+    local srCpu = Scheduler.executeRpcTable(sCfg, sSt, { op = "search_rules", q = "badcpu" })
+    assertEq(srCpu.matched, 1, "search_rules matches error/cpuFilter tokens")
+
+    -- update_local succeeds with viaMesh=true when only modem is present (no Internet Card)
+    local meshOnlyComp = {
+        isAvailable = function(k) return k == "modem" end,
+        list = function(k) local d = false; return function() if k == "modem" and not d then d = true; return "m-1" end return nil end end,
+    }
+    local mUpdSt = Scheduler.newState()
+    local mUpdRes = Scheduler.executeRpcTable(sCfg, mUpdSt, { id = "um1", op = "stock_action", action = "update_local", url = "http://127.0.0.1:8765/oc-raw" }, meshOnlyComp)
+    assertEq(mUpdRes.ok, true, "update_local allows mesh relay when modem present without Internet Card")
+    assertEq(mUpdRes.viaMesh, true, "update_local sets viaMesh=true without Internet Card")
+
+    -- Render 160x50 Stock UI + audit footer never exceeds column 160 + verify viewport drift recovery & 80x25 compact mode
+    local scrLines, maxWrittenCol = {}, 0
+    local mockVpW, mockVpH = 160, 50
+    local mockMaxW, mockMaxH = 160, 50
+    local uni = require("unicode")
+    local mockGpu = {
+        getScreen = function() return "scr-1" end,
+        maxResolution = function() return mockMaxW, mockMaxH end,
+        getResolution = function() return mockVpW, mockVpH end,
+        setResolution = function(w, h) mockVpW, mockVpH = w, h; return true end,
+        getViewport = function() return mockVpW, mockVpH end,
+        setViewport = function(w, h) mockVpW, mockVpH = w, h; return true end,
+        setForeground = function() end,
+        setBackground = function() end,
+        set = function(x, y, s)
+            local str = tostring(s or "")
+            local endC = x + uni.wlen(str) - 1
+            if endC > maxWrittenCol then maxWrittenCol = endC end
+            scrLines[y] = (scrLines[y] or "") .. str
+        end,
+    }
+    sSt.physicalMaintainers = {
+        { addr = "lm-addr-1111", slot = 1, type = "item", name = "minecraft:iron_ingot", damage = 0, label = "Iron Ingot", target = 64, batch = 16, enabled = true },
+        { addr = "lm-addr-2222", slot = 2, type = "item", name = "minecraft:gold_ingot", damage = 0, label = "Gold Ingot", target = 64, batch = 16, enabled = true },
+    }
+    local uiComp = { isAvailable = function(k) return k == "gpu" end, list = function() return function() return nil end end, gpu = mockGpu }
+    local stockUi = UI.new(sCfg, sSt, function() end, uiComp)
+    assertEq(stockUi.w, 160, "Tier 3 UI width initialized to 160")
+    assertEq(stockUi.h, 50, "Tier 3 UI height initialized to 50")
+    for t = 1, 4 do
+        stockUi.tab = t
+        if t == 3 then stockUi.importSearch = "iron" end
+        stockUi:render()
+    end
+    assert(maxWrittenCol <= 160, "Stock 160x50 UI overflowed right edge: maxCol=" .. tostring(maxWrittenCol))
+    assert(scrLines[50] and scrLines[50]:find("Q Quit", 1, true), "Footer 'Q Quit' must not be clipped in bottom right: " .. tostring(scrLines[50]))
+    stockUi.tab = 3
+    scrLines = {}; for i = 1, #stockUi.curBuf do stockUi.curBuf[i] = -1 end
+    stockUi.importSearch = "iron"
+    stockUi:render()
+    assert(scrLines[14] and scrLines[14]:find("[✓]", 1, true), "Tab 3 physical importer marks already-imported Iron Ingot with [✓]")
+    stockUi.tab = 2
+    stockUi:render()
+    stockUi:handleTouch(79, 5, 0) -- [QFT] pill on Tab 2
+    assertEq(stockUi.filterKind, "QFT", "Tab 2 [QFT] pill switched filterKind to QFT")
+
+    -- Simulate external viewport drift to 80x25 -> flush detects & calls syncDisplay(true) back to 160x50
+    mockVpW, mockVpH = 80, 25
+    stockUi:flush()
+    assertEq(mockVpW, 160, "syncDisplay restored viewport width to 160 after drift")
+    assertEq(mockVpH, 50, "syncDisplay restored viewport height to 50 after drift")
+
+    -- Tier 2 (80x25) responsive compact fallback never exceeds col 80 or row 25
+    mockMaxW, mockMaxH = 80, 25
+    mockVpW, mockVpH = 80, 25
+    scrLines = {}; maxWrittenCol = 0
+    local uiCompact = UI.new(sCfg, sSt, function() end, uiComp)
+    assertEq(uiCompact.w, 80, "Tier 2 UI width clamped cleanly to 80")
+    assertEq(uiCompact.h, 25, "Tier 2 UI height clamped cleanly to 25")
+    uiCompact:render()
+    assert(maxWrittenCol <= 80, "Compact 80x25 layout overflowed col 80: " .. tostring(maxWrittenCol))
+    assert(scrLines[2] and scrLines[2]:find("Compact 80x25", 1, true), "Compact 80x25 layout renders resolution notice")
+    assert(scrLines[25] and scrLines[25]:find("Q:Quit", 1, true), "Compact 80x25 layout renders unclipped footer on row 25")
+end
 return "OK"
 """
             res = host.exec_lua(lua_suite, "stock_test_suite")
@@ -1429,6 +1533,60 @@ return "OK"
                     f2:close()
                     assert(body:find("customTag=991", 1, true), "Update overwrote config.cfg!")
                     assert(__py_exists("/home/config.stock.bak"), "Missing /home/config.stock.bak")
+
+                    -- Verify install.lua --mesh-relay updates cleanly without an Internet Card via MESH_HTTP_CHUNK relay
+                    local comp = require("component")
+                    local evLib = require("event")
+                    local ser = require("serialization")
+                    local origInet = comp.internet
+                    local origList, origProxy, origAvail = comp.list, comp.proxy, comp.isAvailable
+                    local origPull = evLib.pull
+                    local meshQueue = {}
+                    local meshGets = {}
+                    local relayModem = {
+                        open = function() return true end,
+                        broadcast = function(port, mType, rawPayload)
+                            if mType == "MESH_HTTP_GET" then
+                                local req = ser.unserialize(rawPayload)
+                                meshGets[#meshGets + 1] = req
+                                local rel = req.url:match("/oc%-raw/gtnh%-stock%-control/(.+)$")
+                                local src = rel and __py_read_file(__STOCK_ROOT .. "/" .. rel) or nil
+                                if not src then
+                                    meshQueue[#meshQueue + 1] = { "modem_message", "mod-m", "ae2-r", 4205, 5, "MESH_HTTP_ERR", ser.serialize({ id = req.id, error = "404" }) }
+                                else
+                                    local pos, seq, total = 1, 0, #src
+                                    while pos <= total do
+                                        seq = seq + 1
+                                        local nxt = math.min(total, pos + 2047)
+                                        meshQueue[#meshQueue + 1] = {
+                                            "modem_message", "mod-m", "ae2-r", 4205, 5, "MESH_HTTP_CHUNK",
+                                            ser.serialize({ id = req.id, seq = seq, eof = (nxt >= total), total = total, data = src:sub(pos, nxt) }),
+                                        }
+                                        pos = nxt + 1
+                                    end
+                                end
+                            end
+                            return true
+                        end,
+                    }
+                    comp.internet = nil
+                    comp.isAvailable = function(k) return k == "modem" end
+                    comp.list = function(k) local d = false; return function() if k == "modem" and not d then d = true; return "mod-m" end return nil end end
+                    comp.proxy = function(a) return (a == "mod-m") and relayModem or origProxy(a) end
+                    evLib.pull = function(_, filter)
+                        if (not filter or filter == "modem_message") and #meshQueue > 0 then
+                            return table.unpack(table.remove(meshQueue, 1))
+                        end
+                        return origPull and origPull(0, filter) or nil
+                    end
+                    assert(inst("--mesh-relay", "--url", "http://127.0.0.1:8765/oc-raw", "--update", "--yes"), "Stock --mesh-relay --update failed")
+                    comp.internet, comp.list, comp.proxy, evLib.pull = origInet, origList, origProxy, origPull
+                    comp.isAvailable = origAvail
+                    assert(#meshGets >= 4, "Expected MESH_HTTP_GET requests for stock files")
+                    local f3 = io.open("/home/stock/config.cfg", "r")
+                    local body3 = f3:read("*a")
+                    f3:close()
+                    assert(body3:find("customTag=991", 1, true), "Mesh relay update overwrote config.cfg!")
 
                     local rootInst = assert(loadfile(__MONOREPO_ROOT .. "/install.lua"))
                     rootInst("--list")

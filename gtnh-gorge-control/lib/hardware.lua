@@ -958,8 +958,10 @@ function Hardware.handleMeshMessage(cfg, state, localAddr, sender, port, msgType
                 end
             elseif cmd.action == "update_local" then
                 local hasInet = cl and ((cl.isAvailable and cl.isAvailable("internet")) or (cl.list and cl.list("internet", true)() ~= nil))
-                if not hasInet then
-                    reply = { ok = false, error = "No Internet Card on Gorge OC" }
+                local hasMesh = cl and ((cl.isAvailable and (cl.isAvailable("modem") or cl.isAvailable("tunnel")))
+                    or (cl.list and (cl.list("modem", true)() ~= nil or cl.list("tunnel", true)() ~= nil)))
+                if not hasInet and not hasMesh then
+                    reply = { ok = false, error = "No Internet Card or OC Mesh modem/tunnel" }
                 else
                     local u = (type(cmd.url) == "string" and cmd.url ~= "") and cmd.url or "http://127.0.0.1:8765/oc-raw"
                     if not u:match("^https?://[%w%.%-_:]+") then
@@ -970,7 +972,7 @@ function Hardware.handleMeshMessage(cfg, state, localAddr, sender, port, msgType
                             state._pendingReboot = true
                             state._forcePollNow = true
                         end
-                        reply = { ok = true, updating = true, url = u }
+                        reply = { ok = true, updating = true, viaMesh = (not hasInet), url = u }
                     end
                 end
             elseif cmd.action == "reboot" then

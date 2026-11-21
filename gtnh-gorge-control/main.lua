@@ -216,6 +216,58 @@ local function runCheck()
     print("=== CHECK COMPLETE (NO PATTERNS OR WORK MODIFIED) ===")
 end
 
+local function wdNow()
+    if computer and computer.uptime then return computer.uptime() end
+    return os.clock and os.clock() or 0
+end
+
+local function armShellReviveWatchdog(cfg)
+    local okEv, evLib = pcall(require, "event")
+    if not okEv or type(evLib) ~= "table" or type(evLib.listen) ~= "function" then
+        return false
+    end
+    local now = wdNow()
+    local wd = rawget(_G, "__gtnhReviveWd")
+    if type(wd) ~= "table" then
+        wd = { armed = false, exitAt = now, lastKeyAt = now, hooked = false }
+        rawset(_G, "__gtnhReviveWd", wd)
+    end
+    wd.exitAt = now
+    wd.lastKeyAt = now
+    wd.meshPort = tonumber(cfg and cfg.meshPort) or 4205
+    wd.armed = true
+    if not wd.hooked then
+        wd.hooked = true
+        evLib.listen("key_down", function()
+            wd.lastKeyAt = wdNow()
+        end)
+        evLib.listen("modem_message", function(_, _, _, port, _, msgType)
+            if not wd.armed then return end
+            if msgType ~= "GTNH_WAKE" then return end
+            if port ~= wd.meshPort and port ~= 0 then return end
+            if not isAutostartEnabled() then return end
+            local holdExists = (filesystem and filesystem.exists and filesystem.exists("/tmp/gtnh_hold")) == true
+            if not holdExists and io and io.open then
+                local f = io.open("/tmp/gtnh_hold", "r")
+                if f then f:close(); holdExists = true end
+            end
+            if holdExists then return end
+            local cur = wdNow()
+            if (cur - (wd.exitAt or cur)) < 30 or (cur - (wd.lastKeyAt or cur)) < 30 then
+                return
+            end
+            wd.armed = false
+            if computer and computer.shutdown then pcall(computer.shutdown, true) end
+        end)
+    end
+    return true
+end
+
+local function disarmShellReviveWatchdog()
+    local wd = rawget(_G, "__gtnhReviveWd")
+    if type(wd) == "table" then wd.armed = false end
+end
+
 local function handlePendingRebootOrUpdate(state)
     if state._pendingUpdateUrl then
         local updUrl = state._pendingUpdateUrl
@@ -232,7 +284,11 @@ local function handlePendingRebootOrUpdate(state)
         end
         if chunk then
             print("Gorge Control updating from " .. updUrl .. "...")
-            local okU, okInst = pcall(chunk, "--url", updUrl, "--update", "--yes")
+            local hasInet = (component.isAvailable and component.isAvailable("internet"))
+                or (component.list and component.list("internet", true)() ~= nil)
+            local updArgs = { "--url", updUrl, "--update", "--yes" }
+            if not hasInet then updArgs[#updArgs + 1] = "--mesh-relay" end
+            local okU, okInst = pcall(chunk, table.unpack(updArgs))
             if okU and okInst ~= false then
                 pcall(os.sleep, 0.15)
                 if computer.shutdown then pcall(computer.shutdown, true) end
@@ -254,6 +310,7 @@ end
 
 local function runWorker()
     while true do
+        disarmShellReviveWatchdog()
         local cfg = loadConfig()
         local state = Scheduler.newState()
         Scheduler.loadInflight(INFLIGHT_PATH, state, BACKUP_INFLIGHT_PATH)
@@ -304,11 +361,13 @@ local function runWorker()
         end
         if userExit then
             print("Gorge Control worker stopped cleanly.")
+            armShellReviveWatchdog(cfg)
             return
         elseif not okLoop then
             io.stderr:write("Gorge Control worker fault (restarting in 2s):\n" .. tostring(errLoop) .. "\n")
             os.sleep(2)
         else
+            armShellReviveWatchdog(cfg)
             return
         end
     end
@@ -316,6 +375,7 @@ end
 
 local function runGUI()
     while true do
+        disarmShellReviveWatchdog()
         local cfg = loadConfig()
         local state = Scheduler.newState()
         Scheduler.loadInflight(INFLIGHT_PATH, state, BACKUP_INFLIGHT_PATH)
@@ -422,6 +482,7 @@ local function runGUI()
         end
         if userExit or okLoop then
             print("GTNH Gorge Control stopped cleanly.")
+            armShellReviveWatchdog(cfg)
             return
         else
             io.stderr:write("GTNH Gorge Control fault (restarting in 2s):\n" .. tostring(errLoop) .. "\n")

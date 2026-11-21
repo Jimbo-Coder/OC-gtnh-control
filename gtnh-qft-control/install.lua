@@ -80,9 +80,89 @@ local function syncSettingsBackup()
     return "fresh"
 end
 
+local _meshReqSeq = 0
+local function fetchViaMesh(fullUrl, meshTarget)
+    local okEv, evLib = pcall(require, "event")
+    local okSer, serLib = pcall(require, "serialization")
+    local okComp, compLib = pcall(require, "computer")
+    if (not okEv or not evLib or not evLib.pull)
+        or (not okSer or not serLib or not serLib.serialize or not serLib.unserialize) then
+        return nil, "OpenOS event/serialization required for mesh relay"
+    end
+    local mAddr = component.list("modem", true)()
+    local modem = (mAddr and component.proxy(mAddr)) or (component.isAvailable("modem") and component.modem or nil)
+    local tAddr = component.list("tunnel", true)()
+    local tunnel = (tAddr and component.proxy(tAddr)) or (component.isAvailable("tunnel") and component.tunnel or nil)
+    if not modem and not tunnel then
+        return nil, "No modem or tunnel card for mesh relay"
+    end
+    local MESH_PORT = 4205
+    if modem and modem.open then pcall(modem.open, MESH_PORT) end
+
+    _meshReqSeq = _meshReqSeq + 1
+    local uptimeFn = (okComp and compLib and compLib.uptime) or function() return os.clock() end
+    local reqId = string.format("ota_%d_%d", math.floor(uptimeFn() * 1000), _meshReqSeq)
+    local payload = serLib.serialize({ id = reqId, url = fullUrl })
+
+    local sent = false
+    if type(meshTarget) == "string" and meshTarget ~= "" and meshTarget ~= "tunnel" and modem and modem.send then
+        sent = pcall(modem.send, meshTarget, MESH_PORT, "MESH_HTTP_GET", payload)
+    end
+    if not sent then
+        if modem and modem.broadcast then
+            sent = pcall(modem.broadcast, MESH_PORT, "MESH_HTTP_GET", payload) or sent
+        end
+        if tunnel and tunnel.send then
+            sent = pcall(tunnel.send, "MESH_HTTP_GET", payload) or sent
+        end
+    end
+    if not sent then
+        return nil, "Failed to transmit MESH_HTTP_GET"
+    end
+
+    local chunks, eofSeq = {}, nil
+    local deadline = uptimeFn() + 25.0
+    while uptimeFn() < deadline do
+        local rem = math.max(0.1, math.min(2.0, deadline - uptimeFn()))
+        local evName, _, _, _, _, msgType, rawBody = evLib.pull(rem, "modem_message")
+        if evName == "modem_message" then
+            local pkt = (type(rawBody) == "table") and rawBody or nil
+            if (not pkt) and type(rawBody) == "string" then
+                local okU, dec = pcall(serLib.unserialize, rawBody)
+                if okU and type(dec) == "table" then pkt = dec end
+            end
+            if type(pkt) == "table" and tostring(pkt.id or "") == reqId then
+                if msgType == "MESH_HTTP_ERR" then
+                    return nil, tostring(pkt.error or "mesh relay error")
+                elseif msgType == "MESH_HTTP_CHUNK" then
+                    local seq = tonumber(pkt.seq) or (#chunks + 1)
+                    chunks[seq] = tostring(pkt.data or "")
+                    deadline = uptimeFn() + 15.0
+                    if pkt.eof then
+                        eofSeq = seq
+                        break
+                    end
+                end
+            end
+        end
+    end
+    if not eofSeq then
+        return nil, "mesh relay timeout"
+    end
+    for k = 1, eofSeq do
+        if chunks[k] == nil then
+            return nil, "incomplete mesh relay transfer"
+        end
+    end
+    local body = table.concat(chunks, "", 1, eofSeq)
+    if #body == 0 then return nil, "empty response" end
+    return body
+end
+
 local function runInstaller(args)
     local localDir, optRepo, optBranch = nil, nil, nil
     local isUpdate, optYes, optNoPrompt, optAutostart = false, false, false, nil
+    local optMeshRelay, meshTarget = false, nil
     local i = 1
     while i <= #(args or {}) do
         local a = tostring(args[i])
@@ -91,6 +171,8 @@ local function runInstaller(args)
         elseif a == "--local-bridge" then optRepo = "http://127.0.0.1:8765/oc-raw"
         elseif a == "--repo" then i = i + 1; optRepo = tostring(args[i] or "")
         elseif a == "--branch" then i = i + 1; optBranch = tostring(args[i] or "")
+        elseif a == "--mesh-relay" then optMeshRelay = true
+        elseif a == "--mesh-target" then i = i + 1; meshTarget = tostring(args[i] or "")
         elseif a == "--update" then isUpdate = true
         elseif a == "--yes" or a == "-y" then optYes = true
         elseif a == "--no-prompt" then optNoPrompt = true
@@ -103,11 +185,18 @@ local function runInstaller(args)
         if filesystem.exists(filesystem.concat(sub, "main.lua")) then localDir = sub end
     end
     local internet = nil
+    local hasMesh = false
     if not localDir then
         local addr = component.list("internet", true)()
         internet = addr and component.proxy(addr) or (component.isAvailable("internet") and component.internet or nil)
-        if not internet then io.stderr:write("ERROR: Internet Card required.\n"); return false, "no internet" end
+        hasMesh = (component.list("modem", true)() ~= nil) or (component.list("tunnel", true)() ~= nil)
+            or component.isAvailable("modem") or component.isAvailable("tunnel")
+        if not internet and not (optMeshRelay or hasMesh) then
+            io.stderr:write("ERROR: Internet Card or Mesh Modem required.\n")
+            return false, "no internet"
+        end
     end
+    local useMesh = (not localDir) and (optMeshRelay or (not internet and hasMesh))
     local saved = readWholeFile(REPO_META_PATH)
     if (not optRepo or optRepo == "") and type(saved) == "string" then
         optRepo, optBranch = saved:match("^([^\r\n]+)\r?\n?([^\r\n]*)")
@@ -128,6 +217,8 @@ local function runInstaller(args)
         if localDir then
             body = readWholeFile(filesystem.concat(localDir, rel))
             if not body then err = "missing " .. rel end
+        elseif useMesh then
+            body, err = fetchViaMesh(baseUrl .. rel, meshTarget)
         else
             body, err = fetchUrl(internet, baseUrl .. rel)
         end

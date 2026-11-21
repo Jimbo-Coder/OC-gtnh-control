@@ -104,14 +104,6 @@ function UI.new(cfg, state, onSave, compLib, extras)
     end
 
     local w, h = 160, 50
-    if gpu and gpu.maxResolution and gpu.setResolution then
-        local okM, mw, mh = pcall(gpu.maxResolution)
-        if okM and mw and mh then
-            w = math.min(160, math.floor(tonumber(mw) or 160))
-            h = math.min(50, math.floor(tonumber(mh) or 50))
-            pcall(gpu.setResolution, w, h)
-        end
-    end
 
     local self = setmetatable({
         cfg = cfg or {},
@@ -124,12 +116,13 @@ function UI.new(cfg, state, onSave, compLib, extras)
         h = h,
         tab = TAB_OVERVIEW,
         running = true,
-        filterKind = "ALL", -- ALL | LOW | CRAFT | ERR | WARN | OFF | ITEMS | FLUIDS
+        filterKind = "ALL", -- ALL | LOW | CRAFT | ERR | WARN | OFF | DTPF | QFT | ITEMS | FLUIDS
         filterGroup = "ALL",
         searchQuery = "",
         sortMode = "state", -- state | name | pct | prio
         rulesScroll = 0,
         importScroll = 0,
+        importSearch = "",
         editRuleId = nil,
         numPrompt = nil, -- { title, buf, onApply, isNumeric }
         logModalActive = false,
@@ -146,6 +139,7 @@ function UI.new(cfg, state, onSave, compLib, extras)
         self.curBuf[i] = -1
         self.nxtBuf[i] = empty
     end
+    self:syncDisplay(true)
     return self
 end
 
@@ -235,9 +229,76 @@ function UI:drawProgressBar(x, y, width, pct, fgFill, fgEmpty, bg)
     end
 end
 
+function UI:syncDisplay(forceRedraw)
+    local gpu = self.gpu
+    if not gpu then return false end
+    local cl = self.comp or component
+    if gpu.getScreen and gpu.bind and cl and cl.list then
+        local okS, curScr = pcall(gpu.getScreen)
+        if okS and not curScr then
+            local sAddr = cl.list("screen", true)()
+            if sAddr then pcall(gpu.bind, sAddr) end
+        end
+    end
+    local tw, th = 160, 50
+    if gpu.maxResolution then
+        local okM, mw, mh = pcall(gpu.maxResolution)
+        if okM and mw and mh then
+            tw = math.max(40, math.min(160, math.floor(tonumber(mw) or 160)))
+            th = math.max(16, math.min(50, math.floor(tonumber(mh) or 50)))
+        end
+    end
+    if gpu.setResolution then pcall(gpu.setResolution, tw, th) end
+    if gpu.setViewport then pcall(gpu.setViewport, tw, th) end
+
+    local aw, ah = tw, th
+    if gpu.getViewport then
+        local okV, vw, vh = pcall(gpu.getViewport)
+        if okV and tonumber(vw) and tonumber(vh) then
+            aw, ah = math.floor(tonumber(vw)), math.floor(tonumber(vh))
+        end
+    elseif gpu.getResolution then
+        local okR, rw, rh = pcall(gpu.getResolution)
+        if okR and tonumber(rw) and tonumber(rh) then
+            aw, ah = math.floor(tonumber(rw)), math.floor(tonumber(rh))
+        end
+    end
+    aw = math.max(40, math.min(160, aw))
+    ah = math.max(16, math.min(50, ah))
+
+    if aw ~= self.w or ah ~= self.h or forceRedraw then
+        self.w = aw
+        self.h = ah
+        local empty = packColorMask(COLORS.fg, COLORS.bg) | 32
+        local cur, nxt = {}, {}
+        for i = 1, aw * ah do
+            cur[i] = -1
+            nxt[i] = empty
+        end
+        self.curBuf = cur
+        self.nxtBuf = nxt
+        return true
+    end
+    return false
+end
+
 function UI:flush()
     local gpu = self.gpu
     if not gpu then return end
+    if (not self._syncingDisplay) and gpu.getViewport then
+        local okV, vw, vh = pcall(gpu.getViewport)
+        if okV and tonumber(vw) and tonumber(vh) then
+            vw = math.max(40, math.min(160, math.floor(tonumber(vw))))
+            vh = math.max(16, math.min(50, math.floor(tonumber(vh))))
+            if vw ~= self.w or vh ~= self.h then
+                self._syncingDisplay = true
+                local changed = self:syncDisplay(true)
+                if changed then pcall(self.render, self) end
+                self._syncingDisplay = false
+                if changed then return end
+            end
+        end
+    end
     local w, h = self.w, self.h
     local cur, nxt = self.curBuf, self.nxtBuf
     local lastFg, lastBg = -1, -1
@@ -396,10 +457,10 @@ function UI:renderOverviewTab()
 
     self:drawFrame(120, 5, 39, 8, COLORS.border, COLORS.panelBg, "round")
     self:drawText(122, 5, " ◈ PERF & BLOCKS SAVED ", COLORS.accent, COLORS.panelBg)
-    self:drawText(122, 7, string.format("Cycle Time: %.2fms (avg %.2fms)", tonumber(p.lastCycleMs) or 0, tonumber(p.avgCycleMs) or 0), COLORS.green, COLORS.panelBg)
-    self:drawText(122, 8, string.format("AE Calls  : %d/cyc (%.2f/s)", tonumber(p.aeCallsLast) or 0, tonumber(p.aeCallsPerSec) or 0), COLORS.cyan, COLORS.panelBg)
-    self:drawText(122, 9, string.format("OC RAM    : %dKB Lua | %dKB Free", tonumber(p.luaHeapKB) or 0, tonumber(p.freeMemKB) or 0), COLORS.muted, COLORS.panelBg)
-    self:drawText(122, 11, string.format("Saved     : %d Blocks / %d AE Ch", tonumber(p.equivBlocksSaved) or 0, tonumber(p.equivChannelsSaved) or 0), COLORS.purple, COLORS.panelBg)
+    self:drawText(122, 7, padOrTrunc(string.format("Cycle Time: %.2fms (avg %.2fms)", tonumber(p.lastCycleMs) or 0, tonumber(p.avgCycleMs) or 0), 35), COLORS.green, COLORS.panelBg)
+    self:drawText(122, 8, padOrTrunc(string.format("AE Calls  : %d/cyc (%.2f/s)", tonumber(p.aeCallsLast) or 0, tonumber(p.aeCallsPerSec) or 0), 35), COLORS.cyan, COLORS.panelBg)
+    self:drawText(122, 9, padOrTrunc(string.format("OC RAM    : %dKB Lua | %dKB Free", tonumber(p.luaHeapKB) or 0, tonumber(p.freeMemKB) or 0), 35), COLORS.muted, COLORS.panelBg)
+    self:drawText(122, 11, padOrTrunc(string.format("Saved     : %d Blocks / %d AE Ch", tonumber(p.equivBlocksSaved) or 0, tonumber(p.equivChannelsSaved) or 0), 35), COLORS.purple, COLORS.panelBg)
 
     -- Bottom Left: Priority Watchlist (Low / Craft / Error / Warn)
     self:drawFrame(2, 14, 96, 34, COLORS.border, COLORS.panelBg, "round")
@@ -471,8 +532,8 @@ function UI:renderRulesTab()
     self:drawFrame(2, 5, 157, 43, COLORS.border, COLORS.panelBg, "round")
     self:drawText(4, 5, " ◈ STOCK MAINTAINER RULES ", COLORS.accent, COLORS.panelBg)
 
-    local fx = 33
-    for _, fk in ipairs({ "ALL", "LOW", "CRAFT", "ERR", "WARN", "OFF", "DTPF", "ITEMS", "FLUIDS" }) do
+    local fx = 31
+    for _, fk in ipairs({ "ALL", "LOW", "CRAFT", "ERR", "WARN", "OFF", "DTPF", "QFT", "ITEMS", "FLUIDS" }) do
         local act = (self.filterKind == fk)
         fx = self:drawButton(fx, 5, "[" .. fk .. "]",
             act and COLORS.fg or COLORS.muted, act and COLORS.btnActiveBg or COLORS.btnBg,
@@ -633,21 +694,49 @@ function UI:renderRulesTab()
             pct = 0, state = (r.enabled == false) and "OFF" or "LOW",
             stateDetail = (r.enabled == false) and "Disabled" or "Pending",
         }
+        local tagsStr = (type(r.tags) == "table" and #r.tags > 0) and table.concat(r.tags, " ") or ""
+        local isQft = false
+        if type(r.tags) == "table" then
+            for _, tg in ipairs(r.tags) do
+                if string.lower(tostring(tg or "")):sub(1, 3) == "qft" then
+                    isQft = true
+                    break
+                end
+            end
+        end
+        if not isQft then
+            local gLow = string.lower(tostring(r.group or ""))
+            local dLow = string.lower(tostring(sr.stateDetail or ""))
+            if gLow:find("qft", 1, true) or dLow:find("qft", 1, true) then
+                isQft = true
+            end
+        end
         local matchK = (self.filterKind == "ALL")
             or (self.filterKind == "LOW" and sr.state == "LOW")
             or (self.filterKind == "CRAFT" and sr.state == "CRAFT")
             or (self.filterKind == "ERR" and sr.state == "ERR")
             or (self.filterKind == "WARN" and sr.warn ~= nil)
             or (self.filterKind == "OFF" and (r.enabled == false or r.mode == "off" or sr.state == "OFF"))
+            or (self.filterKind == "DTPF" and (sr.dtpfInfo ~= nil or r.allowDtpfOverlap == true))
+            or (self.filterKind == "QFT" and isQft)
             or (self.filterKind == "ITEMS" and r.type == "item")
             or (self.filterKind == "FLUIDS" and r.type == "fluid")
         local matchG = (self.filterGroup == "ALL") or (r.group == self.filterGroup)
         local matchS = true
         if #searchTerms > 0 then
-            local tagsStr = (type(r.tags) == "table" and #r.tags > 0) and table.concat(r.tags, " ") or ""
-            local hay = string.lower(string.format("%s %s %s %s %s %s",
-                tostring(r.label or ""), tostring(r.name or ""), tostring(r.group or ""),
-                tostring(r.type or ""), tostring(r.cpuFilter or ""), tagsStr))
+            local hay = string.lower(table.concat({
+                tostring(r.label or ""),
+                tostring(r.name or ""),
+                tostring(r.group or ""),
+                tostring(r.type or ""),
+                tostring(r.cpuFilter or ""),
+                tagsStr,
+                tostring(sr.state or ""),
+                tostring(sr.stateDetail or ""),
+                tostring(sr.error or ""),
+                tostring(sr.warn or ""),
+                tostring(sr.cpu or ""),
+            }, " "))
             for _, tok in ipairs(searchTerms) do
                 if not hay:find(tok, 1, true) then
                     matchS = false
@@ -849,16 +938,31 @@ function UI:renderAddImportTab()
     self:drawText(82, 5, " ◈ PHYSICAL ME LEVEL MAINTAINER IMPORTER ", COLORS.accent, COLORS.panelBg)
 
     local slots = self.state.physicalMaintainers or {}
+    local existingKeys = {}
+    for _, r in ipairs((self.cfg and self.cfg.rules) or {}) do
+        local ek = string.format("%s:%s:%d", tostring(r.type or "item"), tostring(r.name or ""), tonumber(r.damage) or 0)
+        existingKeys[ek] = r
+    end
+    local function isSlotImported(s)
+        local sk = string.format("%s:%s:%d", tostring(s.type or "item"), tostring(s.name or ""), tonumber(s.damage) or 0)
+        if existingKeys[sk] ~= nil then return true end
+        local dInfo = Scheduler.getDtpfInfo(s, self.state.dtpfPeer, Scheduler.now())
+        if dInfo ~= nil or DtpfCatalog.lookup(s.type, s.name, s.damage) ~= nil then
+            return true
+        end
+        return false
+    end
+
     local bx = 82
     bx = self:drawButton(bx, 7, "[↻ Scan Physical]", COLORS.cyan, COLORS.btnBg, function()
-        local found, nBlocks = Hardware.scanPhysicalMaintainers(self.comp, self.state)
+        local found, nBlocks = Hardware.scanPhysicalMaintainers(self.comp, self.state, self.cfg)
         self.state.physicalMaintainers = found
         self.importScroll = 0
         self.statusMsg = string.format("Found %d configured slots across %d physical Level Maintainer(s).", #found, nBlocks)
     end) + 1
     bx = self:drawButton(bx, 7, "[+ Import Non-DTPF]", COLORS.fg, COLORS.darkGreen, function()
         if #slots == 0 then
-            slots = Hardware.scanPhysicalMaintainers(self.comp, self.state)
+            slots = Hardware.scanPhysicalMaintainers(self.comp, self.state, self.cfg)
             self.state.physicalMaintainers = slots
         end
         local imp = Scheduler.importPhysicalSlots(self.cfg, slots, {
@@ -871,7 +975,7 @@ function UI:renderAddImportTab()
     end) + 1
     self:drawButton(bx, 7, "[+ Import All New]", COLORS.fg, COLORS.btnBg, function()
         if #slots == 0 then
-            slots = Hardware.scanPhysicalMaintainers(self.comp, self.state)
+            slots = Hardware.scanPhysicalMaintainers(self.comp, self.state, self.cfg)
             self.state.physicalMaintainers = slots
         end
         local imp = Scheduler.importPhysicalSlots(self.cfg, slots, {
@@ -900,19 +1004,71 @@ function UI:renderAddImportTab()
         end
     end)
 
-    self:drawText(82, 10, padOrTrunc(string.format("%-10s %-4s %-28s %-10s %-10s %s",
-        "Block", "Slot", "Item / Fluid", "Target", "Batch", "Enabled"), 75), COLORS.muted, COLORS.panelBg)
-    self:drawText(82, 11, string.rep("─", 75), COLORS.border, COLORS.panelBg)
+    local iq = tostring(self.importSearch or "")
+    local sx = 82
+    sx = self:drawButton(sx, 9, "[Search: " .. padOrTrunc(iq ~= "" and iq or "all blocks/items", 24) .. "]",
+        (iq ~= "") and COLORS.cyan or COLORS.fg, COLORS.btnBg, function()
+            self.numPrompt = {
+                title = "Filter Physical Maintainer Slots (block, item, imported; blank = clear)",
+                buf = iq,
+                rawText = true,
+                onApply = function(txt)
+                    self.importSearch = tostring(txt or ""):match("^%s*(.-)%s*$")
+                    self.importScroll = 0
+                    self.statusMsg = (self.importSearch ~= "") and ("Importer filter: " .. self.importSearch) or "Cleared importer filter."
+                end,
+            }
+        end) + 1
+    if iq ~= "" then
+        sx = self:drawButton(sx, 9, "[Clr]", COLORS.yellow, COLORS.btnBg, function()
+            self.importSearch = ""
+            self.importScroll = 0
+        end) + 1
+    end
 
-    local maxImp = 15
-    local maxImpScroll = math.max(0, #slots - maxImp)
+    local impTerms = {}
+    for tok in string.lower(iq):gmatch("%S+") do impTerms[#impTerms + 1] = tok end
+    local visSlots, importedCount = {}, 0
+    for _, s in ipairs(slots) do
+        local imp = isSlotImported(s)
+        if imp then importedCount = importedCount + 1 end
+        local okMatch = true
+        if #impTerms > 0 then
+            local hay = string.lower(table.concat({
+                tostring(s.label or ""),
+                tostring(s.name or ""),
+                tostring(Hardware.shortAddr(s.addr) or ""),
+                tostring(s.addr or ""),
+                "s" .. tostring(s.slot or 1),
+                imp and "imported done" or "new pending",
+            }, " "))
+            for _, tok in ipairs(impTerms) do
+                if not hay:find(tok, 1, true) then okMatch = false; break end
+            end
+        end
+        if okMatch then
+            visSlots[#visSlots + 1] = { slot = s, imported = imp }
+        end
+    end
+    self:drawText(130, 9, padOrTrunc(string.format("Imp:%d/%d", importedCount, #slots), 27),
+        (#slots > 0 and importedCount >= #slots) and COLORS.green or COLORS.muted, COLORS.panelBg)
+
+    self:drawText(82, 11, padOrTrunc(string.format("%-9s %-4s %-3s %-25s %-10s %-10s %s",
+        "Block", "Slot", "Imp", "Item / Fluid", "Target", "Batch", "On"), 75), COLORS.muted, COLORS.panelBg)
+    self:drawText(82, 12, string.rep("─", 75), COLORS.border, COLORS.panelBg)
+
+    local maxImp = 14
+    local maxImpScroll = math.max(0, #visSlots - maxImp)
     self.importScroll = math.max(0, math.min(maxImpScroll, self.importScroll or 0))
     if #slots == 0 then
-        self:drawText(82, 13, "Click [Scan Physical] with Adapters on ME Level Maintainers.", COLORS.muted, COLORS.panelBg)
+        self:drawText(82, 14, "Click [Scan Physical] with Adapters on ME Level Maintainers.", COLORS.muted, COLORS.panelBg)
+    elseif #visSlots == 0 then
+        self:drawText(82, 14, "No physical slots match current search filter.", COLORS.yellow, COLORS.panelBg)
     else
-        for i = 1, math.min(maxImp, #slots - self.importScroll) do
-            local s = slots[self.importScroll + i]
-            local ry = 11 + i * 2
+        for i = 1, math.min(maxImp, #visSlots - self.importScroll) do
+            local ent = visSlots[self.importScroll + i]
+            local s, imp = ent.slot, ent.imported
+            local ry = 12 + i * 2
             local bg = (i % 2 == 0) and COLORS.rowAltBg or COLORS.panelBg
             self:fillRect(81, ry, 77, 1, " ", COLORS.fg, bg)
             local suf = (s.type == "fluid") and "L" or ""
@@ -921,15 +1077,23 @@ function UI:renderAddImportTab()
             local isDtpf = (DtpfCatalog.lookup(s.type, s.name, s.damage) ~= nil) or (dInfo and dInfo.role == "passive")
             local lblShown = isDtpfIn and ("[◈D-IN] " .. tostring(s.label or s.name))
                 or (isDtpf and ("[DTPF] " .. tostring(s.label or s.name)) or tostring(s.label or s.name))
-            local line = string.format("%-10s S%-3d %-28s %-10s %-10s %s",
-                Hardware.shortAddr(s.addr), s.slot or 1,
-                padOrTrunc(lblShown, 28),
+            local line = string.format("%-9s S%-3d %-3s %-25s %-10s %-10s %s",
+                padOrTrunc(Hardware.shortAddr(s.addr), 9), s.slot or 1,
+                imp and "[✓]" or "[ ]",
+                padOrTrunc(lblShown, 25),
                 UI.formatNumber(s.target or 1, suf),
                 UI.formatNumber(s.batch or 1, suf),
                 s.enabled and "YES" or "NO")
-            local rowCol = isDtpfIn and COLORS.purple or (isDtpf and COLORS.yellow or (s.enabled and COLORS.fg or COLORS.muted))
+            local rowCol = isDtpfIn and COLORS.purple or (isDtpf and COLORS.yellow or (imp and COLORS.green or (s.enabled and COLORS.fg or COLORS.muted)))
             self:drawText(82, ry, padOrTrunc(line, 75), rowCol, bg)
         end
+    end
+    if #slots > 0 then
+        local safeMsg = (importedCount >= #slots)
+            and string.format("All %d slots covered — safe to break physical Level Maintainers!", #slots)
+            or string.format("Showing %d matching | %d/%d imported or DTPF-handled", #visSlots, importedCount, #slots)
+        self:drawText(82, 45, padOrTrunc(safeMsg, 75),
+            (importedCount >= #slots) and COLORS.green or COLORS.muted, COLORS.panelBg)
     end
 end
 
@@ -991,33 +1155,33 @@ function UI:renderPerfSetupTab()
 
     local p = (self.state and self.state.perf) or {}
     local b = self.state and self.state.lastBenchmark
-    self:drawText(83, 10, string.format("Rolling Cycle Time : %.2f ms (avg %.2f ms)", tonumber(p.lastCycleMs) or 0, tonumber(p.avgCycleMs) or 0), COLORS.green, COLORS.panelBg)
-    self:drawText(83, 11, string.format("AE2 Calls / Cycle  : %d calls (%.2f calls/sec)", tonumber(p.aeCallsLast) or 0, tonumber(p.aeCallsPerSec) or 0), COLORS.cyan, COLORS.panelBg)
-    self:drawText(83, 12, string.format("Memory Footprint   : %d KB Lua | %d KB Free / %d KB Total",
-        tonumber(p.luaHeapKB) or 0, tonumber(p.freeMemKB) or 0, tonumber(p.totalMemKB) or 0), COLORS.fg, COLORS.panelBg)
-    self:drawText(83, 13, string.format("Physical Savings   : %d Level Maintainer blocks & %d AE2 channels replaced",
-        tonumber(p.equivBlocksSaved) or 0, tonumber(p.equivChannelsSaved) or 0), COLORS.purple, COLORS.panelBg)
+    self:drawText(83, 10, padOrTrunc(string.format("Rolling Cycle Time : %.2f ms (avg %.2f ms)", tonumber(p.lastCycleMs) or 0, tonumber(p.avgCycleMs) or 0), 74), COLORS.green, COLORS.panelBg)
+    self:drawText(83, 11, padOrTrunc(string.format("AE2 Calls / Cycle  : %d calls (%.2f calls/sec)", tonumber(p.aeCallsLast) or 0, tonumber(p.aeCallsPerSec) or 0), 74), COLORS.cyan, COLORS.panelBg)
+    self:drawText(83, 12, padOrTrunc(string.format("Memory Footprint   : %d KB Lua | %d KB Free / %d KB Total",
+        tonumber(p.luaHeapKB) or 0, tonumber(p.freeMemKB) or 0, tonumber(p.totalMemKB) or 0), 74), COLORS.fg, COLORS.panelBg)
+    self:drawText(83, 13, padOrTrunc(string.format("Physical Savings   : %d Level Maintainer blocks & %d AE2 channels replaced",
+        tonumber(p.equivBlocksSaved) or 0, tonumber(p.equivChannelsSaved) or 0), 74), COLORS.purple, COLORS.panelBg)
 
     if b then
         self:drawText(83, 16, "Latest Live Benchmark:", COLORS.accent, COLORS.panelBg)
-        self:drawText(83, 17, string.format("  O(1) Lookup (%d calls) : %.3f ms total (%.3f ms/call)", b.sampleCalls or 0, b.o1TotalMs or 0, b.o1AvgMs or 0), COLORS.green, COLORS.panelBg)
-        self:drawText(83, 18, string.format("  getCpus() Call          : %.3f ms", b.cpuMs or 0), COLORS.fg, COLORS.panelBg)
+        self:drawText(83, 17, padOrTrunc(string.format("  O(1) Lookup (%d calls) : %.3f ms total (%.3f ms/call)", b.sampleCalls or 0, b.o1TotalMs or 0, b.o1AvgMs or 0), 74), COLORS.green, COLORS.panelBg)
+        self:drawText(83, 18, padOrTrunc(string.format("  getCpus() Call          : %.3f ms", b.cpuMs or 0), 74), COLORS.fg, COLORS.panelBg)
         if b.legacyFluidMs then
-            self:drawText(83, 19, string.format("  Legacy getFluidsInNet() : %.3f ms (full list)", b.legacyFluidMs), COLORS.yellow, COLORS.panelBg)
+            self:drawText(83, 19, padOrTrunc(string.format("  Legacy getFluidsInNet() : %.3f ms (full list)", b.legacyFluidMs), 74), COLORS.yellow, COLORS.panelBg)
         end
         if b.legacyItemFilterMs then
-            self:drawText(83, 20, string.format("  Legacy getItemsInNet()  : %.3f ms (filtered scan)", b.legacyItemFilterMs), COLORS.yellow, COLORS.panelBg)
+            self:drawText(83, 20, padOrTrunc(string.format("  Legacy getItemsInNet()  : %.3f ms (filtered scan)", b.legacyItemFilterMs), 74), COLORS.yellow, COLORS.panelBg)
         end
     else
         self:drawText(83, 16, "Click [Run Live AE2 Benchmark] or run `stock --bench` in shell.", COLORS.muted, COLORS.panelBg)
     end
 
     self:drawText(83, 24, "Why OC Outperforms Physical AE2FC Level Maintainers:", COLORS.accent, COLORS.panelBg)
-    self:drawText(83, 26, "1. 1-tick bulk fluid cache (getFluidsInNetwork) + lazy CPU finalOutput()", COLORS.muted, COLORS.panelBg)
-    self:drawText(83, 27, "   + cached Craftable handles + live ICraftingLink skip (0 calls/craft).", COLORS.muted, COLORS.panelBg)
-    self:drawText(83, 28, "2. TileLevelMaintainer repeats CraftingJobV2 on SAME ticks on CantCraft,", COLORS.muted, COLORS.panelBg)
-    self:drawText(83, 29, "   lacks hysteresis/CPU reserve, and burns 1 AE2 channel per 5 slots.", COLORS.muted, COLORS.panelBg)
-    self:drawText(83, 30, "3. OC uses 0 extra channels, adaptive idle backoff & round-robin parity.", COLORS.muted, COLORS.panelBg)
+    self:drawText(83, 26, padOrTrunc("1. 1-tick bulk fluid cache (getFluidsInNetwork) + lazy CPU finalOutput()", 74), COLORS.muted, COLORS.panelBg)
+    self:drawText(83, 27, padOrTrunc("   + cached Craftable handles + live ICraftingLink skip (0 calls/craft).", 74), COLORS.muted, COLORS.panelBg)
+    self:drawText(83, 28, padOrTrunc("2. TileLevelMaintainer repeats CraftingJobV2 on SAME ticks on CantCraft,", 74), COLORS.muted, COLORS.panelBg)
+    self:drawText(83, 29, padOrTrunc("   lacks hysteresis/CPU reserve, and burns 1 AE2 channel per 5 slots.", 74), COLORS.muted, COLORS.panelBg)
+    self:drawText(83, 30, padOrTrunc("3. OC uses 0 extra channels, adaptive idle backoff & round-robin parity.", 74), COLORS.muted, COLORS.panelBg)
 end
 
 function UI:renderRuleEditModal()
@@ -1204,9 +1368,111 @@ function UI:renderLogModal()
     end
 end
 
+function UI:renderCompactLayout()
+    local w, h = math.max(40, self.w or 80), math.max(16, self.h or 25)
+    local armed = (self.cfg.armed == true)
+    local k = (self.state and self.state.kpis) or {}
+    local p = (self.state and self.state.perf) or {}
+
+    self:fillRect(1, 1, w, 1, " ", COLORS.fg, COLORS.headerBg)
+    local bx = self:drawText(2, 1, "◈ STOCK ", COLORS.accent, COLORS.headerBg)
+    bx = self:drawButton(bx, 1, armed and "[ARMED]" or "[PAUSED]",
+        armed and COLORS.fg or COLORS.yellow,
+        armed and COLORS.darkGreen or COLORS.amberBg,
+        function()
+            self.cfg.armed = not armed
+            if self.state then self.state._forcePollNow = true end
+            self:save(self.cfg.armed and "Stock Maintainer ARMED." or "Stock Maintainer PAUSED.")
+        end) + 1
+    local pollX = math.max(bx, w - 14)
+    local rx = self:drawButton(pollX, 1, "[Poll]", COLORS.cyan, COLORS.btnBg, function()
+        if self.state then self.state._forcePollNow = true end
+        Scheduler.step(self.cfg, self.state, nil, self.comp, { forceFull = true })
+        self.statusMsg = "Poll complete."
+    end) + 1
+    if rx + 6 <= w then
+        self:drawButton(w - 6, 1, "[Quit]", COLORS.red, COLORS.btnBg, function()
+            self.running = false
+        end)
+    end
+
+    self:fillRect(1, 2, w, 1, " ", COLORS.yellow, COLORS.amberBg)
+    self:drawText(2, 2, padOrTrunc(string.format("Compact %dx%d (use Tier 3 GPU + Tier 3 Screen for 160x50)", w, h), w - 2),
+        COLORS.yellow, COLORS.amberBg)
+
+    local kpiLine = string.format("Rules:%d/%d Low:%d Craft:%d Err:%d CPUs:%d/%d %.1fms",
+        k.enabled or 0, k.total or 0, k.low or 0, k.crafting or 0, k.errors or 0,
+        k.freeCpus or 0, k.totalCpus or 0, tonumber(p.lastCycleMs) or 0)
+    self:drawText(2, 3, padOrTrunc(kpiLine, w - 2), COLORS.fg, COLORS.bg)
+    self:drawText(1, 4, string.rep("─", w), COLORS.border, COLORS.bg)
+
+    local stMap = self:getRuleStatusMap()
+    local rank = { ERR = 1, WARN = 2, LOW = 3, CRAFT = 4, OK = 5, OFF = 6 }
+    local rows = {}
+    for _, r in ipairs(self.cfg.rules or {}) do
+        local sr = stMap[r.id] or { stock = 0, state = (r.enabled == false) and "OFF" or "LOW" }
+        rows[#rows + 1] = { rule = r, sr = sr }
+    end
+    table.sort(rows, function(a, b)
+        local ra, rb = rank[a.sr.state] or 9, rank[b.sr.state] or 9
+        if ra ~= rb then return ra < rb end
+        return tostring(a.rule.label or a.rule.name):lower() < tostring(b.rule.label or b.rule.name):lower()
+    end)
+
+    local maxShow = math.max(1, h - 7)
+    local maxScroll = math.max(0, #rows - maxShow)
+    self.rulesScroll = math.max(0, math.min(maxScroll, self.rulesScroll or 0))
+    for i = 1, math.min(maxShow, #rows - self.rulesScroll) do
+        local ent = rows[self.rulesScroll + i]
+        local r, sr = ent.rule, ent.sr
+        local ry = 4 + i
+        local bg = (i % 2 == 0) and COLORS.rowAltBg or COLORS.panelBg
+        self:fillRect(1, ry, w, 1, " ", COLORS.fg, bg)
+        local isOn = (r.enabled ~= false) and (r.mode ~= "off")
+        self:drawButton(2, ry, isOn and "[ON ]" or "[OFF]",
+            isOn and COLORS.green or COLORS.muted, isOn and COLORS.darkGreen or COLORS.btnBg,
+            function()
+                Scheduler.toggleRule(self.cfg, r.id)
+                self:save((isOn and "Paused: " or "Enabled: ") .. tostring(r.label or r.name))
+            end)
+        local suf = (r.type == "fluid") and "L" or ""
+        local lblW = math.max(10, w - 34)
+        local rowStr = string.format("%-" .. tostring(lblW) .. "s %8s/%-8s %s",
+            padOrTrunc(r.label or r.name, lblW),
+            UI.formatNumber(sr.stock or 0, suf),
+            UI.formatNumber(r.target or 1, suf),
+            tostring(sr.state or "LOW"))
+        local col = (sr.state == "ERR" and COLORS.red)
+            or (sr.state == "CRAFT" and COLORS.cyan)
+            or (sr.state == "LOW" and COLORS.yellow)
+            or (isOn and COLORS.fg or COLORS.muted)
+        self:drawText(8, ry, padOrTrunc(rowStr, math.max(4, w - 8)), col, bg)
+    end
+
+    local px = 2
+    px = self:drawButton(px, h - 2, "[Prev]", self.rulesScroll > 0 and COLORS.fg or COLORS.muted, COLORS.btnBg, function()
+        self.rulesScroll = math.max(0, (self.rulesScroll or 0) - maxShow)
+    end) + 1
+    px = self:drawButton(px, h - 2, "[Next]", self.rulesScroll < maxScroll and COLORS.fg or COLORS.muted, COLORS.btnBg, function()
+        self.rulesScroll = math.min(maxScroll, (self.rulesScroll or 0) + maxShow)
+    end) + 2
+    self:drawText(px, h - 2, padOrTrunc(string.format("%d rule(s)", #rows), math.max(0, w - px)), COLORS.muted, COLORS.bg)
+
+    self:drawText(1, h - 1, string.rep("─", w), COLORS.border, COLORS.bg)
+    local cKeys = "Space:Arm R:Poll Q:Quit"
+    local kx = math.max(2, w - unicode.wlen(cKeys))
+    self:drawText(2, h, padOrTrunc(self.statusMsg or "", math.max(0, kx - 4)), COLORS.fg, COLORS.bg)
+    self:drawText(kx, h, cKeys, COLORS.muted, COLORS.bg)
+    self:flush()
+end
+
 function UI:render()
     self.hitboxes = {}
     self:clearNextBuffer(COLORS.bg, COLORS.fg)
+    if (self.w or 160) < 160 or (self.h or 50) < 50 then
+        self:renderCompactLayout()
+        return
+    end
     self:renderHeader()
     if self.tab == TAB_OVERVIEW then
         self:renderOverviewTab()
@@ -1219,8 +1485,11 @@ function UI:render()
     end
 
     self:drawText(1, self.h - 1, string.rep("─", self.w), COLORS.border, COLORS.bg)
-    self:drawText(2, self.h, padOrTrunc(self.statusMsg or "", self.w - 64), COLORS.fg, COLORS.bg)
-    self:drawText(self.w - 60, self.h, "Keys: 1-4 Tabs | / Search | Space Arm | R Poll | L Log | Q Quit", COLORS.muted, COLORS.bg)
+    local keysStr = "Keys: 1-4 Tabs | / Search | Space Arm | R Poll | L Log | Q Quit"
+    local keysW = unicode.wlen(keysStr)
+    local keysX = math.max(2, self.w - keysW)
+    self:drawText(2, self.h, padOrTrunc(self.statusMsg or "", math.max(0, keysX - 4)), COLORS.fg, COLORS.bg)
+    self:drawText(keysX, self.h, keysStr, COLORS.muted, COLORS.bg)
 
     self:renderRuleEditModal()
     self:renderNumPrompt()
