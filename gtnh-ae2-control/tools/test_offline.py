@@ -484,6 +484,7 @@ local bridgeIn = {
     '{"id":16,"op":"univ_reboot"}\n',
     '{"id":17,"op":"dtpf_update","url":"http://127.0.0.1:8765/oc-raw"}\n',
     '{"id":18,"op":"stock_update","url":"http://127.0.0.1:8765/oc-raw"}\n',
+    '{"id":19,"op":"qft_update","url":"http://127.0.0.1:8765/oc-raw"}\n',
 }
 local openCalls, strCalls, sendCalls = 0, 0, 0
 local o1ItemCalls, o1FluidCalls, legacyItemsCalls, legacyFluidsCalls = 0, 0, 0, 0
@@ -528,6 +529,11 @@ local function enqueueReply(addr, port, msgType, p1)
         local mid = math.floor(#full / 2)
         meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", addr or "stock-addr", port, 0, "STOCK_REPLY", p1, 1, 2, full:sub(1, mid) }
         meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", addr or "stock-addr", port, 0, "STOCK_REPLY", p1, 2, 2, full:sub(mid + 1) }
+    elseif msgType == "QFT_CMD" then
+        local full = serialization.serialize({ ok = true, armed = true })
+        local mid = math.floor(#full / 2)
+        meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", addr or "qft-addr", port, 0, "QFT_REPLY", p1, 1, 2, full:sub(1, mid) }
+        meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", addr or "qft-addr", port, 0, "QFT_REPLY", p1, 2, 2, full:sub(mid + 1) }
     end
 end
 
@@ -650,10 +656,16 @@ meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", "stock-addr", 
     freeCpus = 4, totalCpus = 6,
     perf = { lastCycleMs = 1.4, aeCallsPerSec = 0.8, equivBlocksSaved = 3, freeMemKB = 1800 },
 }) }
+meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", "qft-addr", 4205, 0, "QFT_METRICS", serialization.serialize({
+    armed = true, maintMode = { mode = "mainnet", label = "MAINNET STOCK" }, localRules = {},
+    units = { { label = "QFT-1", online = true, active = true, reconfiguring = false, hasNeptunium = true, hasFermium = false, tier = 1, focusCircuit = 1 } },
+}) }
 meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", "stock-addr", 4205, 0, "STOCK_CLAIMS", "claims-from-stock" }
 meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", "dtpf-addr", 4205, 0, "DTPF_CLAIMS", "claims-from-dtpf" }
 meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", "stock-addr", 4205, 0, "DTPF_HANDOFF", "dh-1", "handoff-payload" }
 meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", "dtpf-addr", 4205, 0, "DTPF_HANDOFF_ACK", "dh-1", "ack-payload" }
+meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", "qft-addr", 4205, 0, "STOCK_PUSH_RULES", "qp-1", "qft-push-payload" }
+meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", "stock-addr", 4205, 0, "STOCK_PUSH_ACK", "qp-1", "qft-push-ack" }
 meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", "dtpf-addr", 4205, 0, "GTNH_WAKE", "dtpf" }
 meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", "dtpf-addr", 4205, 0, "MESH_MAINT_SYNC", "req-o1", serialization.serialize({
     items = {
@@ -696,10 +708,13 @@ assert(o1ItemCalls >= 1 and o1FluidCalls >= 1, "inspectMainnetForMaint must use 
 assertEq(legacyItemsCalls, 0, "inspectMainnetForMaint must NOT scan getItemsInNetwork when O(1) exists")
 assertEq(legacyFluidsCalls, 0, "inspectMainnetForMaint must NOT scan getFluidsInNetwork when O(1) exists")
 
-local sawStockToDtpf, sawDtpfToStock, sawHandoffToDtpf, sawHandoffAckToStock, sawWakeHelloReply, sawWatchdogWake, sawMaintAckO1, sawMaintFluidDrop = false, false, false, false, false, false, false, false
-local sawGorgeReboot, sawUnivReboot, sawDtpfUpdate, sawStockUpdate = false, false, false, false
+local sawStockToDtpf, sawStockToQft, sawPushToStock, sawPushAckToQft, sawDtpfToStock, sawHandoffToDtpf, sawHandoffAckToStock, sawWakeHelloReply, sawWatchdogWake, sawMaintAckO1, sawMaintFluidDrop = false, false, false, false, false, false, false, false, false, false, false
+local sawGorgeReboot, sawUnivReboot, sawDtpfUpdate, sawStockUpdate, sawQftUpdate = false, false, false, false, false
 for _, pkt in ipairs(sentPackets) do
     if pkt.addr == "dtpf-addr" and pkt.t == "STOCK_CLAIMS" and pkt.p1 == "claims-from-stock" then sawStockToDtpf = true end
+    if pkt.addr == "qft-addr" and pkt.t == "STOCK_CLAIMS" and pkt.p1 == "claims-from-stock" then sawStockToQft = true end
+    if pkt.addr == "stock-addr" and pkt.t == "STOCK_PUSH_RULES" and pkt.p1 == "qp-1" and pkt.p2 == "qft-push-payload" then sawPushToStock = true end
+    if pkt.addr == "qft-addr" and pkt.t == "STOCK_PUSH_ACK" and pkt.p1 == "qp-1" and pkt.p2 == "qft-push-ack" then sawPushAckToQft = true end
     if pkt.addr == "stock-addr" and pkt.t == "DTPF_CLAIMS" and pkt.p1 == "claims-from-dtpf" then sawDtpfToStock = true end
     if pkt.addr == "dtpf-addr" and pkt.t == "DTPF_HANDOFF" and pkt.p1 == "dh-1" and pkt.p2 == "handoff-payload" then sawHandoffToDtpf = true end
     if pkt.addr == "stock-addr" and pkt.t == "DTPF_HANDOFF_ACK" and pkt.p1 == "dh-1" and pkt.p2 == "ack-payload" then sawHandoffAckToStock = true end
@@ -721,6 +736,10 @@ for _, pkt in ipairs(sentPackets) do
         local c = serialization.unserialize(pkt.p2)
         if type(c) == "table" and c.action == "update_local" and c.url == "http://127.0.0.1:8765/oc-raw" then sawStockUpdate = true end
     end
+    if pkt.t == "QFT_CMD" and type(pkt.p2) == "string" then
+        local c = serialization.unserialize(pkt.p2)
+        if type(c) == "table" and c.action == "update_local" and c.url == "http://127.0.0.1:8765/oc-raw" then sawQftUpdate = true end
+    end
     if pkt.addr == "dtpf-addr" and pkt.t == "MESH_MAINT_ACK" and pkt.p1 == "req-o1" then
         local ackTbl = serialization.unserialize(pkt.p2)
         if ackTbl and ackTbl.stocks and ackTbl.stocks.r1 == 777 and ackTbl.stocks.r2 == 12345 then
@@ -734,6 +753,9 @@ for _, pkt in ipairs(sentPackets) do
 end
 assertEq(rawget(_G, "uiDirty"), nil, "checkMeshWatchdog must not leak global uiDirty")
 assert(sawStockToDtpf, "Exporter must relay STOCK_CLAIMS -> dtpf-addr")
+assert(sawStockToQft, "Exporter must relay STOCK_CLAIMS -> qft-addr")
+assert(sawPushToStock, "Exporter must relay STOCK_PUSH_RULES -> stock-addr")
+assert(sawPushAckToQft, "Exporter must relay STOCK_PUSH_ACK -> qft-addr")
 assert(sawDtpfToStock, "Exporter must relay DTPF_CLAIMS -> stock-addr")
 assert(sawHandoffToDtpf, "Exporter must relay DTPF_HANDOFF -> dtpf-addr")
 assert(sawHandoffAckToStock, "Exporter must relay DTPF_HANDOFF_ACK -> stock-addr")
@@ -743,6 +765,7 @@ assert(sawGorgeReboot, "Bridge gorge_reboot RPC must send GORGE_CMD reboot")
 assert(sawUnivReboot, "Bridge univ_reboot RPC must send UNIV_CMD reboot")
 assert(sawDtpfUpdate, "Bridge dtpf_update RPC must relay DTPF_CMD update_local")
 assert(sawStockUpdate, "Bridge stock_update RPC must relay STOCK_CMD update_local")
+assert(sawQftUpdate, "Bridge qft_update RPC must relay QFT_CMD update_local")
 assert(sawMaintAckO1, "MESH_MAINT_ACK did not return O(1) stocks r1=777, r2=12345")
 assert(sawMaintFluidDrop, "inspectMainnetForMaint must unwrap ae2fc:fluid_drop into busyByKey and busyByLabel")
 
@@ -754,6 +777,9 @@ assert(allInflux:find("drives=1i,cells=1i,full_cells=0i,used_bytes=60000i,total_
 assert(allInflux:find("godforge_control ", 1, true), "Missing godforge_control InfluxDB line")
 assert(allInflux:find("oc_health ", 1, true), "Missing oc_health InfluxDB watchdog telemetry")
 assert(allInflux:find("univ_ok=", 1, true), "oc_health missing univ_ok field")
+assert(allInflux:find("qft_ok=", 1, true), "oc_health missing qft_ok field")
+assert(allInflux:find("qft_control armed=1i,units_online=1i,units_active=1i,reconfig_count=0i,boost_np=1i,boost_fm=0i,local_rules=0i,maint_mainnet=1i", 1, true),
+    "Missing/bad qft_control InfluxDB line: " .. allInflux)
 assert(allInflux:find("pump_ok=1i", 1, true), "Space Pump (240s threshold) remained healthy during 75s step")
 assert(allInflux:find("active_exoticizers=1i,completed_cycles=5i,errors=0i,gf_online=1i,gf_active=1i,gf_work_allowed=1i,gf_rings=3i,gf_connected=4i,gf_upgrades=12i,lsc_pct=62.50", 1, true),
     "Bad godforge_control fields: " .. allInflux)
@@ -764,6 +790,7 @@ local allBridge = table.concat(bridgeWrites, "")
 assert(allBridge:find('"meshUniv":true', 1, true), "Ping missing meshUniv=true")
 assert(allBridge:find('"meshGorge":true', 1, true), "Ping missing meshGorge=true")
 assert(allBridge:find('"meshStock":true', 1, true), "Ping missing meshStock=true")
+assert(allBridge:find('"meshQft":true', 1, true), "Ping missing meshQft=true")
 assert(allBridge:find('"meshHealth"', 1, true), "Ping/mesh_recover missing meshHealth table")
 assert(allBridge:find('"storage"', 1, true), "Ping/hello missing ae2 storage summary table")
 assert(allBridge:find('"brief"', 1, true), "meshHealth missing brief summary field")
@@ -816,6 +843,7 @@ local hub3 = {
         univ = { addr = "univ-addr", lastSeen = 197, status = { armed = true, activePools = 2, queuedSlices = 4, stalledCount = 0, completedBatches = 11, preemptions = 1, pools = { { name = "EBF Pool", phase = "ACTIVE", activeLabel = "Chrome Ingot" } } } },
         gorge = { addr = "gorge-addr", lastSeen = 199, status = { armed = true, activeCount = 1, completedCycles = 5, errorCount = 0, lscPct = 62.5, godforge = { active = true, rings = 3, connected = 4 }, exoticizers = { { name = "Ex#1", activeMode = "magmatter", phase = "WAIT_END", cycles = 5 } } } },
         stock = { addr = "stock-addr", lastSeen = 199, status = { armed = true, totalRules = 12, enabledRules = 10, okCount = 7, lowCount = 2, craftingCount = 1, errorCount = 0, warnCount = 1, freeCpus = 4, totalCpus = 6, perf = { lastCycleMs = 1.4, aeCallsPerSec = 0.8, equivBlocksSaved = 3, freeMemKB = 1800 }, rulesPreview = { { label = "Raw Tesseract", type = "item", stock = 100, target = 1000, state = "LOW", warn = "! DTPF Passive" } } } },
+        qft = { addr = "qft-addr", lastSeen = 199, status = { armed = true, maintMode = { mode = "mainnet", label = "MAINNET STOCK", detail = "Mainnet Stock armed" }, units = { { label = "QFT-1", online = true, active = true, tier = 1, recipeName = "Radon", hasBus = true, hasHatch = true, focusCircuit = 1, hasNeptunium = true, hasFermium = false, progress = 50, maxProgress = 400 } } } },
     },
     logs = {
         { t = 190, tag = "OUT", msg = "Exported energy" },
@@ -846,7 +874,7 @@ local ui3 = Ae2UI.new(cfg3, hub3, {
     end,
 })
 
-for t = 1, 9 do
+for t = 1, 10 do
     ui3.tab = t
     ui3:render()
 end
@@ -872,11 +900,11 @@ ui3.logModalActive = true
 ui3:render()
 ui3.logModalActive = false
 
--- Also exercise offline peer guide state glyph safety on Tabs 4..8
+-- Also exercise offline peer guide state glyph safety on Tabs 4..9
 do
     local savedPeers = hub3.peers
-    hub3.peers = { dtpf = {}, pump = {}, univ = {}, gorge = {}, stock = {} }
-    for t = 4, 8 do ui3.tab = t; ui3:render() end
+    hub3.peers = { dtpf = {}, pump = {}, univ = {}, gorge = {}, stock = {}, qft = {} }
+    for t = 4, 9 do ui3.tab = t; ui3:render() end
     hub3.peers = savedPeers
 end
 
@@ -927,14 +955,18 @@ assertEq(ui3.tab, 8, "Key '8' switched to Stock tab")
 ui3:handleTouch(35, 9, 0) -- [Retry Errors]
 assertEq(peerActionsLog[#peerActionsLog], "stock:retry_errors", "Stock Retry Errors clicked")
 
--- Tab 3 [Reboot] & Tab 9 Setup [Reboot AE2] 2-click tests
+-- Tab 3 [Reboot] & Tab 9 QFT & Tab 0 Setup [Reboot AE2] 2-click tests
 ui3:handleKeyDown(51, 4)
 ui3:handleTouch(34, 16, 0)
 assertEq(ui3.confirmRebootPeer, "dtpf", "Tab 3 armed dtpf reboot")
 ui3:handleTouch(34, 16, 0)
 assertEq(peerActionsLog[#peerActionsLog], "dtpf:reboot", "Tab 3 2nd click confirmed dtpf:reboot")
-ui3:handleKeyDown(57, 10) -- Key '9': Setup
-assertEq(ui3.tab, 9, "Key '9' switched to Setup tab")
+ui3:handleKeyDown(57, 10) -- Key '9': QFT
+assertEq(ui3.tab, 9, "Key '9' switched to QFT tab")
+ui3:handleTouch(46, 9, 0) -- [Sync Mainnet]
+assertEq(peerActionsLog[#peerActionsLog], "qft:sync_mainnet", "QFT Sync Mainnet clicked")
+ui3:handleKeyDown(48, 11) -- Key '0': Setup
+assertEq(ui3.tab, 10, "Key '0' switched to Setup tab")
 local preAe2Rbt = #peerActionsLog
 ui3:handleTouch(46, 40, 0)
 assertEq(ui3.confirmRebootPeer, "ae2", "Setup 1st click armed ae2 reboot")
@@ -960,8 +992,8 @@ posts = {}
 local guiEvs = {
     -- Touch header [EXPORT: ON    ] at x=33, y=1 -> pauses exports & saves /home/config_overrides.lua
     { "touch", "scr-1", 33, 1, 0 },
-    -- Key '9' (Setup & Exports tab)
-    { "key_down", "kbd-1", 57, 10 },
+    -- Key '0' (Setup & Exports tab)
+    { "key_down", "kbd-1", 48, 11 },
     -- Touch [+] on itemInterval (y=7, x=126) -> 65 + 5 = 70s & saves /home/config_overrides.lua
     { "touch", "scr-1", 126, 7, 0 },
     -- Key 'Q' to exit cleanly
@@ -1000,13 +1032,13 @@ local reloadCfg = assert(load(__py_read_file("/home/exporter.lua"), "@/home/expo
 reloadCfg("--headless")
 assertEq(#posts, postCountBeforeReload, "Paused export from config_overrides.lua sent 0 InfluxDB POSTs")
 
--- Exercise live GUI 2-click [Reboot AE2] on Tab 9 -> invokes computer.shutdown(true) cleanly
+-- Exercise live GUI 2-click [Reboot AE2] on Tab 0 (Setup) -> invokes computer.shutdown(true) cleanly
 do
     local shutdownArg = "none"
     local origShutdown = computer.shutdown
     computer.shutdown = function(rbt) shutdownArg = rbt end
     local rbtEvs = {
-        { "key_down", "kbd-1", 57, 10 }, -- Tab 9 (Setup)
+        { "key_down", "kbd-1", 48, 11 }, -- Tab 0 (Setup)
         { "touch", "scr-1", 46, 40, 0 }, -- 1st click [Reboot AE2]
         { "touch", "scr-1", 46, 40, 0 }, -- 2nd click [Confirm Reboot?]
     }
@@ -1077,11 +1109,11 @@ rawset(_G, "__HELD_OBJECTS", { cfg3, hub3, ui3 })
                         lsc = { online = true, pct = 50, in5s = 0, out5s = 0, net5s = 0, wirelessStr = "0", wirelessOn = true },
                         tps = { online = true, mspt = 20, tps = 20, chunks = 100, dims = 1 },
                         cpus = { total = 0, busyCount = 0, list = {} },
-                        peers = { dtpf = {}, pump = {}, univ = {}, gorge = {}, stock = {} },
+                        peers = { dtpf = {}, pump = {}, univ = {}, gorge = {}, stock = {}, qft = {} },
                         logs = {},
                     }
                     local u = Ae2UI.new(cfg, hub, {})
-                    for t = 1, 9 do u.tab = t; u:render() end
+                    for t = 1, 10 do u.tab = t; u:render() end
                     rawset(_G, "__PROD_HOLD", { cfg, hub, u })
                     """,
                     "prod_footprint_test",

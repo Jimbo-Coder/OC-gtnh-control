@@ -15,7 +15,8 @@ local TAB_UNIVERSAL = 5
 local TAB_GORGE     = 6
 local TAB_PUMP      = 7
 local TAB_STOCK     = 8
-local TAB_SETUP     = 9
+local TAB_QFT       = 9
+local TAB_SETUP     = 10
 
 local COLORS = {
     bg          = 0x0C1117,
@@ -328,15 +329,16 @@ function UI:renderHeader()
     end)
 
     local tabs = {
-        { id = TAB_OVERVIEW,  label = "[1] OVERVIEW" },
-        { id = TAB_CPUS,      label = "[2] CPUs" },
-        { id = TAB_MESH,      label = "[3] MESH" },
-        { id = TAB_DTPF,      label = "[4] DTPF" },
-        { id = TAB_UNIVERSAL, label = "[5] UNIVERSAL" },
-        { id = TAB_GORGE,     label = "[6] GORGE" },
-        { id = TAB_PUMP,      label = "[7] PUMP" },
-        { id = TAB_STOCK,     label = "[8] STOCK" },
-        { id = TAB_SETUP,     label = "[9] SETUP" },
+        { id = TAB_OVERVIEW,  label = "[1]OVR" },
+        { id = TAB_CPUS,      label = "[2]CPU" },
+        { id = TAB_MESH,      label = "[3]MESH" },
+        { id = TAB_DTPF,      label = "[4]DTPF" },
+        { id = TAB_UNIVERSAL, label = "[5]UNIV" },
+        { id = TAB_GORGE,     label = "[6]GRG" },
+        { id = TAB_PUMP,      label = "[7]PMP" },
+        { id = TAB_STOCK,     label = "[8]STK" },
+        { id = TAB_QFT,       label = "[9]QFT" },
+        { id = TAB_SETUP,     label = "[0]SET" },
     }
     local tx = 2
     for _, tb in ipairs(tabs) do
@@ -353,13 +355,14 @@ function UI:renderHeader()
     local peers = hub.peers or {}
     local nowU = tonumber(hub.nowUptime) or 0
     local function peerOn(p, win) return p and p.addr ~= nil and (nowU - (p.lastSeen or -1000)) < win end
-    local badgeX = self.w - 50
+    local badgeX = self.w - 57
     for _, pd in ipairs({
-        { lbl = "DTPF",  p = peers.dtpf,  win = 60,  tab = TAB_DTPF },
-        { lbl = "UNIV",  p = peers.univ,  win = 60,  tab = TAB_UNIVERSAL },
-        { lbl = "GORGE", p = peers.gorge, win = 60,  tab = TAB_GORGE },
-        { lbl = "PUMP",  p = peers.pump,  win = 240, tab = TAB_PUMP },
-        { lbl = "STK",   p = peers.stock, win = 60,  tab = TAB_STOCK },
+        { lbl = "DTPF", p = peers.dtpf,  win = 60,  tab = TAB_DTPF },
+        { lbl = "UNIV", p = peers.univ,  win = 60,  tab = TAB_UNIVERSAL },
+        { lbl = "GRG",  p = peers.gorge, win = 60,  tab = TAB_GORGE },
+        { lbl = "PMP",  p = peers.pump,  win = 240, tab = TAB_PUMP },
+        { lbl = "STK",  p = peers.stock, win = 60,  tab = TAB_STOCK },
+        { lbl = "QFT",  p = peers.qft,   win = 60,  tab = TAB_QFT },
     }) do
         local okP = peerOn(pd.p, pd.win)
         badgeX = self:drawButton(badgeX, 2, "[" .. pd.lbl .. (okP and ":ON]" or ":--]"),
@@ -434,11 +437,12 @@ function UI:renderOverviewTab()
     self:drawText(122, 5, " ◈ HUB, BRIDGE & OC MESH ", COLORS.accent, COLORS.panelBg)
     local peerOnline = 0
     local peerMap = {
-        { key = "dtpf", win = 60 },
-        { key = "pump", win = 240 },
-        { key = "univ", win = 60 },
+        { key = "dtpf",  win = 60 },
+        { key = "pump",  win = 240 },
+        { key = "univ",  win = 60 },
         { key = "gorge", win = 60 },
         { key = "stock", win = 60 },
+        { key = "qft",   win = 60 },
     }
     for _, pm in ipairs(peerMap) do
         local p = peers[pm.key]
@@ -452,7 +456,7 @@ function UI:renderOverviewTab()
     self:drawText(122, 8, padOrTrunc(string.format("TCP Bridge : %s",
         not self.cfg.enableBridge and "Disabled" or (hub.bridgeConnected and "Connected" or "Connecting")), 35),
         hub.bridgeConnected and COLORS.green or COLORS.muted, COLORS.panelBg)
-    self:drawText(122, 9, padOrTrunc(string.format("Mesh Peers : %d / 5 online (p:%d)",
+    self:drawText(122, 9, padOrTrunc(string.format("Mesh Peers : %d / 6 online (p:%d)",
         peerOnline, tonumber(self.cfg.meshPort) or 4205), 35),
         peerOnline > 0 and COLORS.cyan or COLORS.muted, COLORS.panelBg)
     self:drawText(122, 11, padOrTrunc(string.format("Last Scan  : %.2fs | AE Items:%d",
@@ -503,6 +507,17 @@ function UI:renderOverviewTab()
     local unvOn, unvSeen, unvAge, unvRec = peerMeta(peers.univ, 60)
     local unvSt = (peers.univ and peers.univ.status) or {}
 
+    local qftOn, qftSeen, qftAge, qftRec = peerMeta(peers.qft, 60)
+    local qftSt = (peers.qft and peers.qft.status) or {}
+    local qftOnN, qftActN, qftTotN = 0, 0, #(qftSt.units or {})
+    for _, qu in ipairs(qftSt.units or {}) do
+        if type(qu) == "table" then
+            if qu.online then qftOnN = qftOnN + 1 end
+            if qu.active then qftActN = qftActN + 1 end
+        end
+    end
+    local qftMm = (type(qftSt.maintMode) == "table" and qftSt.maintMode.mode) or tostring(qftSt.maintMode or "off")
+
     local freeKB = math.floor((tonumber(hub.freeMem) or 0) / 1024)
     local totKB = math.floor((tonumber(hub.totalMem) or 0) / 1024)
     local subCards = {
@@ -515,7 +530,7 @@ function UI:renderOverviewTab()
             line3 = string.format("Br:%s TPS:%s", hub.bridgeConnected and "ON" or "NO", tps.online and string.format("%.1f", tps.tps or 20) or "--"),
         },
         {
-            key = "dtpf", title = "DTPF", tab = TAB_DTPF, tabLbl = "DTPF", x = 28, w = 25,
+            key = "dtpf", title = "DTPF", tab = TAB_DTPF, tabLbl = "DTPF", x = 28, w = 26,
             online = dtpfOn, seen = dtpfSeen, rec = dtpfRec,
             tagTxt = dtpfSeen and (dtpfSt.armed and "ARMED" or "PAUSED") or "WAIT",
             line1 = dtpfSeen and string.format("Units:%d/%d D:%s", dtpfUp, dtpfTot, dtpfMinD and string.format("%.0f%%", dtpfMinD) or "--") or "Waiting DTPF",
@@ -523,36 +538,44 @@ function UI:renderOverviewTab()
             line3 = dtpfAge and string.format("Age:%ds Rec:%d", dtpfAge, dtpfRec) or "No beacon yet",
         },
         {
-            key = "stock", title = "STOCK", tab = TAB_STOCK, tabLbl = "Stock", x = 54, w = 25,
+            key = "stock", title = "STOCK", tab = TAB_STOCK, tabLbl = "Stock", x = 55, w = 20,
             online = stkOn, seen = stkSeen, rec = stkRec,
-            tagTxt = stkSeen and (stkSt.armed and "ARMED" or "PAUSED") or "WAIT",
-            line1 = stkSeen and string.format("Rules:%d/%d", tonumber(stkSt.enabledRules) or 0, tonumber(stkSt.totalRules) or 0) or "Waiting Stock",
-            line2 = stkSeen and string.format("Lo:%d Cr:%d Er:%d", tonumber(stkSt.lowCount) or 0, tonumber(stkSt.craftingCount) or 0, tonumber(stkSt.errorCount) or 0) or "OC Mesh :4205",
-            line3 = stkAge and string.format("%.1fms Age:%ds", tonumber(stkPerf.lastCycleMs) or 0, stkAge) or "No beacon yet",
+            tagTxt = stkSeen and (stkSt.armed and "ARM" or "OFF") or "WAIT",
+            line1 = stkSeen and string.format("R:%d/%d", tonumber(stkSt.enabledRules) or 0, tonumber(stkSt.totalRules) or 0) or "Wait Stock",
+            line2 = stkSeen and string.format("L:%d C:%d E:%d", tonumber(stkSt.lowCount) or 0, tonumber(stkSt.craftingCount) or 0, tonumber(stkSt.errorCount) or 0) or "Mesh :4205",
+            line3 = stkAge and string.format("%.1fms %ds", tonumber(stkPerf.lastCycleMs) or 0, stkAge) or "No beacon",
         },
         {
-            key = "pump", title = "PUMP", tab = TAB_PUMP, tabLbl = "Pump", x = 80, w = 25,
+            key = "qft", title = "QFT", tab = TAB_QFT, tabLbl = "QFT", x = 76, w = 20,
+            online = qftOn, seen = qftSeen, rec = qftRec,
+            tagTxt = qftSeen and (qftSt.armed and "ARM" or "OFF") or "WAIT",
+            line1 = qftSeen and string.format("U:%d/%d A:%d", qftOnN, qftTotN, qftActN) or "Wait QFT",
+            line2 = qftSeen and string.format("M:%s", qftMm:upper()) or "Mesh :4205",
+            line3 = qftAge and string.format("Age:%ds R:%d", qftAge, qftRec) or "No beacon",
+        },
+        {
+            key = "pump", title = "PUMP", tab = TAB_PUMP, tabLbl = "Pump", x = 97, w = 20,
             online = pmpOn, seen = pmpSeen, rec = pmpRec,
             tagTxt = pmpSeen and tostring(pmpSt.state or (pmpAct > 0 and "RUN" or "IDLE")):upper() or "WAIT",
-            line1 = pmpSeen and string.format("Pumps:%d/%d on", pmpAct, pmpTot) or "Waiting Pump",
-            line2 = pmpSeen and string.format("Lo:%d OK:%d fl", pmpLow, pmpOk) or "OC Mesh :4205",
-            line3 = pmpAge and string.format("Age:%ds Rec:%d", pmpAge, pmpRec) or "180s cycle",
+            line1 = pmpSeen and string.format("P:%d/%d on", pmpAct, pmpTot) or "Wait Pump",
+            line2 = pmpSeen and string.format("L:%d OK:%d", pmpLow, pmpOk) or "Mesh :4205",
+            line3 = pmpAge and string.format("Age:%ds R:%d", pmpAge, pmpRec) or "180s cyc",
         },
         {
-            key = "gorge", title = "GODFORGE", tab = TAB_GORGE, tabLbl = "Gorge", x = 106, w = 25,
+            key = "gorge", title = "GORGE", tab = TAB_GORGE, tabLbl = "Gorge", x = 118, w = 20,
             online = grgOn, seen = grgSeen, rec = grgRec,
-            tagTxt = grgSeen and (grgSt.armed and "ARMED" or "PAUSED") or "WAIT",
-            line1 = grgSeen and string.format("Ex:%d act Cyc:%d", tonumber(grgSt.activeCount) or 0, tonumber(grgSt.completedCycles) or 0) or "Waiting Gorge",
-            line2 = grgSeen and string.format("GF:%s LSC:%.0f%%", grgGf.active and "ON" or "OFF", tonumber(grgSt.lscPct) or 0) or "OC Mesh :4205",
-            line3 = grgAge and string.format("Er:%d Age:%ds", tonumber(grgSt.errorCount) or 0, grgAge) or "No beacon yet",
+            tagTxt = grgSeen and (grgSt.armed and "ARM" or "OFF") or "WAIT",
+            line1 = grgSeen and string.format("Ex:%d C:%d", tonumber(grgSt.activeCount) or 0, tonumber(grgSt.completedCycles) or 0) or "Wait Gorge",
+            line2 = grgSeen and string.format("GF:%s %.0f%%", grgGf.active and "ON" or "--", tonumber(grgSt.lscPct) or 0) or "Mesh :4205",
+            line3 = grgAge and string.format("E:%d %ds", tonumber(grgSt.errorCount) or 0, grgAge) or "No beacon",
         },
         {
-            key = "univ", title = "UNIVERSAL", tab = TAB_UNIVERSAL, tabLbl = "Univ", x = 132, w = 27,
+            key = "univ", title = "UNIV", tab = TAB_UNIVERSAL, tabLbl = "Univ", x = 139, w = 21,
             online = unvOn, seen = unvSeen, rec = unvRec,
-            tagTxt = unvSeen and (unvSt.armed and "ARMED" or "PAUSED") or "WAIT",
-            line1 = unvSeen and string.format("Pool:%d act Q:%d", tonumber(unvSt.activePools) or 0, tonumber(unvSt.queuedSlices) or 0) or "Waiting Univ",
-            line2 = unvSeen and string.format("Done:%d Stl:%d", tonumber(unvSt.completedBatches) or 0, tonumber(unvSt.stalledCount) or 0) or "OC Mesh :4205",
-            line3 = unvAge and string.format("Pre:%d Age:%ds", tonumber(unvSt.preemptions) or 0, unvAge) or "No beacon yet",
+            tagTxt = unvSeen and (unvSt.armed and "ARM" or "OFF") or "WAIT",
+            line1 = unvSeen and string.format("P:%d Q:%d", tonumber(unvSt.activePools) or 0, tonumber(unvSt.queuedSlices) or 0) or "Wait Univ",
+            line2 = unvSeen and string.format("D:%d S:%d", tonumber(unvSt.completedBatches) or 0, tonumber(unvSt.stalledCount) or 0) or "Mesh :4205",
+            line3 = unvAge and string.format("Pr:%d %ds", tonumber(unvSt.preemptions) or 0, unvAge) or "No beacon",
         },
     }
 
@@ -576,21 +599,22 @@ function UI:renderOverviewTab()
         local isRbtArm = (self.confirmRebootPeer == sc.key)
         local canRbt = (sc.key == "ae2") or sc.seen
         local rbtX = sc.x + sc.w - (isRbtArm and 9 or 7)
+        local compact = (sc.w < 23)
         if isStale and self.cb.onMeshRecover then
-            local wx = self:drawButton(sc.x + 2, 20, "[Wake]", COLORS.yellow, COLORS.amberBg, function()
+            local wx = self:drawButton(sc.x + 2, 20, compact and "[Wk]" or "[Wake]", COLORS.yellow, COLORS.amberBg, function()
                 self.statusMsg = tostring(self.cb.onMeshRecover(sc.key) or "Wake sent.")
             end)
-            self:drawButton(wx + 1, 20, "[" .. sc.tabLbl .. "]", COLORS.cyan, COLORS.btnBg, function()
+            self:drawButton(wx + 1, 20, compact and "[Op]" or ("[" .. sc.tabLbl .. "]"), COLORS.cyan, COLORS.btnBg, function()
                 self.tab = sc.tab
                 self.tabScroll = 0
             end)
         else
-            self:drawButton(sc.x + 2, 20, "[Open " .. sc.tabLbl .. "]", COLORS.cyan, COLORS.btnBg, function()
+            self:drawButton(sc.x + 2, 20, compact and "[Open]" or ("[Open " .. sc.tabLbl .. "]"), COLORS.cyan, COLORS.btnBg, function()
                 self.tab = sc.tab
                 self.tabScroll = 0
             end)
             if (not canRbt) and self.cb.onMeshRecover then
-                self:drawButton(sc.x + sc.w - 8, 20, "[Wake]", COLORS.yellow, COLORS.amberBg, function()
+                self:drawButton(sc.x + sc.w - (compact and 6 or 8), 20, compact and "[Wk]" or "[Wake]", COLORS.yellow, COLORS.amberBg, function()
                     self.statusMsg = tostring(self.cb.onMeshRecover(sc.key) or "Wake sent.")
                 end)
             end
@@ -900,18 +924,17 @@ function UI:renderMeshTab()
         end
     end)
 
-    -- Card 5: Mainnet Stock Maintainer (x=2, y=35, w=157, h=13)
-    self:renderMeshPeerCard(2, 35, 157, 13, "MAINNET STOCK MAINTAINER", "stock", peers.stock, 60, TAB_STOCK, function(st, bx, by, bw)
+    -- Card 5: Mainnet Stock Maintainer (x=2, y=35, w=77, h=13)
+    self:renderMeshPeerCard(2, 35, 77, 13, "MAINNET STOCK MAINTAINER", "stock", peers.stock, 60, TAB_STOCK, function(st, bx, by, bw)
         local pf = type(st.perf) == "table" and st.perf or {}
         self:drawText(bx, by, padOrTrunc(string.format(
-            "Armed: %-5s  Rules: %d/%d enabled  OK:%d  Low:%d  Craft:%d  Err:%d  Warn:%d  Free CPUs: %d/%d",
+            "Armed:%-5s Rules:%d/%d (OK:%d Lo:%d Cr:%d Er:%d) CPUs:%d/%d",
             tostring(st.armed == true), tonumber(st.enabledRules) or 0, tonumber(st.totalRules) or 0,
             tonumber(st.okCount) or 0, tonumber(st.lowCount) or 0, tonumber(st.craftingCount) or 0,
-            tonumber(st.errorCount) or 0, tonumber(st.warnCount) or 0,
-            tonumber(st.freeCpus) or 0, tonumber(st.totalCpus) or 0), bw),
+            tonumber(st.errorCount) or 0, tonumber(st.freeCpus) or 0, tonumber(st.totalCpus) or 0), bw),
             (tonumber(st.errorCount) or 0) > 0 and COLORS.red or (st.armed and COLORS.green or COLORS.yellow), COLORS.panelBg)
         self:drawText(bx, by + 1, padOrTrunc(string.format(
-            "Cycle: %.2fms  AE Calls/s: %.2f  Equiv Physical Blocks Saved: %d  Free RAM: %.0f KB",
+            "Cycle:%.2fms AE/s:%.2f Saved:%d blk RAM:%.0fKB",
             tonumber(pf.lastCycleMs) or 0, tonumber(pf.aeCallsPerSec) or 0,
             tonumber(pf.equivBlocksSaved) or 0, tonumber(pf.freeMemKB) or 0), bw), COLORS.cyan, COLORS.panelBg)
         local preview = type(st.rulesPreview) == "table" and st.rulesPreview or {}
@@ -920,11 +943,43 @@ function UI:renderMeshTab()
             if type(r) == "table" then
                 local stTag = tostring(r.state or "LOW")
                 local col = (stTag == "ERR") and COLORS.red or ((stTag == "OK") and COLORS.green or ((stTag == "CRAFT") and COLORS.cyan or COLORS.yellow))
-                local line = string.format("  %-32s [%-5s] %12s / %-12s %-5s %s",
-                    padOrTrunc(r.label or "?", 32), tostring(r.type or "item"),
-                    UI.formatNumber(r.stock or 0), UI.formatNumber(r.target or 0),
-                    stTag, tostring(r.warn or r.err or ""))
+                local line = string.format("  %-22s [%-5s] %8s/%-8s %-5s",
+                    padOrTrunc(r.label or "?", 22), tostring(r.type or "item"),
+                    UI.formatNumber(r.stock or 0), UI.formatNumber(r.target or 0), stTag)
                 self:drawText(bx, by + 2 + i, padOrTrunc(line, bw), col, COLORS.panelBg)
+            end
+        end
+    end)
+
+    -- Card 6: QFT Fleet Controller (x=81, y=35, w=78, h=13)
+    self:renderMeshPeerCard(81, 35, 78, 13, "QFT FLEET CONTROLLER", "qft", peers.qft, 60, TAB_QFT, function(st, bx, by, bw)
+        local units = type(st.units) == "table" and st.units or {}
+        local onN, actN, recN = 0, 0, 0
+        for _, u in ipairs(units) do
+            if type(u) == "table" then
+                if u.online then onN = onN + 1 end
+                if u.active then actN = actN + 1 end
+                if u.reconfiguring then recN = recN + 1 end
+            end
+        end
+        local mm = type(st.maintMode) == "table" and st.maintMode or {}
+        self:drawText(bx, by, padOrTrunc(string.format(
+            "Armed:%-5s Units:%d/%d (%d act, %d recfg) Maint:%s",
+            tostring(st.armed == true), onN, #units, actN, recN, tostring(mm.label or mm.mode or "OFF")), bw),
+            recN > 0 and COLORS.yellow or (st.armed and COLORS.green or COLORS.muted), COLORS.panelBg)
+        self:drawText(bx, by + 1, padOrTrunc(tostring(mm.detail or "OC Mesh :4205"), bw), COLORS.cyan, COLORS.panelBg)
+        for i = 1, math.min(4, #units) do
+            local u = units[i]
+            if type(u) == "table" then
+                local line = string.format("  %-14s %-6s T%d C#%d Np:%s Fm:%s %s",
+                    padOrTrunc(u.label or ("QFT#" .. i), 14),
+                    tostring(u.state or (u.active and "RUN" or "IDLE")),
+                    tonumber(u.tier) or 1,
+                    tonumber(u.focusCircuit) or 0,
+                    u.hasNeptunium and "ON" or "--",
+                    u.hasFermium and "ON" or "--",
+                    padOrTrunc(u.recipeName or u.recipeId or "-", 16))
+                self:drawText(bx, by + 2 + i, padOrTrunc(line, bw), u.active and COLORS.green or COLORS.fg, COLORS.panelBg)
             end
         end
     end)
@@ -1315,6 +1370,72 @@ function UI:renderStockTab()
     end
 end
 
+function UI:renderQftTab()
+    local peer = self.hub and self.hub.peers and self.hub.peers.qft
+    local st = peer and peer.status or nil
+    if type(st) ~= "table" then
+        self:renderPeerOfflineGuide("QUANTUM FORCE TRANSFORMER CONTROLLER", "qft", peer, 60)
+        return
+    end
+    local now = tonumber(self.hub.nowUptime) or 0
+    local fresh = peer.addr and (now - (peer.lastSeen or -1000)) < 60
+    local units = type(st.units) == "table" and st.units or {}
+    local onN, actN, recN = 0, 0, 0
+    for _, u in ipairs(units) do
+        if type(u) == "table" then
+            if u.online then onN = onN + 1 end
+            if u.active then actN = actN + 1 end
+            if u.reconfiguring then recN = recN + 1 end
+        end
+    end
+    local mm = type(st.maintMode) == "table" and st.maintMode or {}
+
+    self:drawFrame(2, 5, 157, 7, COLORS.border, COLORS.panelBg, "round")
+    self:drawText(4, 5, " ◈ QUANTUM FORCE TRANSFORMER ORCHESTRATOR ", COLORS.accent, COLORS.panelBg)
+    self:drawText(138, 5, fresh and (" ONLINE (" .. UI.formatAge(now, peer.lastSeen) .. ") ") or " STALE ", fresh and COLORS.green or COLORS.yellow, COLORS.panelBg)
+    self:drawText(4, 7, padOrTrunc(string.format(
+        "Armed:%-5s  Units:%d/%d online (%d active, %d recfg)  Maintainer:%s (%s)",
+        tostring(st.armed == true), onN, #units, actN, recN,
+        tostring(mm.label or mm.mode or "OFF"), tostring(mm.detail or "-")), 152), COLORS.fg, COLORS.panelBg)
+
+    local bx = 4
+    bx = self:drawOrchestratorBtn(bx, 9, "[Arm Fleet]", COLORS.fg, COLORS.darkGreen, "qft", "resume")
+    bx = self:drawOrchestratorBtn(bx, 9, "[Pause Fleet]", COLORS.yellow, COLORS.amberBg, "qft", "pause")
+    bx = self:drawOrchestratorBtn(bx, 9, "[Poll Now]", COLORS.cyan, COLORS.btnBg, "qft", "poll")
+    bx = self:drawOrchestratorBtn(bx, 9, "[Sync Mainnet]", COLORS.green, COLORS.btnBg, "qft", "sync_mainnet")
+    bx = self:drawOrchestratorBtn(bx, 9, "[Rediscover]", COLORS.fg, COLORS.btnBg, "qft", "rediscover")
+    self:drawRebootBtn(bx, 9, "qft", "[Reboot QFT]", "[Confirm Reboot?]")
+
+    self:drawFrame(2, 13, 157, 35, COLORS.border, COLORS.panelBg, "round")
+    self:drawText(4, 13, string.format(" ◈ QFT UNITS (%d) ", #units), COLORS.accent, COLORS.panelBg)
+    self:drawText(4, 15, padOrTrunc(string.format("%-4s %-16s %-8s %-6s %-28s %-14s %-10s %-16s %s",
+        "#", "Unit", "State", "Tier", "Recipe", "Blocks", "Focus", "Plasma Np/Fm", "Progress / Note"), 152), COLORS.muted, COLORS.panelBg)
+    self:drawText(4, 16, string.rep("─", 152), COLORS.border, COLORS.panelBg)
+
+    local maxShow = 15
+    local maxScroll = math.max(0, #units - maxShow)
+    self.tabScroll = math.max(0, math.min(maxScroll, self.tabScroll or 0))
+    for i = 1, math.min(maxShow, #units - self.tabScroll) do
+        local idx = self.tabScroll + i
+        local u = units[idx]
+        if type(u) == "table" then
+            local ry = 16 + i * 2
+            local bg = (i % 2 == 0) and COLORS.rowAltBg or COLORS.panelBg
+            self:fillRect(3, ry, 155, 1, " ", COLORS.fg, bg)
+            local stTxt = tostring(u.state or (u.active and "RUN" or (u.online and "IDLE" or "OFFLINE")))
+            local blkTxt = u.hasHatch and "Ctrl+Bus+Hat" or (u.hasBus and "Ctrl+Bus" or "Ctrl-1Blk")
+            local plsTxt = string.format("Np:%s Fm:%s", u.hasNeptunium and "ON" or "--", u.hasFermium and "ON" or "--")
+            local focTxt = string.format("#%d (%s)", tonumber(u.focusCircuit) or 0, tostring(u.focusMode or "auto"))
+            local note = u.reconfiguring and "Waiting idle to swap!" or (u.maxProgress and (u.maxProgress > 0) and string.format("%d/%dt", u.progress or 0, u.maxProgress) or tostring(u.mode or "passive"))
+            local line = string.format("%-4d %-16s %-8s T%-5d %-28s %-14s %-10s %-16s %s",
+                idx, padOrTrunc(u.label or ("QFT#" .. idx), 16), stTxt, tonumber(u.tier) or 1,
+                padOrTrunc(u.recipeName or u.recipeId or "-", 28), blkTxt, focTxt, plsTxt, padOrTrunc(note, 24))
+            local col = u.reconfiguring and COLORS.yellow or (u.active and COLORS.green or (u.online and COLORS.fg or COLORS.muted))
+            self:drawText(4, ry, padOrTrunc(line, 152), col, bg)
+        end
+    end
+end
+
 function UI:renderSetupTab()
     -- Left Card: Live Exporter Feature Toggles
     self:drawFrame(2, 5, 77, 43, COLORS.border, COLORS.panelBg, "round")
@@ -1468,13 +1589,15 @@ function UI:render()
         self:renderPumpTab()
     elseif self.tab == TAB_STOCK then
         self:renderStockTab()
+    elseif self.tab == TAB_QFT then
+        self:renderQftTab()
     elseif self.tab == TAB_SETUP then
         self:renderSetupTab()
     end
 
     self:drawText(1, self.h - 1, string.rep("─", self.w), COLORS.border, COLORS.bg)
-    self:drawText(2, self.h, padOrTrunc(self.statusMsg or "", self.w - 60), COLORS.fg, COLORS.bg)
-    self:drawText(self.w - 57, self.h, "Keys: 1-9 Tabs | S Scan | P Ping | L Log | R Reset | Q Quit", COLORS.muted, COLORS.bg)
+    self:drawText(2, self.h, padOrTrunc(self.statusMsg or "", self.w - 64), COLORS.fg, COLORS.bg)
+    self:drawText(self.w - 60, self.h, "Keys: 1-9,0 Tabs | S Scan | P Ping | L Log | R Reset | Q Quit", COLORS.muted, COLORS.bg)
 
     self:renderLogModal()
     self:flush()
@@ -1517,7 +1640,7 @@ function UI:handleScroll(dir)
         self.logScroll = math.max(0, (self.logScroll or 0) + delta)
     elseif self.tab == TAB_CPUS then
         self.cpuScroll = math.max(0, (self.cpuScroll or 0) + delta)
-    elseif self.tab >= TAB_DTPF and self.tab <= TAB_STOCK then
+    elseif self.tab >= TAB_DTPF and self.tab <= TAB_QFT then
         self.tabScroll = math.max(0, (self.tabScroll or 0) + delta)
     end
     self:render()
@@ -1531,8 +1654,13 @@ function UI:handleKeyDown(char, code)
         self.tabScroll = 0
         self.confirmCancelCpu = nil
         self.confirmRebootPeer = nil
-    elseif code == 15 or char == 9 then -- Tab cycles 1..9
-        self.tab = (self.tab % 9) + 1
+    elseif char == 48 then -- '0' -> Setup
+        self.tab = TAB_SETUP
+        self.tabScroll = 0
+        self.confirmCancelCpu = nil
+        self.confirmRebootPeer = nil
+    elseif code == 15 or char == 9 then -- Tab cycles 1..10
+        self.tab = (self.tab % 10) + 1
         self.tabScroll = 0
         self.confirmCancelCpu = nil
         self.confirmRebootPeer = nil

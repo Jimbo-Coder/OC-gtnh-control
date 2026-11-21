@@ -1224,6 +1224,44 @@ function Hardware.handleMeshMessage(cfg, state, localAddr, sender, port, msgType
             sendMeshPacket(cl, state, sender, viaTunnel, "STOCK_REPLY", tostring(reqId or ""), idx, total, slice)
         end
         return true
+    elseif msgType == "STOCK_PUSH_RULES" then
+        if state then
+            state._mainnetMeshAddr = sender
+            state._mainnetMeshViaTunnel = (port == 0)
+            state._lastMainnetSeen = clockNow()
+        end
+        local okU, pushTbl = pcall(serialization.unserialize, tostring(payload or ""))
+        local resTbl
+        if okU and type(pushTbl) == "table" and type(rpcHandler) == "function" then
+            if pushTbl.op == "untag" then
+                local rpcOut = rpcHandler({
+                    op = "untag_rules",
+                    tag = pushTbl.tag,
+                    pauseOrphans = (pushTbl.pauseOrphans == true),
+                    deleteOrphans = (pushTbl.deleteOrphans == true),
+                })
+                resTbl = type(rpcOut) == "table" and { ok = (rpcOut.ok ~= false), untagged = true, error = rpcOut.error }
+                    or { ok = false, error = "No result" }
+            else
+                local rpcOut = rpcHandler({ op = "upsert_tagged_rules", payload = pushTbl })
+                if type(rpcOut) == "table" and type(rpcOut.pushResult) == "table" then
+                    resTbl = rpcOut.pushResult
+                    resTbl.ok = (rpcOut.ok ~= false)
+                elseif type(rpcOut) == "table" then
+                    resTbl = { ok = (rpcOut.ok ~= false), error = rpcOut.error }
+                else
+                    resTbl = { ok = false, error = "No result" }
+                end
+            end
+        else
+            resTbl = { ok = false, error = "Invalid STOCK_PUSH_RULES payload" }
+        end
+        local viaTunnel = (port == 0)
+        sendMeshPacket(cl, state, sender, viaTunnel, "STOCK_PUSH_ACK", tostring(reqId or ""), serialization.serialize(resTbl))
+        if resTbl.ok then
+            Hardware.pushMeshMetrics(cfg, state, clockNow(), cl, true)
+        end
+        return true
     elseif msgType == "DTPF_HANDOFF_ACK" then
         local rawStr = (type(reqId) == "string" and reqId:sub(1, 1) == "{" and (payload == nil or payload == "")) and reqId or payload
         local okU, ack = pcall(serialization.unserialize, tostring(rawStr or ""))

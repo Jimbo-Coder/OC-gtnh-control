@@ -522,12 +522,12 @@ assertEq(crafted[1].amount, 60, "Deficit mode clamped by maxBatch=60")
 assertEq(crafted[2].name, "custom:p2", "Priority 2 crafted second")
 assertEq(crafted[2].amount, 50, "Fixed batch crafted 50")
 
--- Verify busy CPU dedup & hysteresis skip & DTPF warning
+-- Verify busy CPU dedup & hysteresis skip & non-blocking default DTPF coexistence
 local byId = {}
 for _, rs in ipairs(state.ruleStatuses) do byId[rs.id] = rs end
 assertEq(byId["r_hyst"].state, "OK", "Hysteresis rule holds OK at 450 >= 400")
 assertEq(byId["r_busy"].state, "CRAFT", "Busy CPU item detected as CRAFT")
-assertEq(byId["r_dtpf"].warnKind, "dtpf_passive_capable", "DTPF passive warning flagged on Molten Neutronium")
+assertEq(byId["r_dtpf"].warnKind, nil, "Default dtpfWarnMode='off' lets passive outputs coexist without warning")
 
 -- Verify CPU filter routing when budget allows r_cpu
 crafted = {}
@@ -545,6 +545,13 @@ for _, c in ipairs(crafted) do
     end
 end
 assert(cpuHit, "CPU-filtered rule dispatched")
+
+-- Verify opt-in dtpfWarnMode='warn'
+cfg.dtpfWarnMode = "warn"
+Scheduler.step(cfg, state, 211.0, nil, { forceFull = true })
+byId = {}
+for _, rs in ipairs(state.ruleStatuses) do byId[rs.id] = rs end
+assertEq(byId["r_dtpf"].warnKind, "dtpf_passive_capable", "Opt-in dtpfWarnMode='warn' flags DTPF passive warning on Molten Neutronium")
 
 -- TEST 4: Exponential Backoff & Clear Backoffs
 crafted = {}
@@ -1267,6 +1274,92 @@ return true
     assertEq(updOrder[1], "STOCK_REPLY:req-upd-1", "STOCK_REPLY sent BEFORE install & shutdown")
     assertEq(updOrder[2], "STOCK_INSTALL:--url|http://127.0.0.1:8765/oc-raw|--update|--yes", "Installer invoked with target bridge URL")
     assertEq(updOrder[3], "SHUTDOWN:true", "computer.shutdown(true) fired after clean install")
+end
+
+-- TEST 9d: Origin Tagging (upsert_tagged_rules, untag_rules, STOCK_PUSH_RULES -> STOCK_PUSH_ACK)
+do
+    local tCfg = Scheduler.defaultConfig()
+    assertEq(tCfg.dtpfWarnMode, "off", "Default dtpfWarnMode is off")
+    Scheduler.upsertRule(tCfg, { id = "shared_c", type = "item", name = "gregtech:gt.metaitem.01", damage = 2010, label = "Carbon Dust", group = "Chems", target = 256, batch = 64 })
+    local r1 = Scheduler.upsertTaggedRules(tCfg, {
+        tag = "QFT: Plastics",
+        group = "QFT",
+        source = "qft",
+        rules = {
+            { type = "item", name = "gregtech:gt.metaitem.01", damage = 2010, label = "Carbon Dust", target = 512, batch = 128 },
+            { type = "fluid", name = "oxygen", damage = 0, label = "Oxygen Gas", target = 256000, batch = 64000 },
+        },
+    })
+    assertEq(r1.ok, true, "upsertTaggedRules succeeds")
+    assertEq(r1.added, 1, "Added 1 new rule")
+    assertEq(r1.updated, 1, "Updated 1 existing rule")
+    local carbonRule = Scheduler.findRule(tCfg, "item", "gregtech:gt.metaitem.01", 2010)
+    assertEq(carbonRule.group, "Chems", "Existing user group preserved when merging QFT origin tag")
+    assertEq(carbonRule.target, 512, "Target raised to meet QFT requirement")
+    assertEq(carbonRule.tags[1], "QFT: Plastics", "Origin tag attached to existing rule")
+    local oxRule = Scheduler.findRule(tCfg, "fluid", "oxygen", 0)
+    assertEq(oxRule.group, "QFT", "New QFT input placed in QFT group")
+    assertEq(oxRule.tags[1], "QFT: Plastics", "Origin tag attached to new rule")
+
+    -- Push another tag on the same Oxygen rule, then retire QFT: Plastics with pauseOrphans
+    Scheduler.upsertTaggedRules(tCfg, {
+        tag = "DTPF: SpaceTime",
+        group = "DTPF",
+        source = "dtpf",
+        rules = {
+            { type = "fluid", name = "oxygen", damage = 0, label = "Oxygen Gas", target = 128000, batch = 32000 },
+        },
+    })
+    assertEq(#oxRule.tags, 2, "Oxygen carries both QFT and DTPF origin tags")
+    local ut = Scheduler.untagRules(tCfg, nil, "QFT: Plastics", { pauseOrphans = true })
+    assertEq(ut.untagged, 2, "Untagged both Carbon and Oxygen from QFT: Plastics")
+    assertEq(ut.paused, 1, "Orphaned Carbon paused while shared Oxygen remains active")
+    assertEq(carbonRule.enabled, false, "Orphaned Carbon disabled cleanly")
+    assertEq(oxRule.enabled, true, "Still-tagged Oxygen stayed enabled")
+
+    -- Mesh STOCK_PUSH_RULES -> STOCK_PUSH_ACK
+    local pushAcks = {}
+    local pushModem = {
+        isOpen = function() return true end, open = function() return true end,
+        isWireless = function() return true end, getStrength = function() return 400 end, setStrength = function() return 400 end,
+        getWakeMessage = function() return "GTNH_WAKE" end, setWakeMessage = function() return "GTNH_WAKE" end,
+        send = function(addr, port, mType, reqId, body)
+            pushAcks[#pushAcks + 1] = { addr = addr, port = port, mType = mType, reqId = reqId, body = body }
+            return true
+        end,
+        broadcast = function(port, mType, body)
+            pushAcks[#pushAcks + 1] = { addr = "*", port = port, mType = mType, body = body }
+            return true
+        end,
+    }
+    local pComp = {
+        list = function(ct)
+            local done = false
+            return function() if ct == "modem" and not done then done = true; return "mod-p" end return nil end
+        end,
+        proxy = function(a) return (a == "mod-p") and pushModem or nil end,
+    }
+    local pSt = Scheduler.newState()
+    local handled = Hardware.handleMeshMessage(tCfg, pSt, "mod-p", "ae2-addr", 4205, "STOCK_PUSH_RULES", "qp-1",
+        serialization.serialize({
+            tag = "QFT: Naquadah",
+            group = "QFT",
+            source = "qft",
+            rules = {
+                { type = "item", name = "gregtech:gt.metaitem.01", damage = 2011, label = "Sodium Dust", target = 640, batch = 64 },
+            },
+        }), pComp, function(c) return Scheduler.executeRpcTable(tCfg, pSt, c, pComp) end)
+    assertEq(handled, true, "Handled STOCK_PUSH_RULES over mesh")
+    local sawAck = false
+    for _, p in ipairs(pushAcks) do
+        if p.mType == "STOCK_PUSH_ACK" then
+            sawAck = true
+            local dec = serialization.unserialize(p.body)
+            assertEq(dec.ok, true, "STOCK_PUSH_ACK ok=true")
+            assertEq(dec.added, 1, "STOCK_PUSH_ACK added=1")
+        end
+    end
+    assert(sawAck, "Emitted STOCK_PUSH_ACK back to sender")
 end
 return "OK"
 """

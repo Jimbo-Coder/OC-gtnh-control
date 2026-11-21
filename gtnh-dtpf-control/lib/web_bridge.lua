@@ -419,6 +419,8 @@ function WebBridge:buildSnapshot()
         conflictMode = rawMaint.conflictMode or cfg.maintConflictMode or "defer",
         maxDispatch = rawMaint.maxDispatch or tonumber(cfg.maintMaxDispatch) or 2,
         stockPeerOnline = (rawMaint.stockPeerOnline == true),
+        stockArmed = (rawMaint.stockArmed == true),
+        maintMode = rawMaint.maintMode or ((cfg.maintEnabled == true) and "local" or "off"),
         overlapCount = rawMaint.overlapCount or 0,
         activeCount = rawMaint.activeCount or 0,
         craftingCount = rawMaint.craftingCount or 0,
@@ -833,6 +835,96 @@ function WebBridge:executeRpcTable(cmd)
         local snap = self:buildSnapshot()
         snap.id = id
         return snap
+    elseif op == "push_recipe_inputs" then
+        local cfg = self.cfg
+        local st = self.state
+        local famId = (type(cmd.familyId) == "string" and cmd.familyId ~= "") and cmd.familyId or nil
+        local fam = famId and FAMILY_BY_ID[famId] or nil
+        if famId and not fam then
+            return { id = id, ok = false, error = "Unknown recipe family: " .. tostring(famId) }
+        end
+        local tag = (type(cmd.tag) == "string" and cmd.tag ~= "") and cmd.tag
+            or (fam and ("DTPF: " .. tostring(fam.name or fam.id)) or "DTPF")
+        local pushRules = {}
+        local rawRules = (type(cmd.rules) == "table" and #cmd.rules > 0) and cmd.rules or nil
+        if rawRules then
+            for i = 1, #rawRules do
+                local rr = rawRules[i]
+                if type(rr) == "table" and type(rr.name) == "string" and rr.name ~= "" then
+                    local tp = (rr.type == "fluid") and "fluid" or "item"
+                    local defTgt, defBat = self.Scheduler.defaultMaintTargetBatch(tp, rr.name, rr.perCraft or rr.amount)
+                    local tgt = math.max(1, math.floor(tonumber(rr.target) or defTgt))
+                    pushRules[#pushRules + 1] = {
+                        type = tp,
+                        name = rr.name,
+                        damage = (tp == "fluid") and 0 or math.max(0, math.floor(tonumber(rr.damage) or 0)),
+                        label = rr.label or rr.name,
+                        target = tgt,
+                        lowThreshold = tonumber(rr.lowThreshold) and math.max(1, math.min(tgt, math.floor(tonumber(rr.lowThreshold)))) or nil,
+                        batch = math.max(1, math.floor(tonumber(rr.batch) or defBat)),
+                        mode = (rr.mode == "always" or rr.mode == "off") and rr.mode or "auto",
+                        group = "DTPF",
+                        tag = tag,
+                    }
+                end
+            end
+        elseif fam and self.Scheduler and self.Scheduler.collectRecipeMaintInputs then
+            local recInps = self.Scheduler.collectRecipeMaintInputs(cfg, fam.id)
+            for i = 1, #recInps do
+                local sp = recInps[i]
+                local defTgt, defBat = self.Scheduler.defaultMaintTargetBatch(sp.type, sp.name, sp.amount)
+                pushRules[#pushRules + 1] = {
+                    type = sp.type,
+                    name = sp.name,
+                    damage = sp.damage or 0,
+                    label = sp.label or sp.name,
+                    target = defTgt,
+                    batch = defBat,
+                    mode = "auto",
+                    group = "DTPF",
+                    tag = tag,
+                }
+            end
+        end
+        if #pushRules == 0 then
+            return { id = id, ok = false, error = "No maintainable inputs found for recipe" }
+        end
+
+        local peer = st and st.stockPeer
+        local nowUp = (computer and computer.uptime and computer.uptime()) or 0
+        local peerFresh = (type(peer) == "table") and ((nowUp - (tonumber(peer.lastSeen) or -1000)) < 60)
+        local mSt = (st and st.maintStatus) or {}
+        local useMainnet = (cmd.preferMainnet ~= false)
+            and ((peerFresh and peer.armed == true) or (mSt.maintMode == "mainnet"))
+            and self.Hardware and self.Hardware.pushRulesToStock
+        if useMainnet then
+            local pRes = self.Hardware.pushRulesToStock(cfg, st, {
+                tag = tag,
+                group = "DTPF",
+                rules = pushRules,
+            })
+            if pRes and pRes.ok then
+                if self.ui then
+                    pcall(self.ui.setStatus, self.ui, string.format("Pushed %d inputs -> Mainnet Stock (%s).", #pushRules, tag))
+                end
+                return { id = id, ok = true, target = "mainnet", count = #pushRules, tag = tag, reqId = pRes.reqId, maintMode = "mainnet" }
+            end
+        end
+
+        for i = 1, #pushRules do
+            local r = pushRules[i]
+            self.Scheduler.upsertMaintInput(cfg, r)
+        end
+        cfg.maintEnabled = true
+        if st then
+            st._forceMaintSync = true
+            st._forcePollNow = true
+        end
+        if self.scheduleSave then self.scheduleSave() end
+        if self.ui then
+            pcall(self.ui.setStatus, self.ui, string.format("Maintained %d inputs locally (%s).", #pushRules, tag))
+        end
+        return { id = id, ok = true, target = "local", count = #pushRules, tag = tag, maintMode = "local" }
     elseif op == "update_local" then
         local okC, cLib = pcall(require, "component")
         local cl = (okC and type(cLib) == "table") and cLib or rawget(_G, "component")

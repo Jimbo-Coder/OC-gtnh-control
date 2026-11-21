@@ -644,9 +644,10 @@ function UI:renderRulesTab()
         local matchG = (self.filterGroup == "ALL") or (r.group == self.filterGroup)
         local matchS = true
         if #searchTerms > 0 then
-            local hay = string.lower(string.format("%s %s %s %s %s",
+            local tagsStr = (type(r.tags) == "table" and #r.tags > 0) and table.concat(r.tags, " ") or ""
+            local hay = string.lower(string.format("%s %s %s %s %s %s",
                 tostring(r.label or ""), tostring(r.name or ""), tostring(r.group or ""),
-                tostring(r.type or ""), tostring(r.cpuFilter or "")))
+                tostring(r.type or ""), tostring(r.cpuFilter or ""), tagsStr))
             for _, tok in ipairs(searchTerms) do
                 if not hay:find(tok, 1, true) then
                     matchS = false
@@ -726,8 +727,11 @@ function UI:renderRulesTab()
                     or string.format("◈OUT %s/%s", UI.formatNumber(di.stock or 0, suf), UI.formatNumber(di.target or 0, suf))
             end
         end
+        local tagSummary = (type(r.tags) == "table" and #r.tags > 0)
+            and ("[" .. table.concat(r.tags, ",") .. "]") or nil
         local det = (dtpfTag ~= "") and (dtpfTag .. " | " .. tostring(sr.stateDetail or ""))
-            or (sr.warn and (sr.stateDetail .. " | " .. sr.warn) or sr.stateDetail)
+            or (sr.warn and (sr.stateDetail .. " | " .. sr.warn)
+            or (tagSummary and (tagSummary .. " " .. tostring(sr.stateDetail or "")) or sr.stateDetail))
         local rowStr = string.format("P%d %-9s %-28s %-6s %-10s %-10s %-10s %-10s %-7s %s",
             r.priority or 3,
             padOrTrunc(r.group or "General", 9),
@@ -952,10 +956,10 @@ function UI:renderPerfSetupTab()
         self:drawButton(51, ry, "[+]", COLORS.green, COLORS.btnBg, function() st.inc(); self:save("Updated " .. st.lbl) end)
     end
 
-    local wm = self.cfg.dtpfWarnMode or "warn"
+    local wm = self.cfg.dtpfWarnMode or "off"
     self:drawText(4, 26, "DTPF Overlap Policy:", COLORS.fg, COLORS.panelBg)
     self:drawButton(28, 26, "[" .. wm:upper() .. "]", COLORS.yellow, COLORS.btnBg, function()
-        self.cfg.dtpfWarnMode = (wm == "warn" and "block_overlap") or (wm == "block_overlap" and "off") or "warn"
+        self.cfg.dtpfWarnMode = (wm == "off" and "warn") or (wm == "warn" and "block_overlap") or "off"
         self:save("DTPF Warn Mode -> " .. self.cfg.dtpfWarnMode)
     end)
 
@@ -1128,6 +1132,15 @@ function UI:renderRuleEditModal()
             r.allowDtpfOverlap = not (r.allowDtpfOverlap == true)
             self:save(r.label .. " allowDtpfOverlap -> " .. tostring(r.allowDtpfOverlap))
         end)
+
+    local tagList = (type(r.tags) == "table" and #r.tags > 0) and table.concat(r.tags, ", ") or "(none)"
+    self:drawText(mx + 3, my + 21, "Origin Tags  : " .. padOrTrunc(tagList, 76), COLORS.cyan, COLORS.headerBg)
+    if type(r.tags) == "table" and #r.tags > 0 then
+        self:drawButton(mx + 98, my + 21, "[Clear Tags]", COLORS.yellow, COLORS.btnBg, function()
+            r.tags = {}
+            self:save("Cleared tags on " .. r.label)
+        end)
+    end
 
     self:drawButton(mx + 3, my + 24, "[Delete Rule]", COLORS.fg, COLORS.darkRed, function()
         Scheduler.deleteRule(self.cfg, r.id)

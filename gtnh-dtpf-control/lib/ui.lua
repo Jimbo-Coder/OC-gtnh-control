@@ -3770,19 +3770,53 @@ function UI:renderRecipeInspectorPane(fam, pinnedByFam, rankById)
     end
 
     local iy = curY + 1
-    local function addIngLine(txt, col)
+    local hdrY = iy
+    local function addIngLine(txt, col, maxW)
         if iy <= 47 then
-            self:drawText(87, iy, padOrTrunc(txt, 72), col or COLORS.fg, COLORS.panelBg)
+            self:drawText(87, iy, padOrTrunc(txt, maxW or 72), col or COLORS.fg, COLORS.panelBg)
             iy = iy + 1
         end
     end
 
+    local maintInputs = fam and Scheduler.collectRecipeMaintInputs and Scheduler.collectRecipeMaintInputs(self.cfg, fam.id) or {}
+    local hdrW = (#maintInputs > 0 and hdrY <= 47) and 56 or 72
     if minCrafts == math.huge then
-        addIngLine("INPUTS vs AE2 STOCK (✓ Catalyst/NC only):", COLORS.green)
+        addIngLine("INPUTS vs AE2 (✓ Catalyst/NC only):", COLORS.green, hdrW)
     elseif minCrafts > 0 then
-        addIngLine(string.format("INPUTS vs AE2 STOCK (✓ ~%s crafts ready):", UI.formatNumber(minCrafts, false)), COLORS.green)
+        addIngLine(string.format("INPUTS vs AE2 (✓ ~%s crafts ready):", UI.formatNumber(minCrafts, false)), COLORS.green, hdrW)
     else
-        addIngLine("INPUTS vs AE2 STOCK (✗ 0 crafts - missing/floor-limited below):", COLORS.yellow)
+        addIngLine("INPUTS vs AE2 (✗ 0 crafts - missing below):", COLORS.yellow, hdrW)
+    end
+    if #maintInputs > 0 and hdrY <= 47 then
+        local mSt = (self.state and self.state.maintStatus) or {}
+        local toMain = (mSt.maintMode == "mainnet")
+        self:drawButton(146, hdrY, toMain and "[Push->Stock]" or "[Push->Local]",
+            toMain and COLORS.cyan or COLORS.green, COLORS.btnBg,
+            function()
+                local tag = "DTPF: " .. tostring(fam.name or fam.id)
+                local pushRules = {}
+                for i = 1, #maintInputs do
+                    local sp = maintInputs[i]
+                    local defTgt, defBat = Scheduler.defaultMaintTargetBatch(sp.type, sp.name, sp.amount)
+                    pushRules[#pushRules + 1] = {
+                        type = sp.type, name = sp.name, damage = sp.damage or 0,
+                        label = sp.label or sp.name, target = defTgt, batch = defBat,
+                        mode = "auto", group = "DTPF", tag = tag,
+                    }
+                end
+                if toMain and Hardware and Hardware.pushRulesToStock then
+                    local res = Hardware.pushRulesToStock(self.cfg, self.state, { tag = tag, group = "DTPF", rules = pushRules })
+                    if res and res.ok then
+                        self.statusMsg = string.format("Pushed %d inputs -> Mainnet Stock (%s).", #pushRules, tag)
+                        return
+                    end
+                end
+                for i = 1, #pushRules do
+                    Scheduler.upsertMaintInput(self.cfg, pushRules[i])
+                end
+                self.cfg.maintEnabled = true
+                self:save(string.format("Local Maintainer + %d inputs (%s)", #pushRules, fam.name))
+            end)
     end
     local firstIngY = iy
     local lastIngY = firstIngY - 1
@@ -4111,10 +4145,14 @@ function UI:renderWiringReservesCard()
             for c = 1, #self.cfg.channels do self.cfg.channels[c].activeKey = nil end
             self:save("Non-Consumed Items -> " .. (self.cfg.uniformNcSubnet and "Uniform Aux Subnet" or "Main Net"))
         end) + 2
-    local maintEn = (self.cfg.maintEnabled == true)
-    self:drawButton(nx, 15, maintEn and "[Maint:ON…]" or "[Maint:OFF…]",
-        maintEn and COLORS.green or COLORS.muted,
-        maintEn and COLORS.darkGreen or COLORS.btnBg,
+    local mSt = (self.state and self.state.maintStatus) or {}
+    local mMode = mSt.maintMode or ((self.cfg.maintEnabled == true) and "local" or "off")
+    local mBtnLbl = (mMode == "mainnet") and "[Maint:MAINNET]" or ((mMode == "local") and "[Maint:LOCAL  ]" or "[Maint:OFF    ]")
+    local mBtnFg = (mMode == "mainnet") and COLORS.cyan or ((mMode == "local") and COLORS.green or COLORS.muted)
+    local mBtnBg = (mMode == "mainnet") and COLORS.btnActiveBg or ((mMode == "local") and COLORS.darkGreen or COLORS.btnBg)
+    self:drawButton(nx, 15, mBtnLbl,
+        mBtnFg,
+        mBtnBg,
         function()
             self.maintModalActive = true
             self.maintModalScroll = 0
@@ -5479,8 +5517,10 @@ function UI:renderMaintModal()
     local peerInfo = mSt.stockPeerOnline
         and string.format("StockOC:ON (Overlap:%d)", mSt.overlapCount or 0)
         or "StockOC:--"
-    local sub = string.format("Active: %d · Low: %d · Crafting: %d · Free CPUs: %d/%d (> %d res) · %s | Tip: Tab 3 inputs toggle rules",
-        mSt.activeCount or 0, mSt.lowCount or 0, mSt.craftingCount or 0, mSt.freeCpus or 0, mSt.totalCpus or 0, freeRes, peerInfo)
+    local mMode = mSt.maintMode or ((mEn == true) and "local" or "off")
+    local mModeLbl = (mMode == "mainnet") and "MAINNET STOCK" or ((mMode == "local") and "LOCAL FALLBACK" or "OFF")
+    local sub = string.format("Mode:%s · Act:%d Lo:%d Cr:%d · FreeCPU:%d/%d (>%d) · %s | Tab3 inputs toggle",
+        mModeLbl, mSt.activeCount or 0, mSt.lowCount or 0, mSt.craftingCount or 0, mSt.freeCpus or 0, mSt.totalCpus or 0, freeRes, peerInfo)
     self:drawText(mx + 2, my + 2, padOrTrunc(sub, mw - 4), (mSt.overlapCount or 0) > 0 and COLORS.yellow or COLORS.muted, COLORS.headerBg)
 
     local hdrY = my + 4

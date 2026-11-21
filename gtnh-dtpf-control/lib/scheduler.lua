@@ -4185,6 +4185,8 @@ function Scheduler.stepLevelMaintainer(cfg, runtimeState, ctx, nowSec, opts, pus
         conflictMode = conflictMode,
         maxDispatch = maxDispatch,
         stockPeerOnline = stockPeerOnline,
+        stockArmed = stockArmed,
+        maintMode = stockArmed and "mainnet" or ((cfg and cfg.maintEnabled == true) and "local" or "off"),
         overlapCount = overlapCount,
         activeCount = activeCount,
         craftingCount = craftingCount,

@@ -23,6 +23,7 @@ local MODULES = {
     { key = "pump",      subdir = "gtnh-space-pump",        desc = "Space Elevator Pump (Target Fluid Pumping + Optional Mesh)",         detect = "/home/autoPump.lua" },
     { key = "gorge",     subdir = "gtnh-gorge-control",     desc = "Forge of the Gods & Multi-Exoticizer Control (Self-Healing + GUI)",   detect = "/home/gorge/main.lua" },
     { key = "stock",     subdir = "gtnh-stock-control",     desc = "Mainnet AE2 Stock Maintainer (O(1) Items+Fluids + 160x50 GUI)",       detect = "/home/stock/main.lua" },
+    { key = "qft",       subdir = "gtnh-qft-control",       desc = "Quantum Force Transformer Fleet & Input Maintainer (160x50 GUI)",     detect = "/home/qft/main.lua" },
 }
 
 local BY_KEY = {}

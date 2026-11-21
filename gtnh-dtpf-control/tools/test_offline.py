@@ -5255,6 +5255,36 @@ do
     for _, pkt in ipairs(modemSent) do if pkt.args[1] == "GTNH_WAKE" then wakeCnt2 = wakeCnt2 + 1 end end
     assertEq(wakeCnt2, 0, "T24b Mainnet GTNH_WAKE suppressed within 60s window")
 
+    -- Test Mainnet Maintainer status clarity & push_recipe_inputs (Mainnet Stock + Local fallback)
+    local nowMain = compMod.uptime()
+    st24.stockPeer = { addr = "stock-modem", lastSeen = nowMain, armed = true, keys = {} }
+    st24._forceMaintSync = true
+    Scheduler.step(env, st24, { nowUptime = nowMain + 1 })
+    assertEq(st24.maintStatus.maintMode, "mainnet", "T24b maintMode reports mainnet when Stock OC armed")
+    modemSent = {}
+    local famId = RecipesDB.FAMILIES[1].id
+    local pOn = wb24:executeRpcTable({ id = "push-on", op = "push_recipe_inputs", familyId = famId })
+    assertEq(pOn.ok, true, "T24b push_recipe_inputs online succeeds")
+    assertEq(pOn.target, "mainnet", "T24b push_recipe_inputs routes to mainnet Stock when armed")
+    local sawDtpfPushPkt = false
+    for _, pkt in ipairs(modemSent) do
+        if pkt.args[1] == "STOCK_PUSH_RULES" then sawDtpfPushPkt = true end
+    end
+    assert(sawDtpfPushPkt == true, "T24b push_recipe_inputs emitted STOCK_PUSH_RULES packet")
+    assert(Hardware.handleMeshMessage(wb24, "modem-w24", "ae2-wake", Hardware.MESH_PORT, "STOCK_PUSH_ACK", "r-ack",
+        serialization.serialize({ ok = true, added = pOn.count })), "T24b handleMeshMessage handled STOCK_PUSH_ACK")
+    assertEq(st24._lastStockPushAck.ack.ok, true, "T24b recorded STOCK_PUSH_ACK")
+
+    st24.stockPeer = nil
+    env.maintEnabled = false
+    st24._forceMaintSync = true
+    Scheduler.step(env, st24, { nowUptime = compMod.uptime() + 20 })
+    assertEq(st24.maintStatus.maintMode, "off", "T24b maintMode reports off when Stock offline and local disabled")
+    local pOff = wb24:executeRpcTable({ id = "push-off", op = "push_recipe_inputs", familyId = famId })
+    assertEq(pOff.ok, true, "T24b push_recipe_inputs offline fallback succeeds")
+    assertEq(pOff.target, "local", "T24b push_recipe_inputs falls back to local when Stock offline")
+    assertEq(env.maintEnabled, true, "T24b local fallback auto-enables maintEnabled")
+
     component.gpu = nil
     Hardware.resetClusterState()
     component._reset()

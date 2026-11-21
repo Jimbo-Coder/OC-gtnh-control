@@ -12,7 +12,7 @@ local Scheduler = {}
 
 local MAX_LOG_EVENTS = 120
 
-Scheduler.DEFAULT_GROUPS = { "General", "DTPF", "Gorge", "Power", "Chems", "Circuits", "Fluids" }
+Scheduler.DEFAULT_GROUPS = { "General", "QFT", "DTPF", "Gorge", "Power", "Chems", "Circuits", "Fluids" }
 
 local function clockNow()
     if computer and computer.uptime then
@@ -24,6 +24,39 @@ local function clockNow()
 end
 
 Scheduler.now = clockNow
+
+local function normalizeTags(rawTags)
+    local out, seen = {}, {}
+    if type(rawTags) ~= "table" then return out end
+    for _, raw in ipairs(rawTags) do
+        local s = type(raw) == "string" and raw:match("^%s*(.-)%s*$") or ""
+        if s ~= "" and not seen[s] then
+            seen[s] = true
+            out[#out + 1] = s:sub(1, 48)
+            if #out >= 6 then break end
+        end
+    end
+    return out
+end
+
+local function mergeTagList(baseTags, addTags)
+    local out = normalizeTags(baseTags)
+    local seen = {}
+    for _, t in ipairs(out) do seen[t] = true end
+    if type(addTags) == "string" then
+        addTags = { addTags }
+    end
+    if type(addTags) == "table" then
+        for _, raw in ipairs(addTags) do
+            local s = type(raw) == "string" and raw:match("^%s*(.-)%s*$") or ""
+            if s ~= "" and not seen[s] and #out < 6 then
+                seen[s] = true
+                out[#out + 1] = s:sub(1, 48)
+            end
+        end
+    end
+    return out
+end
 
 local function fmtCompact(n, isFluid)
     n = tonumber(n) or 0
@@ -50,13 +83,13 @@ function Scheduler.defaultConfig()
         defaultCpuFilter = "",
         backoffBaseSec = 30,
         backoffMaxSec = 600,
-        dtpfWarnMode = "warn", -- "warn" | "block_overlap" | "off"
+        dtpfWarnMode = "off", -- "off" | "warn" | "block_overlap"
         extLinkMode = "auto", -- "auto" | "off"
         aeAddr = "auto",
         dropTransposerAddr = "auto",
         dropSide = -1,
         disablePhysicalAfterImport = false,
-        groups = { "General", "DTPF", "Gorge", "Power", "Chems", "Circuits", "Fluids" },
+        groups = { "General", "QFT", "DTPF", "Gorge", "Power", "Chems", "Circuits", "Fluids" },
         rules = {},
     }
 end
@@ -108,6 +141,7 @@ local function sanitizeRule(r, idx)
         mode = rMode,
         enabled = (r.enabled ~= false) and (rMode ~= "off"),
         allowDtpfOverlap = (r.allowDtpfOverlap == true),
+        tags = normalizeTags(r.tags),
     }
 end
 
@@ -302,6 +336,23 @@ function Scheduler.upsertRule(cfg, spec)
         if type(spec.allowDtpfOverlap) == "boolean" then
             existing.allowDtpfOverlap = spec.allowDtpfOverlap
         end
+        if type(spec.tags) == "table" then
+            if spec.replaceTags == true then
+                existing.tags = normalizeTags(spec.tags)
+            else
+                existing.tags = mergeTagList(existing.tags, spec.tags)
+            end
+        end
+        if type(spec.addTag) == "string" and spec.addTag ~= "" then
+            existing.tags = mergeTagList(existing.tags, spec.addTag)
+        end
+        if type(spec.removeTag) == "string" and spec.removeTag ~= "" and type(existing.tags) == "table" then
+            local kept = {}
+            for _, t in ipairs(existing.tags) do
+                if t ~= spec.removeTag then kept[#kept + 1] = t end
+            end
+            existing.tags = kept
+        end
         if type(spec.hasTag) == "boolean" then existing.hasTag = spec.hasTag end
         if type(spec.snbt) == "string" then existing.snbt = spec.snbt ~= "" and spec.snbt or nil end
         return existing, idx, false
@@ -358,6 +409,115 @@ function Scheduler.setGroupEnabled(cfg, group, enabled)
         end
     end
     return count
+end
+
+local function ensureGroup(cfg, group)
+    if not cfg or type(group) ~= "string" or group == "" then return end
+    cfg.groups = cfg.groups or { "General", "QFT", "DTPF", "Gorge", "Power", "Chems", "Circuits", "Fluids" }
+    for _, g in ipairs(cfg.groups) do
+        if g == group then return end
+    end
+    cfg.groups[#cfg.groups + 1] = group
+end
+
+function Scheduler.upsertTaggedRules(cfg, payload)
+    if not cfg or type(payload) ~= "table" then return { ok = false, error = "Invalid payload" } end
+    local items = type(payload.rules) == "table" and payload.rules or {}
+    local tag = type(payload.tag) == "string" and payload.tag:match("^%s*(.-)%s*$") or ""
+    local grp = (type(payload.group) == "string" and payload.group ~= "") and payload.group or "QFT"
+    local raiseTarget = (payload.raiseTarget ~= false)
+    local overwrite = (payload.overwrite == true)
+    ensureGroup(cfg, grp)
+
+    local added, updated, tagged = 0, 0, 0
+    for _, item in ipairs(items) do
+        if type(item) == "table" and type(item.name) == "string" and item.name ~= "" then
+            local tp = (item.type == "fluid") and "fluid" or "item"
+            local dmg = (tp == "fluid") and 0 or math.max(0, math.floor(tonumber(item.damage) or 0))
+            local reqTgt = math.max(1, math.floor(tonumber(item.target) or (tp == "fluid" and 64000 or 256)))
+            local reqBat = math.max(1, math.floor(tonumber(item.batch) or math.max(1, math.floor(reqTgt / 4))))
+            local reqTags = normalizeTags(item.tags)
+            if tag ~= "" then reqTags = mergeTagList(reqTags, tag) end
+
+            local existing = Scheduler.findRule(cfg, tp, item.name, dmg)
+            if existing then
+                existing.tags = mergeTagList(existing.tags, reqTags)
+                tagged = tagged + 1
+                if overwrite or (raiseTarget and reqTgt > (tonumber(existing.target) or 0)) then
+                    existing.target = reqTgt
+                    if overwrite or reqBat > (tonumber(existing.batch) or 0) then
+                        existing.batch = reqBat
+                    end
+                    if item.lowThreshold ~= nil then
+                        existing.lowThreshold = math.max(1, math.min(existing.target, math.floor(tonumber(item.lowThreshold) or existing.target)))
+                    elseif existing.lowThreshold and existing.lowThreshold > existing.target then
+                        existing.lowThreshold = existing.target
+                    end
+                end
+                if payload.enableExisting ~= false and existing.enabled == false then
+                    existing.enabled = true
+                    if existing.mode == "off" then existing.mode = "always" end
+                end
+                updated = updated + 1
+            else
+                local _, _, isNew = Scheduler.upsertRule(cfg, {
+                    type = tp,
+                    name = item.name,
+                    damage = dmg,
+                    label = item.label or item.name,
+                    group = (type(item.group) == "string" and item.group ~= "") and item.group or grp,
+                    priority = tonumber(item.priority) or 3,
+                    target = reqTgt,
+                    lowThreshold = item.lowThreshold,
+                    batch = reqBat,
+                    batchMode = item.batchMode or "fixed",
+                    maxBatch = item.maxBatch,
+                    mode = "always",
+                    enabled = (item.enabled ~= false),
+                    tags = reqTags,
+                })
+                if isNew then added = added + 1; tagged = tagged + 1 end
+            end
+        end
+    end
+    return { ok = true, tag = tag, group = grp, added = added, updated = updated, tagged = tagged }
+end
+
+function Scheduler.untagRules(cfg, state, tag, opts)
+    if not cfg or type(tag) ~= "string" or tag == "" then
+        return { ok = false, error = "tag required" }
+    end
+    opts = opts or {}
+    local untagged, paused, deleted = 0, 0, 0
+    local toDelete = {}
+    for _, r in ipairs(cfg.rules or {}) do
+        if r and type(r.tags) == "table" and #r.tags > 0 then
+            local found = false
+            local kept = {}
+            for _, t in ipairs(r.tags) do
+                if t == tag then found = true else kept[#kept + 1] = t end
+            end
+            if found then
+                r.tags = kept
+                untagged = untagged + 1
+                if #kept == 0 then
+                    if opts.deleteOrphans == true then
+                        toDelete[#toDelete + 1] = r.id
+                    elseif opts.pauseOrphans == true then
+                        r.enabled = false
+                        r.mode = "off"
+                        paused = paused + 1
+                    end
+                end
+            end
+        end
+    end
+    for _, rid in ipairs(toDelete) do
+        if Scheduler.deleteRule(cfg, rid, state) then
+            deleted = deleted + 1
+        end
+    end
+    return { ok = true, tag = tag, untagged = untagged, paused = paused, deleted = deleted }
 end
 
 function Scheduler.importPhysicalSlots(cfg, slots, opts)
@@ -1003,6 +1163,7 @@ function Scheduler.buildSnapshot(cfg, state, nowSec)
             mode = r.mode,
             enabled = r.enabled ~= false,
             allowDtpfOverlap = r.allowDtpfOverlap == true,
+            tags = (type(r.tags) == "table" and #r.tags > 0) and r.tags or nil,
             stock = sr.stock or 0,
             stockKnown = sr.stockKnown == true,
             pct = sr.pct or 0,
@@ -1168,6 +1329,32 @@ function Scheduler.executeRpcTable(cfg, state, cmd, compLib, onMutate)
     elseif op == "set_group_enabled" then
         Scheduler.setGroupEnabled(cfg, cmd.group, cmd.enabled == true)
         mutated = true
+    elseif op == "upsert_tagged_rules" then
+        local payload = type(cmd.payload) == "table" and cmd.payload or cmd
+        local res = Scheduler.upsertTaggedRules(cfg, payload)
+        if not res.ok then return { id = id, ok = false, error = res.error } end
+        if (res.added or 0) > 0 or (res.updated or 0) > 0 then
+            Scheduler.pushLog(state, "out", string.format("Tagged push [%s]: +%d new, %d upd (%s)",
+                tostring(res.tag or res.group), res.added or 0, res.updated or 0, tostring(payload.source or "mesh")), "OUT")
+            state._forcePollNow = true
+            Scheduler.step(cfg, state, clockNow(), compLib, { cachedOnly = true })
+            if onMutate then pcall(onMutate, cfg) end
+        end
+        local snap = Scheduler.buildSnapshot(cfg, state)
+        snap.id = id
+        snap.pushResult = res
+        return snap
+    elseif op == "untag_rules" then
+        local res = Scheduler.untagRules(cfg, state, cmd.tag, {
+            pauseOrphans = (cmd.pauseOrphans == true),
+            deleteOrphans = (cmd.deleteOrphans == true),
+        })
+        if not res.ok then return { id = id, ok = false, error = res.error } end
+        if (res.untagged or 0) > 0 then
+            Scheduler.pushLog(state, "out", string.format("Retired tag [%s]: %d untagged (%d paused, %d del)",
+                tostring(res.tag), res.untagged or 0, res.paused or 0, res.deleted or 0), "OUT")
+            mutated = true
+        end
     elseif op == "action" or op == "stock_action" then
         local act = cmd.action
         if act == "arm" or act == "resume" then

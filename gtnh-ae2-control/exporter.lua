@@ -79,7 +79,9 @@ local pumpMesh = { addr = nil, viaTunnel = false, lastSeen = -1000, status = nil
 local univMesh = { addr = nil, viaTunnel = false, lastSeen = -1000, status = nil, wasOnline = false, recoveryAttempts = 0, lastRecoveryAt = -1000 }
 local gorgeMesh = { addr = nil, viaTunnel = false, lastSeen = -1000, status = nil, wasOnline = false, recoveryAttempts = 0, lastRecoveryAt = -1000 }
 local stockMesh = { addr = nil, viaTunnel = false, lastSeen = -1000, status = nil, wasOnline = false, recoveryAttempts = 0, lastRecoveryAt = -1000 }
+local qftMesh = { addr = nil, viaTunnel = false, lastSeen = -1000, status = nil, wasOnline = false, recoveryAttempts = 0, lastRecoveryAt = -1000 }
 local pendingMaintJobs = {}
+local pendingStockPush = {}
 local meshReqSeq = 0
 local lastWatchdogAt = -1000
 local lastHealthInfluxAt = -1000
@@ -103,7 +105,7 @@ local hubState = {
     lsc = { online = false, pct = 0, net5s = 0, in5s = 0, out5s = 0, wirelessStr = "0", wirelessOn = true },
     tps = { online = false, mspt = 0, tps = 20, chunks = 0, dims = 0 },
     cpus = { list = {}, total = 0, busyCount = 0 },
-    peers = { dtpf = dtpfMesh, pump = pumpMesh, univ = univMesh, gorge = gorgeMesh, stock = stockMesh },
+    peers = { dtpf = dtpfMesh, pump = pumpMesh, univ = univMesh, gorge = gorgeMesh, stock = stockMesh, qft = qftMesh },
     logs = {},
 }
 
@@ -1541,6 +1543,17 @@ local function formatPeerBrief(name, tbl)
     elseif name == "gorge" then
         return string.format("%s · %d ex · %.0f%%", st.armed and "ARM" or "OFF",
             tonumber(st.activeCount) or 0, tonumber(st.lscPct) or 0)
+    elseif name == "qft" then
+        local units = type(st.units) == "table" and st.units or {}
+        local onN, actN = 0, 0
+        for _, u in ipairs(units) do
+            if type(u) == "table" then
+                if u.online then onN = onN + 1 end
+                if u.active then actN = actN + 1 end
+            end
+        end
+        local mm = type(st.maintMode) == "table" and st.maintMode.mode or tostring(st.maintMode or "off")
+        return string.format("%s · %d/%d (%d) · %s", st.armed and "ARM" or "OFF", onN, #units, actN, mm:upper())
     elseif name == "univ" then
         return string.format("%s · %dp · %dq", st.armed and "ARM" or "OFF",
             tonumber(st.activePools) or 0, tonumber(st.queuedSlices) or 0)
@@ -1556,6 +1569,7 @@ local function buildMeshHealth(now)
         pump = { tbl = pumpMesh, stale = PUMP_STALE_SEC },
         gorge = { tbl = gorgeMesh, stale = PEER_STALE_SEC },
         univ = { tbl = univMesh, stale = PEER_STALE_SEC },
+        qft = { tbl = qftMesh, stale = PEER_STALE_SEC },
     }
     local out = {}
     for k, sp in pairs(specs) do
@@ -1582,6 +1596,7 @@ local function emitMeshHelloIfOnline(writeLineFn)
             meshUniv = isMeshFresh(univMesh, PEER_STALE_SEC),
             meshGorge = isMeshFresh(gorgeMesh, PEER_STALE_SEC),
             meshStock = isMeshFresh(stockMesh, PEER_STALE_SEC),
+            meshQft = isMeshFresh(qftMesh, PEER_STALE_SEC),
             meshHealth = buildMeshHealth(now),
         }))
     end
@@ -1595,6 +1610,7 @@ local function checkMeshWatchdog(upNow, dbUrl, writeLineFn)
         { name = "pump", tbl = pumpMesh, stale = PUMP_STALE_SEC },
         { name = "gorge", tbl = gorgeMesh, stale = PEER_STALE_SEC },
         { name = "univ", tbl = univMesh, stale = PEER_STALE_SEC },
+        { name = "qft", tbl = qftMesh, stale = PEER_STALE_SEC },
     }
     local changed = false
     local onlinePeers, totalRecoveries = 0, 0
@@ -1632,8 +1648,8 @@ local function checkMeshWatchdog(upNow, dbUrl, writeLineFn)
         lastHealthInfluxAt = upNow
         local freeKB = math.floor((computer.freeMemory and computer.freeMemory() or 0) / 1024)
         local line = string.format(
-            "oc_health ae2_ok=1i,dtpf_ok=%di,stock_ok=%di,pump_ok=%di,gorge_ok=%di,univ_ok=%di,online_peers=%di,recoveries=%di,free_mem_kb=%di",
-            flags.dtpf or 0, flags.stock or 0, flags.pump or 0, flags.gorge or 0, flags.univ or 0,
+            "oc_health ae2_ok=1i,dtpf_ok=%di,stock_ok=%di,pump_ok=%di,gorge_ok=%di,univ_ok=%di,qft_ok=%di,online_peers=%di,recoveries=%di,free_mem_kb=%di",
+            flags.dtpf or 0, flags.stock or 0, flags.pump or 0, flags.gorge or 0, flags.univ or 0, flags.qft or 0,
             onlinePeers, totalRecoveries, freeKB
         )
         postInflux(dbUrl, line .. "\n")
@@ -1844,9 +1860,71 @@ local function handleMeshModemEvent(interface, writeLineFn, localAddr, sender, p
         postInflux(dbUrl, line .. "\n")
         return true
 
+    elseif msgType == "QFT_METRICS" and type(arg1) == "string" then
+        local okU, pkt = pcall(serialization.unserialize, arg1)
+        if not okU or type(pkt) ~= "table" then return true end
+        local wasFresh = isMeshFresh(qftMesh, PEER_STALE_SEC)
+        qftMesh.addr = sender
+        qftMesh.viaTunnel = isTunnel
+        qftMesh.lastSeen = now
+        qftMesh.status = pkt
+        sendMeshPacket(sender, isTunnel, "QFT_ACK", "ok")
+        if not wasFresh then
+            logMsg("MESH", "QFT Controller connected on OC Mesh.")
+            emitMeshHelloIfOnline(writeLineFn)
+        end
+
+        local units = type(pkt.units) == "table" and pkt.units or {}
+        local uOn, uAct, uRec, bNp, bFm = 0, 0, 0, 0, 0
+        for _, u in ipairs(units) do
+            if type(u) == "table" then
+                if u.online then uOn = uOn + 1 end
+                if u.active then uAct = uAct + 1 end
+                if u.reconfiguring then uRec = uRec + 1 end
+                if u.hasNeptunium then bNp = bNp + 1 end
+                if u.hasFermium then bFm = bFm + 1 end
+            end
+        end
+        local localCnt = type(pkt.localRules) == "table" and #pkt.localRules or 0
+        local mm = type(pkt.maintMode) == "table" and pkt.maintMode.mode or tostring(pkt.maintMode or "")
+        local line = string.format(
+            "qft_control armed=%di,units_online=%di,units_active=%di,reconfig_count=%di,boost_np=%di,boost_fm=%di,local_rules=%di,maint_mainnet=%di",
+            pkt.armed and 1 or 0, uOn, uAct, uRec, bNp, bFm, localCnt, (mm == "mainnet") and 1 or 0
+        )
+        postInflux(dbUrl, line .. "\n")
+        return true
+
     elseif msgType == "STOCK_CLAIMS" and type(arg1) == "string" then
         if dtpfMesh.addr and (sender ~= dtpfMesh.addr or isTunnel ~= dtpfMesh.viaTunnel) then
             sendMeshPacket(dtpfMesh.addr, dtpfMesh.viaTunnel, "STOCK_CLAIMS", arg1)
+        end
+        if qftMesh.addr and (sender ~= qftMesh.addr or isTunnel ~= qftMesh.viaTunnel) then
+            sendMeshPacket(qftMesh.addr, qftMesh.viaTunnel, "STOCK_CLAIMS", arg1)
+        end
+        return true
+
+    elseif msgType == "STOCK_PUSH_RULES" and type(arg1) == "string" then
+        for k, entry in pairs(pendingStockPush) do
+            if (now - (entry.at or 0)) > 60 then pendingStockPush[k] = nil end
+        end
+        pendingStockPush[arg1] = { addr = sender, viaTunnel = isTunnel, at = now }
+        if stockMesh.addr and (sender ~= stockMesh.addr or isTunnel ~= stockMesh.viaTunnel) then
+            sendMeshPacket(stockMesh.addr, stockMesh.viaTunnel, "STOCK_PUSH_RULES", arg1, arg2)
+        end
+        return true
+
+    elseif msgType == "STOCK_PUSH_ACK" and type(arg1) == "string" then
+        local dest = pendingStockPush[arg1]
+        pendingStockPush[arg1] = nil
+        if dest and dest.addr and (dest.addr ~= sender or dest.viaTunnel ~= isTunnel) then
+            sendMeshPacket(dest.addr, dest.viaTunnel, "STOCK_PUSH_ACK", arg1, arg2)
+        else
+            if qftMesh.addr and (sender ~= qftMesh.addr or isTunnel ~= qftMesh.viaTunnel) then
+                sendMeshPacket(qftMesh.addr, qftMesh.viaTunnel, "STOCK_PUSH_ACK", arg1, arg2)
+            end
+            if dtpfMesh.addr and (sender ~= dtpfMesh.addr or isTunnel ~= dtpfMesh.viaTunnel) then
+                sendMeshPacket(dtpfMesh.addr, dtpfMesh.viaTunnel, "STOCK_PUSH_ACK", arg1, arg2)
+            end
         end
         return true
 
@@ -1983,7 +2061,7 @@ local function callMeshRpc(interface, writeLineFn, peer, msgType, payloadTbl, re
                         emitMeshHelloIfOnline(writeLineFn)
                     end
                 end
-                if replyType == "DTPF_REPLY" or replyType == "STOCK_REPLY" then
+                if replyType == "DTPF_REPLY" or replyType == "STOCK_REPLY" or replyType == "QFT_REPLY" then
                     local idx = tonumber(a2) or 1
                     local total = tonumber(a3) or 1
                     if not slices[idx] then gotSlices = gotSlices + 1 end
@@ -2028,6 +2106,7 @@ local function handleBridgeCommand(sockWriteLine, interface, cmd)
             meshUniv = isMeshFresh(univMesh, PEER_STALE_SEC),
             meshGorge = isMeshFresh(gorgeMesh, PEER_STALE_SEC),
             meshStock = isMeshFresh(stockMesh, PEER_STALE_SEC),
+            meshQft = isMeshFresh(qftMesh, PEER_STALE_SEC),
             meshHealth = buildMeshHealth(uptimeNow()),
             storage = hubState.storage,
             tps = hubState.tps,
@@ -2052,6 +2131,7 @@ local function handleBridgeCommand(sockWriteLine, interface, cmd)
             meshUniv = isMeshFresh(univMesh, PEER_STALE_SEC),
             meshGorge = isMeshFresh(gorgeMesh, PEER_STALE_SEC),
             meshStock = isMeshFresh(stockMesh, PEER_STALE_SEC),
+            meshQft = isMeshFresh(qftMesh, PEER_STALE_SEC),
         })
     elseif op == "item_stocks" then
         if not interface then
@@ -2295,6 +2375,20 @@ local function handleBridgeCommand(sockWriteLine, interface, cmd)
             return reply(res)
         end
         return reply({ ok = false, error = "Empty DTPF mesh response" })
+    elseif op == "dtpf_push_inputs" then
+        local res = callMeshRpc(interface, sockWriteLine, dtpfMesh, "DTPF_CMD", {
+            id = cmdId,
+            op = "push_recipe_inputs",
+            familyId = cmd.familyId,
+            tag = cmd.tag,
+            rules = cmd.rules,
+            preferMainnet = cmd.preferMainnet,
+        }, "DTPF_REPLY", 8.0)
+        if type(res) == "table" then
+            res.meshRouted = true
+            return reply(res)
+        end
+        return reply({ ok = false, error = "Empty DTPF mesh response" })
     elseif op == "pump_state" then
         if pumpMesh.status and not cmd.force and (uptimeNow() - (pumpMesh.statusUptime or -1000)) < PUMP_STALE_SEC then
             return reply({
@@ -2406,9 +2500,64 @@ local function handleBridgeCommand(sockWriteLine, interface, cmd)
             return reply(res)
         end
         return reply({ ok = false, error = "Empty Stock Maintainer mesh response" })
+    elseif op == "stock_untag" then
+        local res = callMeshRpc(interface, sockWriteLine, stockMesh, "STOCK_CMD", {
+            id = cmdId,
+            op = "untag_rules",
+            tag = cmd.tag,
+            pauseOrphans = (cmd.pauseOrphans == true),
+            deleteOrphans = (cmd.deleteOrphans == true),
+        }, "STOCK_REPLY", 8.0)
+        if type(res) == "table" then
+            res.meshRouted = true
+            return reply(res)
+        end
+        return reply({ ok = false, error = "Empty Stock Maintainer mesh response" })
+    elseif op == "stock_push_rules" then
+        local res = callMeshRpc(interface, sockWriteLine, stockMesh, "STOCK_CMD", {
+            id = cmdId,
+            op = "upsert_tagged_rules",
+            payload = type(cmd.payload) == "table" and cmd.payload or cmd,
+        }, "STOCK_REPLY", 8.0)
+        if type(res) == "table" then
+            res.meshRouted = true
+            return reply(res)
+        end
+        return reply({ ok = false, error = "Empty Stock Maintainer mesh response" })
+    elseif op == "qft_state" or op == "qft_patch" or op == "qft_action" or op == "qft_push_inputs" or op == "qft_retire_inputs" or op == "qft_reboot" or op == "qft_update" then
+        if op == "qft_state" and not qftMesh.addr and not cmd.force then
+            return reply({ ok = false, error = "QFT peer offline on OC mesh" })
+        end
+        local qftOp = op
+        if op == "qft_reboot" or op == "qft_update" then
+            qftOp = "qft_action"
+        elseif op == "qft_push_inputs" then
+            qftOp = "push_recipe_inputs"
+        elseif op == "qft_retire_inputs" then
+            qftOp = "retire_recipe_inputs"
+        end
+        local qftAct = (op == "qft_reboot") and "reboot" or ((op == "qft_update") and "update_local" or cmd.action)
+        local res = callMeshRpc(interface, sockWriteLine, qftMesh, "QFT_CMD", {
+            id = cmdId,
+            op = qftOp,
+            patch = cmd.patch,
+            action = qftAct,
+            recipeId = cmd.recipeId,
+            rules = cmd.rules,
+            tag = cmd.tag,
+            remove = cmd.remove,
+            pauseOrphans = cmd.pauseOrphans,
+            deleteOrphans = cmd.deleteOrphans,
+            url = cmd.url,
+        }, "QFT_REPLY", 8.0)
+        if type(res) == "table" then
+            res.meshRouted = true
+            return reply(res)
+        end
+        return reply({ ok = false, error = "Empty QFT Controller mesh response" })
     elseif op == "mesh_recover" then
         local targetRole = tostring(cmd.role or "all"):lower()
-        local peerMap = { dtpf = dtpfMesh, stock = stockMesh, pump = pumpMesh, gorge = gorgeMesh, univ = univMesh }
+        local peerMap = { dtpf = dtpfMesh, stock = stockMesh, pump = pumpMesh, gorge = gorgeMesh, univ = univMesh, qft = qftMesh }
         local woken = {}
         local now = uptimeNow()
         for rName, pTbl in pairs(peerMap) do
@@ -2676,7 +2825,7 @@ local function main()
             end,
             onMeshRecover = function(targetRole)
                 local role = tostring(targetRole or "all"):lower()
-                local peerMap = { dtpf = dtpfMesh, stock = stockMesh, pump = pumpMesh, gorge = gorgeMesh, univ = univMesh }
+                local peerMap = { dtpf = dtpfMesh, stock = stockMesh, pump = pumpMesh, gorge = gorgeMesh, univ = univMesh, qft = qftMesh }
                 local now = uptimeNow()
                 local woken = {}
                 for rName, pTbl in pairs(peerMap) do
@@ -2807,6 +2956,24 @@ local function main()
                         return (action == "reboot") and "Stock: reboot triggered." or ("Stock: " .. tostring(action) .. " OK.")
                     end
                     return "Stock: " .. tostring(type(res) == "table" and res.error or "No response")
+                elseif peerKey == "qft" then
+                    local qftCmd
+                    if action == "pause" then
+                        qftCmd = { op = "qft_action", action = "pause" }
+                    elseif action == "resume" then
+                        qftCmd = { op = "qft_action", action = "arm" }
+                    elseif action == "poll" then
+                        qftCmd = { op = "qft_action", action = "poll_now" }
+                    else
+                        qftCmd = { op = "qft_action", action = tostring(action) }
+                    end
+                    local res = callMeshRpc(interface, writeBridgeLine, qftMesh, "QFT_CMD", qftCmd, "QFT_REPLY", 3.5)
+                    if type(res) == "table" and res.ok then
+                        if type(res.units) == "table" then qftMesh.status = res end
+                        logMsg("MESH", "QFT action '" .. tostring(action) .. "' OK.")
+                        return (action == "reboot") and "QFT: reboot triggered." or ("QFT: " .. tostring(action) .. " OK.")
+                    end
+                    return "QFT: " .. tostring(type(res) == "table" and res.error or "No response")
                 end
                 return "Unknown peer."
             end,

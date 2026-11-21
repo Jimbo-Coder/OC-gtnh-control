@@ -2556,6 +2556,18 @@ function Hardware.handleMeshMessage(webBridge, localAddr, sender, port, msgType,
             return true
         end
         return false
+    elseif msgType == "STOCK_PUSH_ACK" then
+        local rawStr = (type(payload) == "string" and #payload > 0) and payload or reqId
+        local okU, ack = pcall(serialization.unserialize, tostring(rawStr or ""))
+        local up = (computer and computer.uptime and computer.uptime()) or (_G.computer and _G.computer.uptime and _G.computer.uptime()) or 0
+        if webBridge and webBridge.state then
+            webBridge.state._lastStockPushAck = {
+                reqId = tostring(reqId or ""),
+                ack = (okU and type(ack) == "table") and ack or { ok = false, raw = tostring(rawStr or "") },
+                at = up,
+            }
+        end
+        return true
     elseif msgType == "DTPF_ACK" then
         Hardware._mainnetMeshAddr = sender
         Hardware._mainnetMeshViaTunnel = (port == 0)
@@ -2631,6 +2643,26 @@ function Hardware.handleMeshMessage(webBridge, localAddr, sender, port, msgType,
         return true
     end
     return false
+end
+
+function Hardware.pushRulesToStock(cfg, state, payloadTbl, compLib)
+    if cfg and cfg.extLinkMode == "off" then
+        return { ok = false, error = "Ext Link OFF" }
+    end
+    local cl = compLib or component
+    local modem, _, tunnel = getMeshTransports(cl)
+    if not modem and not tunnel then
+        return { ok = false, error = "No OC Modem or Tunnel" }
+    end
+    local reqId = nextReqId()
+    local peer = state and state.stockPeer
+    local viaTunnel = (peer and peer.viaTunnel == true)
+        or (Hardware._mainnetMeshViaTunnel == true)
+        or (not modem and tunnel ~= nil)
+    local targetAddr = Hardware._mainnetMeshAddr or (peer and peer.addr) or nil
+    local raw = serialization.serialize(payloadTbl or {})
+    sendMeshPacket(cl, targetAddr, viaTunnel, "STOCK_PUSH_RULES", reqId, raw)
+    return { ok = true, reqId = reqId }
 end
 
 return Hardware
