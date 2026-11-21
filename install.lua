@@ -2,7 +2,7 @@
 -- One-line install:
 --   wget -f https://raw.githubusercontent.com/Jimbo-Coder/OC-gtnh-control/main/install.lua /tmp/install.lua && /tmp/install.lua
 -- Direct module install:
---   /tmp/install.lua <dtpf|universal|brain|pump|gorge|stock|qft> [--yes] [--no-autostart]  (`ae2` is an alias for `brain`)
+--   /tmp/install.lua <dtpf|universal|brain|pump|gorge|stock|qft|bhc|nano> [--yes] [--no-autostart]  (`ae2` -> `brain`, `nanoforge` -> `nano`)
 -- Update all modules installed on this computer:
 --   /tmp/install.lua --update
 
@@ -24,6 +24,8 @@ local MODULES = {
     { key = "gorge",     subdir = "gtnh-gorge-control",     desc = "Forge of the Gods & Multi-Exoticizer Control (Self-Healing + GUI)",   detect = "/home/gorge/main.lua" },
     { key = "stock",     subdir = "gtnh-stock-control",     desc = "Mainnet AE2 Stock Maintainer (O(1) Items+Fluids + 160x50 GUI)",       detect = "/home/stock/main.lua" },
     { key = "qft",       subdir = "gtnh-qft-control",       desc = "Quantum Force Transformer Fleet & Input Maintainer (160x50 GUI)",     detect = "/home/qft/main.lua" },
+    { key = "bhc",       subdir = "gtnh-bhc-control",       desc = "Black Hole Compressor Control (Stability/SpaceTime + 160x50 GUI)",     detect = "/home/bhc/main.lua" },
+    { key = "nano",      aliases = { "nanoforge" }, subdir = "gtnh-nanoforge-control", desc = "Tier 4 Nano Forge Controller (Magmatter/Purity + 160x50 GUI)", detect = "/home/nanoforge/main.lua" },
 }
 
 local BY_KEY = {}

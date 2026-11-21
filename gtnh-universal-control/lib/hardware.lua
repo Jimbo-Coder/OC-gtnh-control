@@ -970,9 +970,11 @@ local function getMeshTransports(compLib, cfg)
     if cfg ~= nil then
         Hardware._autoWakeEnabled = (cfg.autoWake ~= false)
     end
+    local wakeArg = Hardware.WAKE_MSG
+    if Hardware._autoWakeEnabled == false then wakeArg = false end
     local modem, tunnel, _, tAddr = Common.getMeshTransports(compLib, {
         port = Hardware.MESH_PORT,
-        wakeMsg = (Hardware._autoWakeEnabled == false) and false or Hardware.WAKE_MSG,
+        wakeMsg = wakeArg,
         strength = 400,
     })
     return modem, tunnel, tAddr

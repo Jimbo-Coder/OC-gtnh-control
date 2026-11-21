@@ -265,6 +265,8 @@ local univMesh = { addr = nil, viaTunnel = false, lastSeen = -1000, status = nil
 local gorgeMesh = { addr = nil, viaTunnel = false, lastSeen = -1000, status = nil, wasOnline = false, recoveryAttempts = 0, lastRecoveryAt = -1000 }
 local stockMesh = { addr = nil, viaTunnel = false, lastSeen = -1000, status = nil, wasOnline = false, recoveryAttempts = 0, lastRecoveryAt = -1000 }
 local qftMesh = { addr = nil, viaTunnel = false, lastSeen = -1000, status = nil, wasOnline = false, recoveryAttempts = 0, lastRecoveryAt = -1000 }
+local bhcMesh = { addr = nil, viaTunnel = false, lastSeen = -1000, status = nil, wasOnline = false, recoveryAttempts = 0, lastRecoveryAt = -1000 }
+local nanoMesh = { addr = nil, viaTunnel = false, lastSeen = -1000, status = nil, wasOnline = false, recoveryAttempts = 0, lastRecoveryAt = -1000 }
 local pendingMaintJobs = {}
 local pendingStockPush = {}
 local meshReqSeq = 0
@@ -290,7 +292,7 @@ local hubState = {
     lsc = { online = false, pct = 0, net5s = 0, in5s = 0, out5s = 0, wirelessStr = "0", wirelessOn = true },
     tps = { online = false, mspt = 0, tps = 20, chunks = 0, dims = 0 },
     cpus = { list = {}, total = 0, busyCount = 0 },
-    peers = { dtpf = dtpfMesh, pump = pumpMesh, univ = univMesh, gorge = gorgeMesh, stock = stockMesh, qft = qftMesh },
+    peers = { dtpf = dtpfMesh, pump = pumpMesh, univ = univMesh, gorge = gorgeMesh, stock = stockMesh, qft = qftMesh, bhc = bhcMesh, nano = nanoMesh },
     logs = {},
 }
 
@@ -1703,6 +1705,12 @@ local function formatPeerBrief(name, tbl)
     elseif name == "univ" then
         return string.format("%s · %dp · %dq", st.armed and "ARM" or "OFF",
             tonumber(st.activePools) or 0, tonumber(st.queuedSlices) or 0)
+    elseif name == "bhc" then
+        return string.format("%s · %s · %.0f%% · %dp", st.armed and "ARM" or "OFF",
+            tostring(st.phase or "CLOSED"), tonumber(st.stability) or 100, tonumber(st.parallels) or 0)
+    elseif name == "nano" then
+        local ph = (st.phase == "RUNNING") and string.format("RUN %dx", tonumber(st.parallels) or 1) or tostring(st.phase or "IDLE")
+        return string.format("%s · T%d · %s", st.armed and "ARM" or "OFF", tonumber(st.forgeTier) or 4, ph)
     end
     return "Online"
 end
@@ -1716,6 +1724,8 @@ local function buildMeshHealth(now)
         gorge = { tbl = gorgeMesh, stale = PEER_STALE_SEC },
         univ = { tbl = univMesh, stale = PEER_STALE_SEC },
         qft = { tbl = qftMesh, stale = PEER_STALE_SEC },
+        bhc = { tbl = bhcMesh, stale = PEER_STALE_SEC },
+        nano = { tbl = nanoMesh, stale = PEER_STALE_SEC },
     }
     local out = {}
     for k, sp in pairs(specs) do
@@ -1744,6 +1754,8 @@ local function emitMeshHelloIfOnline(writeLineFn)
             meshGorge = isMeshFresh(gorgeMesh, PEER_STALE_SEC),
             meshStock = isMeshFresh(stockMesh, PEER_STALE_SEC),
             meshQft = isMeshFresh(qftMesh, PEER_STALE_SEC),
+            meshBhc = isMeshFresh(bhcMesh, PEER_STALE_SEC),
+            meshNano = isMeshFresh(nanoMesh, PEER_STALE_SEC),
             ae2AutoWake = (config.enableAutoWake ~= false),
             meshHealth = buildMeshHealth(now),
         }))
@@ -1759,6 +1771,8 @@ local function checkMeshWatchdog(upNow, dbUrl, writeLineFn)
         { name = "gorge", tbl = gorgeMesh, stale = PEER_STALE_SEC },
         { name = "univ", tbl = univMesh, stale = PEER_STALE_SEC },
         { name = "qft", tbl = qftMesh, stale = PEER_STALE_SEC },
+        { name = "bhc", tbl = bhcMesh, stale = PEER_STALE_SEC },
+        { name = "nano", tbl = nanoMesh, stale = PEER_STALE_SEC },
     }
     local changed = false
     local onlinePeers, totalRecoveries = 0, 0
@@ -1800,9 +1814,9 @@ local function checkMeshWatchdog(upNow, dbUrl, writeLineFn)
         lastHealthInfluxAt = upNow
         local freeKB = math.floor((computer.freeMemory and computer.freeMemory() or 0) / 1024)
         local line = string.format(
-            "oc_health ae2_ok=1i,dtpf_ok=%di,stock_ok=%di,pump_ok=%di,gorge_ok=%di,univ_ok=%di,qft_ok=%di,online_peers=%di,recoveries=%di,free_mem_kb=%di",
+            "oc_health ae2_ok=1i,dtpf_ok=%di,stock_ok=%di,pump_ok=%di,gorge_ok=%di,univ_ok=%di,qft_ok=%di,bhc_ok=%di,nano_ok=%di,online_peers=%di,recoveries=%di,free_mem_kb=%di",
             flags.dtpf or 0, flags.stock or 0, flags.pump or 0, flags.gorge or 0, flags.univ or 0, flags.qft or 0,
-            onlinePeers, totalRecoveries, freeKB
+            flags.bhc or 0, flags.nano or 0, onlinePeers, totalRecoveries, freeKB
         )
         postInflux(dbUrl, line .. "\n")
     end
@@ -2188,6 +2202,53 @@ local function handleMeshModemEvent(interface, writeLineFn, localAddr, sender, p
         postInflux(dbUrl, line .. "\n")
         return true
 
+    elseif msgType == "BHC_METRICS" and type(arg1) == "string" then
+        local okU, pkt = pcall(serialization.unserialize, arg1)
+        if not okU or type(pkt) ~= "table" then return true end
+        local wasFresh = isMeshFresh(bhcMesh, PEER_STALE_SEC)
+        bhcMesh.addr = sender
+        bhcMesh.viaTunnel = isTunnel
+        bhcMesh.lastSeen = now
+        bhcMesh.status = pkt
+        syncPeerAutoWake("bhc", pkt, writeLineFn)
+        sendMeshPacket(sender, isTunnel, "BHC_ACK", "ok")
+        if not wasFresh then
+            logMsg("MESH", "Black Hole Compressor connected on OC Mesh.")
+            emitMeshHelloIfOnline(writeLineFn)
+        end
+        local line = string.format(
+            "bhc_control armed=%di,stability=%.1f,held_sec=%di,cost_mod=%di,halting=%di,saving=%di,parallels=%di,cycles=%di",
+            pkt.armed and 1 or 0, tonumber(pkt.stability) or 100, math.floor(tonumber(pkt.heldSec) or 0),
+            math.floor(tonumber(pkt.costMod) or 0), pkt.stHalting and 1 or 0, pkt.savingRecipe and 1 or 0,
+            math.floor(tonumber(pkt.parallels) or 0), math.floor(tonumber(pkt.cyclesCompleted) or 0)
+        )
+        postInflux(dbUrl, line .. "\n")
+        return true
+
+    elseif msgType == "NANO_METRICS" and type(arg1) == "string" then
+        local okU, pkt = pcall(serialization.unserialize, arg1)
+        if not okU or type(pkt) ~= "table" then return true end
+        local wasFresh = isMeshFresh(nanoMesh, PEER_STALE_SEC)
+        nanoMesh.addr = sender
+        nanoMesh.viaTunnel = isTunnel
+        nanoMesh.lastSeen = now
+        nanoMesh.status = pkt
+        syncPeerAutoWake("nano", pkt, writeLineFn)
+        sendMeshPacket(sender, isTunnel, "NANO_ACK", "ok")
+        if not wasFresh then
+            logMsg("MESH", "Tier 4 Nano Forge connected on OC Mesh.")
+            emitMeshHelloIfOnline(writeLineFn)
+        end
+        local line = string.format(
+            "nanoforge_control armed=%di,forge_tier=%di,parallels=%di,magmatter_l=%di,mag_avail_l=%di,completed=%di,bus_clean=%di",
+            pkt.armed and 1 or 0, math.floor(tonumber(pkt.forgeTier) or 4),
+            math.floor(tonumber(pkt.parallels) or 0), math.floor(tonumber(pkt.magmatterL) or 0),
+            math.floor(tonumber(pkt.magAvailableL) or 0), math.floor(tonumber(pkt.completedBatches) or 0),
+            (pkt.busClean ~= false) and 1 or 0
+        )
+        postInflux(dbUrl, line .. "\n")
+        return true
+
     elseif msgType == "STOCK_CLAIMS" and type(arg1) == "string" then
         if dtpfMesh.addr and (sender ~= dtpfMesh.addr or isTunnel ~= dtpfMesh.viaTunnel) then
             sendMeshPacket(dtpfMesh.addr, dtpfMesh.viaTunnel, "STOCK_CLAIMS", arg1)
@@ -2218,6 +2279,9 @@ local function handleMeshModemEvent(interface, writeLineFn, localAddr, sender, p
             end
             if dtpfMesh.addr and (sender ~= dtpfMesh.addr or isTunnel ~= dtpfMesh.viaTunnel) then
                 sendMeshPacket(dtpfMesh.addr, dtpfMesh.viaTunnel, "STOCK_PUSH_ACK", arg1, arg2)
+            end
+            if nanoMesh.addr and (sender ~= nanoMesh.addr or isTunnel ~= nanoMesh.viaTunnel) then
+                sendMeshPacket(nanoMesh.addr, nanoMesh.viaTunnel, "STOCK_PUSH_ACK", arg1, arg2)
             end
         end
         return true
@@ -2355,7 +2419,8 @@ local function callMeshRpc(interface, writeLineFn, peer, msgType, payloadTbl, re
                         emitMeshHelloIfOnline(writeLineFn)
                     end
                 end
-                if replyType == "DTPF_REPLY" or replyType == "STOCK_REPLY" or replyType == "QFT_REPLY" then
+                if replyType == "DTPF_REPLY" or replyType == "STOCK_REPLY" or replyType == "QFT_REPLY"
+                    or replyType == "BHC_REPLY" or replyType == "NANO_REPLY" then
                     local idx = tonumber(a2) or 1
                     local total = tonumber(a3) or 1
                     if not slices[idx] then gotSlices = gotSlices + 1 end
@@ -2398,6 +2463,8 @@ local function setNodeAutoWake(role, enabled, interface, writeLineFn)
         qft   = { p = qftMesh,   mt = "QFT_CMD",   rt = "QFT_REPLY",   pl = { op = "qft_action", action = "set_auto_wake", enabled = en } },
         univ  = { p = univMesh,  mt = "UNIV_CMD",  rt = "UNIV_REPLY",  pl = { action = "set_auto_wake", enabled = en } },
         pump  = { p = pumpMesh,  mt = "PUMP_CMD",  rt = "PUMP_REPLY",  pl = { op = "set_auto_wake", enabled = en } },
+        bhc   = { p = bhcMesh,   mt = "BHC_CMD",   rt = "BHC_REPLY",   pl = { op = "bhc_action", action = "set_auto_wake", enabled = en } },
+        nano  = { p = nanoMesh,  mt = "NANO_CMD",  rt = "NANO_REPLY",  pl = { op = "nano_action", action = "set_auto_wake", enabled = en } },
     }
     local sp = peerSpecs[role]
     if not sp then
@@ -2442,6 +2509,8 @@ local function handleBridgeCommand(sockWriteLine, interface, cmd)
             meshGorge = isMeshFresh(gorgeMesh, PEER_STALE_SEC),
             meshStock = isMeshFresh(stockMesh, PEER_STALE_SEC),
             meshQft = isMeshFresh(qftMesh, PEER_STALE_SEC),
+            meshBhc = isMeshFresh(bhcMesh, PEER_STALE_SEC),
+            meshNano = isMeshFresh(nanoMesh, PEER_STALE_SEC),
             meshHealth = buildMeshHealth(uptimeNow()),
             storage = hubState.storage,
             tps = hubState.tps,
@@ -2467,6 +2536,8 @@ local function handleBridgeCommand(sockWriteLine, interface, cmd)
             meshGorge = isMeshFresh(gorgeMesh, PEER_STALE_SEC),
             meshStock = isMeshFresh(stockMesh, PEER_STALE_SEC),
             meshQft = isMeshFresh(qftMesh, PEER_STALE_SEC),
+            meshBhc = isMeshFresh(bhcMesh, PEER_STALE_SEC),
+            meshNano = isMeshFresh(nanoMesh, PEER_STALE_SEC),
         })
     elseif op == "item_stocks" then
         if not interface then
@@ -2890,11 +2961,44 @@ local function handleBridgeCommand(sockWriteLine, interface, cmd)
             return reply(res)
         end
         return reply({ ok = false, error = "Empty QFT Controller mesh response" })
+    elseif op == "bhc_state" or op == "bhc_patch" or op == "bhc_action" or op == "bhc_reboot" or op == "bhc_update" then
+        if op == "bhc_state" and not bhcMesh.addr and not cmd.force then
+            return reply({ ok = false, error = "BHC peer offline on OC mesh" })
+        end
+        local bhcOp = (op == "bhc_reboot" or op == "bhc_update") and "bhc_action" or op
+        local bhcAct = (op == "bhc_reboot") and "reboot" or ((op == "bhc_update") and "update_local" or cmd.action)
+        local res = callMeshRpc(interface, sockWriteLine, bhcMesh, "BHC_CMD", {
+            id = cmdId, op = bhcOp, patch = cmd.patch, action = bhcAct,
+            preset = cmd.preset, stability = cmd.stability, url = cmd.url,
+        }, "BHC_REPLY", 8.0)
+        if type(res) == "table" then
+            res.meshRouted = true
+            return reply(res)
+        end
+        return reply({ ok = false, error = "Empty BHC Controller mesh response" })
+    elseif op == "nano_state" or op == "nano_patch" or op == "nano_action" or op == "nano_craft_batch" or op == "nano_push_inputs" or op == "nano_reboot" or op == "nano_update" then
+        if op == "nano_state" and not nanoMesh.addr and not cmd.force then
+            return reply({ ok = false, error = "Nano Forge peer offline on OC mesh" })
+        end
+        local nanoOp = op
+        if op == "nano_reboot" or op == "nano_update" then nanoOp = "nano_action"
+        elseif op == "nano_craft_batch" then nanoOp = "craft_batch"
+        elseif op == "nano_push_inputs" then nanoOp = "push_inputs" end
+        local nanoAct = (op == "nano_reboot") and "reboot" or ((op == "nano_update") and "update_local" or cmd.action)
+        local res = callMeshRpc(interface, sockWriteLine, nanoMesh, "NANO_CMD", {
+            id = cmdId, op = nanoOp, patch = cmd.patch, action = nanoAct,
+            recipeId = cmd.recipeId, parallels = cmd.parallels, mult = cmd.mult, url = cmd.url,
+        }, "NANO_REPLY", 8.0)
+        if type(res) == "table" then
+            res.meshRouted = true
+            return reply(res)
+        end
+        return reply({ ok = false, error = "Empty Nano Forge Controller mesh response" })
     elseif op == "set_auto_wake" then
         return reply(setNodeAutoWake(cmd.role, cmd.enabled, interface, sockWriteLine))
     elseif op == "mesh_recover" then
         local targetRole = tostring(cmd.role or "all"):lower()
-        local peerMap = { dtpf = dtpfMesh, stock = stockMesh, pump = pumpMesh, gorge = gorgeMesh, univ = univMesh, qft = qftMesh }
+        local peerMap = { dtpf = dtpfMesh, stock = stockMesh, pump = pumpMesh, gorge = gorgeMesh, univ = univMesh, qft = qftMesh, bhc = bhcMesh, nano = nanoMesh }
         local woken = {}
         local now = uptimeNow()
         for rName, pTbl in pairs(peerMap) do
@@ -3086,6 +3190,9 @@ local function main()
                     meshUniv = isMeshFresh(univMesh, PEER_STALE_SEC),
                     meshGorge = isMeshFresh(gorgeMesh, PEER_STALE_SEC),
                     meshStock = isMeshFresh(stockMesh, PEER_STALE_SEC),
+                    meshQft = isMeshFresh(qftMesh, PEER_STALE_SEC),
+                    meshBhc = isMeshFresh(bhcMesh, PEER_STALE_SEC),
+                    meshNano = isMeshFresh(nanoMesh, PEER_STALE_SEC),
                     ae2AutoWake = (config.enableAutoWake ~= false),
                     meshHealth = buildMeshHealth(now),
                     storage = hubState.storage,
@@ -3171,7 +3278,7 @@ local function main()
             end,
             onMeshRecover = function(targetRole)
                 local role = tostring(targetRole or "all"):lower()
-                local peerMap = { dtpf = dtpfMesh, stock = stockMesh, pump = pumpMesh, gorge = gorgeMesh, univ = univMesh, qft = qftMesh }
+                local peerMap = { dtpf = dtpfMesh, stock = stockMesh, pump = pumpMesh, gorge = gorgeMesh, univ = univMesh, qft = qftMesh, bhc = bhcMesh, nano = nanoMesh }
                 local now = uptimeNow()
                 local woken = {}
                 for rName, pTbl in pairs(peerMap) do
@@ -3361,6 +3468,38 @@ local function main()
                         else return "QFT: " .. tostring(action) .. " OK." end
                     end
                     return "QFT: " .. tostring(type(res) == "table" and res.error or "No response")
+                elseif peerKey == "bhc" then
+                    local bhcCmd
+                    if action == "pause" then bhcCmd = { op = "bhc_action", action = "pause" }
+                    elseif action == "resume" or action == "arm" then bhcCmd = { op = "bhc_action", action = "arm" }
+                    elseif action == "poll" then bhcCmd = { op = "bhc_action", action = "poll_now" }
+                    elseif action == "update_local" then bhcCmd = { op = "bhc_action", action = "update_local", url = updUrl }
+                    else bhcCmd = { op = "bhc_action", action = tostring(action), preset = extra.preset } end
+                    local res = callMeshRpc(interface, writeBridgeLine, bhcMesh, "BHC_CMD", bhcCmd, "BHC_REPLY", 3.0)
+                    if type(res) == "table" and res.ok then
+                        bhcMesh.status = res
+                        logMsg("MESH", "BHC action '" .. tostring(action) .. "' OK.")
+                        if action == "reboot" then return "BHC: reboot triggered."
+                        elseif action == "update_local" then return "BHC: OTA update triggered."
+                        else return "BHC: " .. tostring(action) .. " OK." end
+                    end
+                    return "BHC: " .. tostring(type(res) == "table" and res.error or "No response")
+                elseif peerKey == "nano" then
+                    local nanoCmd
+                    if action == "pause" then nanoCmd = { op = "nano_action", action = "pause" }
+                    elseif action == "resume" or action == "arm" then nanoCmd = { op = "nano_action", action = "arm" }
+                    elseif action == "poll" then nanoCmd = { op = "nano_action", action = "poll_now" }
+                    elseif action == "update_local" then nanoCmd = { op = "nano_action", action = "update_local", url = updUrl }
+                    else nanoCmd = { op = "nano_action", action = tostring(action) } end
+                    local res = callMeshRpc(interface, writeBridgeLine, nanoMesh, "NANO_CMD", nanoCmd, "NANO_REPLY", 3.0)
+                    if type(res) == "table" and res.ok then
+                        nanoMesh.status = res
+                        logMsg("MESH", "Nano Forge action '" .. tostring(action) .. "' OK.")
+                        if action == "reboot" then return "Nano Forge: reboot triggered."
+                        elseif action == "update_local" then return "Nano Forge: OTA update triggered."
+                        else return "Nano Forge: " .. tostring(action) .. " OK." end
+                    end
+                    return "Nano Forge: " .. tostring(type(res) == "table" and res.error or "No response")
                 end
                 return "Unknown peer."
             end,
@@ -3381,6 +3520,8 @@ local function main()
                     { k = "univ", p = univMesh, mt = "UNIV_CMD", rt = "UNIV_REPLY", pl = { action = "update_local", url = updUrl }, to = 2.5 },
                     { k = "qft", p = qftMesh, mt = "QFT_CMD", rt = "QFT_REPLY", pl = { op = "qft_action", action = "update_local", url = updUrl }, to = 3.0 },
                     { k = "pump", p = pumpMesh, mt = "PUMP_CMD", rt = "PUMP_REPLY", pl = { op = "update_local", url = updUrl }, to = 2.5 },
+                    { k = "bhc", p = bhcMesh, mt = "BHC_CMD", rt = "BHC_REPLY", pl = { op = "bhc_action", action = "update_local", url = updUrl }, to = 3.0 },
+                    { k = "nano", p = nanoMesh, mt = "NANO_CMD", rt = "NANO_REPLY", pl = { op = "nano_action", action = "update_local", url = updUrl }, to = 3.0 },
                 }
                 local okCnt, tryCnt = 0, 0
                 for _, sp in ipairs(specs) do
@@ -3577,7 +3718,8 @@ local function main()
             if config.enableMesh ~= false and (upNow - lastMeshBeaconUptime) >= 20
                 and (not isMeshFresh(dtpfMesh, PEER_STALE_SEC) or not isMeshFresh(pumpMesh, PUMP_STALE_SEC)
                      or not isMeshFresh(univMesh, PEER_STALE_SEC) or not isMeshFresh(gorgeMesh, PEER_STALE_SEC)
-                     or not isMeshFresh(stockMesh, PEER_STALE_SEC)) then
+                     or not isMeshFresh(stockMesh, PEER_STALE_SEC) or not isMeshFresh(qftMesh, PEER_STALE_SEC)
+                     or not isMeshFresh(bhcMesh, PEER_STALE_SEC) or not isMeshFresh(nanoMesh, PEER_STALE_SEC)) then
                 lastMeshBeaconUptime = upNow
                 local m, t = getMeshTransports()
                 if m or t then

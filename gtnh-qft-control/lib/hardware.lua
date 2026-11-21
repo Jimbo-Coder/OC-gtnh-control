@@ -712,9 +712,11 @@ local function getMeshTransports(compLib, state, cfg)
         Hardware._autoWakeEnabled = aw
         if state then state._autoWakeEnabled = aw end
     end
+    local wakeArg = Hardware.WAKE_MSG
+    if aw == false then wakeArg = false end
     local modem, tunnel, _, tAddr = Common.getMeshTransports(cl, {
         port = Hardware.MESH_PORT,
-        wakeMsg = (aw == false) and false or Hardware.WAKE_MSG,
+        wakeMsg = wakeArg,
         strength = 400,
         proxyFn = function(c, addr)
             return getProxy(c, state, addr)

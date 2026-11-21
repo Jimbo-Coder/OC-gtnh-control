@@ -778,9 +778,11 @@ local function getMeshTransports(compLib, state, cfg, forceRefresh)
     if (not forceRefresh) and state and (state._meshModem ~= nil or state._meshTunnel ~= nil) then
         return state._meshModem or nil, state._meshTunnel or nil, state._meshTunnelAddr
     end
+    local wakeArg = Hardware.WAKE_MSG
+    if aw == false then wakeArg = false end
     local modem, tunnel, _, tAddr = Common.getMeshTransports(cl, {
         port = Hardware.MESH_PORT,
-        wakeMsg = (aw == false) and false or Hardware.WAKE_MSG,
+        wakeMsg = wakeArg,
         strength = 400,
     })
     if state then

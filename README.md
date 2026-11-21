@@ -17,6 +17,8 @@ Each subfolder is **100% self-contained** (no hidden cross-folder runtime depend
 | **Gorge Control** | [`gtnh-gorge-control/`](gtnh-gorge-control/) | Unified Forge of the Gods controller + multi-Exoticizer Rack (`Magmatter` + `QGP`) | Production |
 | **Stock Maintainer** | [`gtnh-stock-control/`](gtnh-stock-control/) | Standalone Mainnet AE2 O(1) Level Maintainer (items & fluids, drop-in Transposer, DTPF overlap warnings) | Production |
 | **QFT Control** | [`gtnh-qft-control/`](gtnh-qft-control/) | Quantum Force Transformer Fleet Controller (focus/plasma safety, recipe input push) | Production |
+| **BHC Control** | [`gtnh-bhc-control/`](gtnh-bhc-control/) | Pseudostable Black Hole Compressor Controller (Utility pulse sync, SpaceTime doubling, Save Recipe Mode) | Production |
+| **Nano Forge Control** | [`gtnh-nanoforge-control/`](gtnh-nanoforge-control/) | Tier 4 Nano Forge Controller (Single-hatch Magmatter metering, foreign-nanite sweep, 12-nanite stocking) | Production |
 
 ---
 
@@ -29,7 +31,7 @@ wget -f https://raw.githubusercontent.com/Jimbo-Coder/OC-gtnh-control/main/insta
 
 Direct install or list:
 ```sh
-/tmp/install.lua universal      # or: dtpf, ae2, pump, gorge, stock, qft
+/tmp/install.lua universal      # or: dtpf, ae2, pump, gorge, stock, qft, bhc, nano
 /tmp/install.lua --list
 ```
 

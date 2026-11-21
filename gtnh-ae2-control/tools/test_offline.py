@@ -484,6 +484,8 @@ local bridgeIn = {
     '{"id":17,"op":"dtpf_update","url":"http://127.0.0.1:8765/oc-raw"}\n',
     '{"id":18,"op":"stock_update","url":"http://127.0.0.1:8765/oc-raw"}\n',
     '{"id":19,"op":"qft_update","url":"http://127.0.0.1:8765/oc-raw"}\n',
+    '{"id":20,"op":"bhc_update","url":"http://127.0.0.1:8765/oc-raw"}\n',
+    '{"id":21,"op":"nano_update","url":"http://127.0.0.1:8765/oc-raw"}\n',
 }
 local openCalls, strCalls, sendCalls = 0, 0, 0
 local o1ItemCalls, o1FluidCalls, legacyItemsCalls, legacyFluidsCalls = 0, 0, 0, 0
@@ -533,6 +535,16 @@ local function enqueueReply(addr, port, msgType, p1)
         local mid = math.floor(#full / 2)
         meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", addr or "qft-addr", port, 0, "QFT_REPLY", p1, 1, 2, full:sub(1, mid) }
         meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", addr or "qft-addr", port, 0, "QFT_REPLY", p1, 2, 2, full:sub(mid + 1) }
+    elseif msgType == "BHC_CMD" then
+        local full = serialization.serialize({ ok = true, armed = true })
+        local mid = math.floor(#full / 2)
+        meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", addr or "bhc-addr", port, 0, "BHC_REPLY", p1, 1, 2, full:sub(1, mid) }
+        meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", addr or "bhc-addr", port, 0, "BHC_REPLY", p1, 2, 2, full:sub(mid + 1) }
+    elseif msgType == "NANO_CMD" then
+        local full = serialization.serialize({ ok = true, armed = true })
+        local mid = math.floor(#full / 2)
+        meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", addr or "nano-addr", port, 0, "NANO_REPLY", p1, 1, 2, full:sub(1, mid) }
+        meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", addr or "nano-addr", port, 0, "NANO_REPLY", p1, 2, 2, full:sub(mid + 1) }
     end
 end
 
@@ -659,6 +671,16 @@ meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", "qft-addr", 42
     armed = true, maintMode = { mode = "mainnet", label = "MAINNET STOCK" }, localRules = {},
     units = { { label = "QFT-1", online = true, active = true, reconfiguring = false, hasNeptunium = true, hasFermium = false, tier = 1, focusCircuit = 1 } },
 }) }
+meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", "bhc-addr", 4205, 0, "BHC_METRICS", serialization.serialize({
+    armed = true, autoWake = true, phase = "HOLDING", seedMode = "pseudostable", preset = "balanced",
+    saveRecipeMode = true, savingRecipe = false, stability = 15, heldSec = 30, costMod = 2, stHalting = true,
+    parallels = 256, cyclesCompleted = 4, spacetimeStockL = 50000, collapsers = 12, seeds = 8,
+}) }
+meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", "nano-addr", 4205, 0, "NANO_METRICS", serialization.serialize({
+    armed = true, autoWake = true, forgeTier = 4, mode = "both", phase = "RUNNING",
+    activeLabel = "Eternity Nanites", parallels = 2, magmatterL = 288, perfectOC = true, busClean = true,
+    magAvailableL = 12000, completedBatches = 3,
+}) }
 meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", "stock-addr", 4205, 0, "STOCK_CLAIMS", "claims-from-stock" }
 meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", "dtpf-addr", 4205, 0, "DTPF_CLAIMS", "claims-from-dtpf" }
 meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", "stock-addr", 4205, 0, "DTPF_HANDOFF", "dh-1", "handoff-payload" }
@@ -709,7 +731,7 @@ assertEq(legacyItemsCalls, 0, "inspectMainnetForMaint must NOT scan getItemsInNe
 assertEq(legacyFluidsCalls, 0, "inspectMainnetForMaint must NOT scan getFluidsInNetwork when O(1) exists")
 
 local sawStockToDtpf, sawStockToQft, sawPushToStock, sawPushAckToQft, sawDtpfToStock, sawHandoffToDtpf, sawHandoffAckToStock, sawWakeHelloReply, sawWatchdogWake, sawMaintAckO1, sawMaintFluidDrop = false, false, false, false, false, false, false, false, false, false, false
-local sawGorgeReboot, sawUnivReboot, sawDtpfUpdate, sawStockUpdate, sawQftUpdate = false, false, false, false, false
+local sawGorgeReboot, sawUnivReboot, sawDtpfUpdate, sawStockUpdate, sawQftUpdate, sawBhcUpdate, sawNanoUpdate = false, false, false, false, false, false, false
 for _, pkt in ipairs(sentPackets) do
     if pkt.addr == "dtpf-addr" and pkt.t == "STOCK_CLAIMS" and pkt.p1 == "claims-from-stock" then sawStockToDtpf = true end
     if pkt.addr == "qft-addr" and pkt.t == "STOCK_CLAIMS" and pkt.p1 == "claims-from-stock" then sawStockToQft = true end
@@ -740,6 +762,14 @@ for _, pkt in ipairs(sentPackets) do
         local c = serialization.unserialize(pkt.p2)
         if type(c) == "table" and c.action == "update_local" and c.url == "http://127.0.0.1:8765/oc-raw" then sawQftUpdate = true end
     end
+    if pkt.t == "BHC_CMD" and type(pkt.p2) == "string" then
+        local c = serialization.unserialize(pkt.p2)
+        if type(c) == "table" and c.action == "update_local" and c.url == "http://127.0.0.1:8765/oc-raw" then sawBhcUpdate = true end
+    end
+    if pkt.t == "NANO_CMD" and type(pkt.p2) == "string" then
+        local c = serialization.unserialize(pkt.p2)
+        if type(c) == "table" and c.action == "update_local" and c.url == "http://127.0.0.1:8765/oc-raw" then sawNanoUpdate = true end
+    end
     if pkt.addr == "dtpf-addr" and pkt.t == "MESH_MAINT_ACK" and pkt.p1 == "req-o1" then
         local ackTbl = serialization.unserialize(pkt.p2)
         if ackTbl and ackTbl.stocks and ackTbl.stocks.r1 == 777 and ackTbl.stocks.r2 == 12345 then
@@ -766,6 +796,8 @@ assert(sawUnivReboot, "Bridge univ_reboot RPC must send UNIV_CMD reboot")
 assert(sawDtpfUpdate, "Bridge dtpf_update RPC must relay DTPF_CMD update_local")
 assert(sawStockUpdate, "Bridge stock_update RPC must relay STOCK_CMD update_local")
 assert(sawQftUpdate, "Bridge qft_update RPC must relay QFT_CMD update_local")
+assert(sawBhcUpdate, "Bridge bhc_update RPC must relay BHC_CMD update_local")
+assert(sawNanoUpdate, "Bridge nano_update RPC must relay NANO_CMD update_local")
 assert(sawMaintAckO1, "MESH_MAINT_ACK did not return O(1) stocks r1=777, r2=12345")
 assert(sawMaintFluidDrop, "inspectMainnetForMaint must unwrap ae2fc:fluid_drop into busyByKey and busyByLabel")
 
@@ -778,6 +810,12 @@ assert(allInflux:find("godforge_control ", 1, true), "Missing godforge_control I
 assert(allInflux:find("oc_health ", 1, true), "Missing oc_health InfluxDB watchdog telemetry")
 assert(allInflux:find("univ_ok=", 1, true), "oc_health missing univ_ok field")
 assert(allInflux:find("qft_ok=", 1, true), "oc_health missing qft_ok field")
+assert(allInflux:find("bhc_ok=", 1, true), "oc_health missing bhc_ok field")
+assert(allInflux:find("nano_ok=", 1, true), "oc_health missing nano_ok field")
+assert(allInflux:find("bhc_control armed=1i,stability=15.0,held_sec=30i,cost_mod=2i,halting=1i,saving=0i,parallels=256i,cycles=4i", 1, true),
+    "Missing/bad bhc_control InfluxDB line: " .. allInflux)
+assert(allInflux:find("nanoforge_control armed=1i,forge_tier=4i,parallels=2i,magmatter_l=288i,mag_avail_l=12000i,completed=3i,bus_clean=1i", 1, true),
+    "Missing/bad nanoforge_control InfluxDB line: " .. allInflux)
 assert(allInflux:find("qft_control armed=1i,units_online=1i,units_active=1i,reconfig_count=0i,boost_np=1i,boost_fm=0i,local_rules=0i,maint_mainnet=1i", 1, true),
     "Missing/bad qft_control InfluxDB line: " .. allInflux)
 assert(allInflux:find("pump_ok=1i", 1, true), "Space Pump (240s threshold) remained healthy during 75s step")
@@ -791,6 +829,8 @@ assert(allBridge:find('"meshUniv":true', 1, true), "Ping missing meshUniv=true")
 assert(allBridge:find('"meshGorge":true', 1, true), "Ping missing meshGorge=true")
 assert(allBridge:find('"meshStock":true', 1, true), "Ping missing meshStock=true")
 assert(allBridge:find('"meshQft":true', 1, true), "Ping missing meshQft=true")
+assert(allBridge:find('"meshBhc":true', 1, true), "Ping missing meshBhc=true")
+assert(allBridge:find('"meshNano":true', 1, true), "Ping missing meshNano=true")
 assert(allBridge:find('"meshHealth"', 1, true), "Ping/mesh_recover missing meshHealth table")
 assert(allBridge:find('"storage"', 1, true), "Ping/hello missing ae2 storage summary table")
 assert(allBridge:find('"brief"', 1, true), "meshHealth missing brief summary field")
@@ -1059,7 +1099,7 @@ assertEq(ui3.updateSource, "github", "Clicked [Src:Local] toggled updateSource t
 ui3:handleTouch(54, 4, 0)
 assertEq(ui3.updateSource, "local", "Clicked [Src:GitHub] toggled updateSource back to local")
 
--- Tab 3 [AW:ON ] on DTPF card header (y=5, x=2..77) + Tab 0 Setup enableAutoWake toggle (y=30, x=40)
+-- Tab 3 [AW:ON ] on DTPF card header (y=5, x=2..77) + Tab 3 Page 2 (BHC & Nano) + Tab 0 Setup enableAutoWake toggle (y=30, x=40)
 ui3:handleKeyDown(51, 4)
 ui3:render()
 local awHb = nil
@@ -1072,6 +1112,31 @@ end
 assert(awHb ~= nil, "Expected [AW:ON ] hitbox on DTPF [3]MESH card header (y=5)")
 ui3:handleTouch(awHb.x1 + 1, 5, 0)
 assertEq(peerActionsLog[#peerActionsLog], "dtpf:set_auto_wake:false", "Clicked [AW:ON ] triggered dtpf:set_auto_wake:false")
+
+-- Render [3]MESH Page 2 (BHC + Nano Forge cards) + [B] BHC tab + [N] Nano tab with full mock statuses
+hub3.peers.bhc = {
+    addr = "bhc-addr", lastSeen = 19,
+    status = { armed = true, autoWake = true, phase = "HOLDING", seedMode = "pseudostable", preset = "balanced", saveRecipeMode = true, stability = 15, heldSec = 30, costMod = 2, stHalting = true, tierName = "UV", parallels = 256, spacetimeStockL = 50000, collapsers = 12, seeds = 8, cyclesCompleted = 4 },
+}
+hub3.peers.nano = {
+    addr = "nano-addr", lastSeen = 19,
+    status = { armed = true, autoWake = true, forgeTier = 4, mode = "both", phase = "RUNNING", activeLabel = "Magmatter Nanites", parallels = 4, magmatterL = 1152, perfectOC = false, busClean = true, magAvailableL = 40000, completedBatches = 7 },
+}
+ui3.meshPage = 2
+ui3:render()
+local awBhc = nil
+for _, hb in ipairs(ui3.hitboxes or {}) do
+    if hb.y1 == 5 and hb.x1 >= 2 and hb.x2 <= 77 then awBhc = hb; break end
+end
+assert(awBhc ~= nil, "Expected [AW:ON ] hitbox on BHC card header on Mesh Page 2")
+ui3:handleTouch(awBhc.x1 + 1, 5, 0)
+assertEq(peerActionsLog[#peerActionsLog], "bhc:set_auto_wake:false", "Clicked [AW:ON ] on BHC card triggered bhc:set_auto_wake:false")
+ui3.meshPage = 1
+ui3:handleKeyDown(98, 48) -- 'b' -> TAB_BHC
+ui3:render()
+ui3:handleKeyDown(110, 49) -- 'n' -> TAB_NANO
+ui3:render()
+
 ui3:handleKeyDown(48, 11)
 cfg3.enableAutoWake = true
 ui3:render()
@@ -1416,11 +1481,12 @@ rawset(_G, "__HELD_OBJECTS", { cfg3, hub3, ui3 })
                         lsc = { online = true, pct = 50, in5s = 0, out5s = 0, net5s = 0, wirelessStr = "0", wirelessOn = true },
                         tps = { online = true, mspt = 20, tps = 20, chunks = 100, dims = 1 },
                         cpus = { total = 0, busyCount = 0, list = {} },
-                        peers = { dtpf = {}, pump = {}, univ = {}, gorge = {}, stock = {}, qft = {} },
+                        peers = { dtpf = {}, pump = {}, univ = {}, gorge = {}, stock = {}, qft = {}, bhc = {}, nano = {} },
                         logs = {},
                     }
                     local u = Ae2UI.new(cfg, hub, {})
-                    for t = 1, 10 do u.tab = t; u:render() end
+                    for t = 1, 12 do u.tab = t; u:render() end
+                    u.tab = 3; u.meshPage = 2; u:render()
                     rawset(_G, "__PROD_HOLD", { cfg, hub, u })
                     """,
                     "prod_footprint_test",

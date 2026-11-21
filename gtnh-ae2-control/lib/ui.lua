@@ -18,6 +18,8 @@ local TAB_PUMP      = 7
 local TAB_STOCK     = 8
 local TAB_QFT       = 9
 local TAB_SETUP     = 10
+local TAB_BHC       = 11
+local TAB_NANO      = 12
 
 local COLORS = {
     bg          = 0x0C1117,
@@ -111,6 +113,7 @@ function UI.new(cfg, hubState, callbacks, compLib)
         running = true,
         cpuScroll = 0,
         tabScroll = 0,
+        meshPage = 1,
         cpuBusyOnly = false,
         confirmCancelCpu = nil,
         confirmRebootPeer = nil,
@@ -365,7 +368,7 @@ function UI:renderHeader()
     local peers = hub.peers or {}
     local nowU = tonumber(hub.nowUptime) or 0
     local function peerOn(p, win) return p and p.addr ~= nil and (nowU - (p.lastSeen or -1000)) < win end
-    local badgeX = self.w - 57
+    local badgeX = self.w - 75
     for _, pd in ipairs({
         { lbl = "DTPF", p = peers.dtpf,  win = 60,  tab = TAB_DTPF },
         { lbl = "UNIV", p = peers.univ,  win = 60,  tab = TAB_UNIVERSAL },
@@ -373,6 +376,8 @@ function UI:renderHeader()
         { lbl = "PMP",  p = peers.pump,  win = 240, tab = TAB_PUMP },
         { lbl = "STK",  p = peers.stock, win = 60,  tab = TAB_STOCK },
         { lbl = "QFT",  p = peers.qft,   win = 60,  tab = TAB_QFT },
+        { lbl = "BHC",  p = peers.bhc,   win = 60,  tab = TAB_BHC },
+        { lbl = "NNO",  p = peers.nano,  win = 60,  tab = TAB_NANO },
     }) do
         local okP = peerOn(pd.p, pd.win)
         badgeX = self:drawButton(badgeX, 2, "[" .. pd.lbl .. (okP and ":ON]" or ":--]"),
@@ -461,6 +466,8 @@ function UI:renderOverviewTab()
         { key = "gorge", win = 60 },
         { key = "stock", win = 60 },
         { key = "qft",   win = 60 },
+        { key = "bhc",   win = 60 },
+        { key = "nano",  win = 60 },
     }
     for _, pm in ipairs(peerMap) do
         local p = peers[pm.key]
@@ -474,7 +481,7 @@ function UI:renderOverviewTab()
     self:drawText(122, 8, padOrTrunc(string.format("TCP Bridge : %s",
         not self.cfg.enableBridge and "Disabled" or (hub.bridgeConnected and "Connected" or "Connecting")), 35),
         hub.bridgeConnected and COLORS.green or COLORS.muted, COLORS.panelBg)
-    self:drawText(122, 9, padOrTrunc(string.format("Mesh Peers : %d / 6 online (p:%d)",
+    self:drawText(122, 9, padOrTrunc(string.format("Mesh Peers : %d / 8 online (p:%d)",
         peerOnline, tonumber(self.cfg.meshPort) or 4205), 35),
         peerOnline > 0 and COLORS.cyan or COLORS.muted, COLORS.panelBg)
     self:drawText(122, 11, padOrTrunc(string.format("Last Scan  : %.2fs | AE Items:%d",
@@ -648,6 +655,47 @@ function UI:renderOverviewTab()
                 self:triggerPeerUpdate(sc.key, "Updating " .. tostring(sc.key))
             end)
             self:drawRebootBtn(rbtX, 20, sc.key, "[Rbt]", "[Sure?]")
+        end
+    end
+
+    -- Compact 1-line BHC + Nano Forge status strip on row y=22
+    local bhcOn, bhcSeen, bhcAge = peerMeta(peers.bhc, 60)
+    local bhcSt = (peers.bhc and peers.bhc.status) or {}
+    local nanoOn, nanoSeen, nanoAge = peerMeta(peers.nano, 60)
+    local nanoSt = (peers.nano and peers.nano.status) or {}
+    for _, ex in ipairs({
+        {
+            x = 2, key = "bhc", lbl = "BHC", tab = TAB_BHC, on = bhcOn, seen = bhcSeen,
+            info = bhcSeen and string.format("%s %.0f%% %dp ST:%s Col:%d %ds",
+                tostring(bhcSt.phase or "CLOSED"), tonumber(bhcSt.stability) or 100,
+                tonumber(bhcSt.parallels) or 0, UI.formatNumber(bhcSt.spacetimeStockL or 0, "L"),
+                tonumber(bhcSt.collapsers) or 0, bhcAge or 0) or "Wait BHC (Mesh :4205 | key B)",
+        },
+        {
+            x = 81, key = "nano", lbl = "NNO", tab = TAB_NANO, on = nanoOn, seen = nanoSeen,
+            info = nanoSeen and string.format("T%d %s %dx Clean:%s Mag:%s %ds",
+                tonumber(nanoSt.forgeTier) or 4, tostring(nanoSt.phase or "IDLE"),
+                tonumber(nanoSt.parallels) or 0, (nanoSt.busClean ~= false) and "YES" or "NO",
+                UI.formatNumber(nanoSt.magAvailableL or 0, "L"), nanoAge or 0) or "Wait NanoForge (Mesh :4205 | key N)",
+        },
+    }) do
+        local isStale = ex.seen and (not ex.on)
+        local tag = ex.on and ("[" .. ex.lbl .. ":ON ]") or (isStale and ("[" .. ex.lbl .. ":STL]") or ("[" .. ex.lbl .. ":OFF]"))
+        local fg = ex.on and COLORS.green or (isStale and COLORS.red or COLORS.muted)
+        local bg = ex.on and COLORS.darkGreen or (isStale and COLORS.darkRed or COLORS.btnBg)
+        self:drawButton(ex.x, 22, tag, fg, bg, function() self.tab = ex.tab; self.tabScroll = 0 end)
+        self:drawText(ex.x + 10, 22, padOrTrunc(ex.info, 48), ex.on and COLORS.fg or (isStale and COLORS.yellow or COLORS.muted), COLORS.bg)
+        self:drawButton(ex.x + 60, 22, "[Op]", COLORS.cyan, COLORS.btnBg, function() self.tab = ex.tab; self.tabScroll = 0 end)
+        if not ex.on and self.cb.onMeshRecover then
+            self:drawButton(ex.x + 65, 22, "[Wk]", COLORS.yellow, COLORS.amberBg, function()
+                self.statusMsg = tostring(self.cb.onMeshRecover(ex.key) or "Wake sent.")
+            end)
+        end
+        if ex.seen and self.cb.onPeerAction then
+            self:drawUpdateBtn(ex.x + 70, 22, "ovr_bar_" .. ex.key, "[↑]", "[↑?]", function()
+                self:triggerPeerUpdate(ex.key, "Updating " .. ex.key)
+            end)
+            self:drawRebootBtn(ex.x + 74, 22, ex.key, "[Rbt]", "[?]")
         end
     end
 
@@ -860,6 +908,44 @@ function UI:renderMeshTab()
     self:drawText(2, 4, "Fleet OTA:", COLORS.accent, COLORS.bg)
     local fx = self:drawFleetOtaRow(14, 4, "mesh_", "mesh_upd_ae2")
     self:drawUpdateSourceToggle(fx, 4)
+    local pg = (self.meshPage == 2) and 2 or 1
+    self:drawButton(147, 4, string.format("[Page %d/2]", pg), COLORS.cyan, COLORS.btnBg, function()
+        self.meshPage = (pg == 1) and 2 or 1
+        self.statusMsg = "Mesh View Page " .. tostring(self.meshPage) .. "/2"
+    end)
+
+    if pg == 2 then
+        self:renderMeshPeerCard(2, 5, 77, 18, "BLACK HOLE COMPRESSOR (BHC)", "bhc", peers.bhc, 60, TAB_BHC, function(st, bx, by, bw)
+            self:drawText(bx, by, padOrTrunc(string.format("Armed: %-5s  Phase: %-11s  Seed: %-12s  Preset: %s",
+                tostring(st.armed == true), tostring(st.phase or "CLOSED"),
+                tostring(st.seedMode or "pseudostable"), tostring(st.preset or "balanced")), bw),
+                st.armed and COLORS.green or COLORS.yellow, COLORS.panelBg)
+            self:drawText(bx, by + 2, padOrTrunc(string.format("Stability: %.1f%%  Held: %ds  ST Rate: %d L/s  Halting: %s  SaveRec: %s",
+                tonumber(st.stability) or 100, tonumber(st.heldSec) or 0, tonumber(st.costMod) or 0,
+                st.stHalting and "YES" or "NO", st.savingRecipe and "ACTIVE" or (st.saveRecipeMode ~= false and "ON" or "OFF")), bw),
+                COLORS.cyan, COLORS.panelBg)
+            self:drawText(bx, by + 4, padOrTrunc(string.format("Tier: %s  Parallels: %d  SpaceTime: %s  Collapsers: %d  Cycles: %d",
+                tostring(st.tierName or "UV"), tonumber(st.parallels) or 0,
+                UI.formatNumber(st.spacetimeStockL or 0, "L"), tonumber(st.collapsers) or 0,
+                tonumber(st.cyclesCompleted) or 0), bw), COLORS.fg, COLORS.panelBg)
+        end)
+
+        self:renderMeshPeerCard(81, 5, 78, 18, "TIER 4 NANO FORGE CONTROLLER", "nano", peers.nano, 60, TAB_NANO, function(st, bx, by, bw)
+            self:drawText(bx, by, padOrTrunc(string.format("Armed: %-5s  Tier: T%d  Mode: %-12s  Phase: %s",
+                tostring(st.armed == true), tonumber(st.forgeTier) or 4,
+                tostring(st.mode or "both"), tostring(st.phase or "IDLE")), bw),
+                st.armed and COLORS.green or COLORS.yellow, COLORS.panelBg)
+            self:drawText(bx, by + 2, padOrTrunc(string.format("Active: %-24s  Par: %dx  Mag: %d L  4/4 OC: %s",
+                st.activeLabel ~= "" and tostring(st.activeLabel) or "Idle",
+                tonumber(st.parallels) or 0, tonumber(st.magmatterL) or 0, st.perfectOC and "YES" or "NO"), bw),
+                COLORS.cyan, COLORS.panelBg)
+            self:drawText(bx, by + 4, padOrTrunc(string.format("Bus Purity: %-14s  Mag Avail: %s  Completed: %d",
+                (st.busClean ~= false) and "CLEAN" or "FOREIGN ALERT",
+                UI.formatNumber(st.magAvailableL or 0, "L"), tonumber(st.completedBatches) or 0), bw),
+                (st.busClean == false) and COLORS.red or COLORS.fg, COLORS.panelBg)
+        end)
+        return
+    end
 
     -- Card 1: DTPF Fleet (x=2, y=5, w=77, h=14)
     self:renderMeshPeerCard(2, 5, 77, 14, "DTPF FLEET CONTROLLER", "dtpf", peers.dtpf, 60, TAB_DTPF, function(st, bx, by, bw)
@@ -1616,6 +1702,102 @@ function UI:renderQftTab()
     end
 end
 
+function UI:renderBhcTab()
+    local peer = self.hub and self.hub.peers and self.hub.peers.bhc
+    local st = peer and peer.status or nil
+    if type(st) ~= "table" then
+        self:renderPeerOfflineGuide("PSEUDOSTABLE BLACK HOLE COMPRESSOR (BHC)", "bhc", peer, 60)
+        return
+    end
+    local now = tonumber(self.hub.nowUptime) or 0
+    local fresh = peer.addr and (now - (peer.lastSeen or -1000)) < 60
+
+    self:drawFrame(2, 5, 157, 9, COLORS.border, COLORS.panelBg, "round")
+    self:drawText(4, 5, " ◈ BLACK HOLE COMPRESSOR ORCHESTRATOR ", COLORS.accent, COLORS.panelBg)
+    self:drawText(138, 5, fresh and (" ONLINE (" .. UI.formatAge(now, peer.lastSeen) .. ") ") or " STALE ", fresh and COLORS.green or COLORS.yellow, COLORS.panelBg)
+    self:drawText(4, 7, padOrTrunc(string.format(
+        "Armed:%-5s  Phase:%-11s  Seed:%-12s  Preset:%-14s  Stability:%5.1f%%  Cost:%d L/s  Halting:%s  SaveRec:%s",
+        tostring(st.armed == true), tostring(st.phase or "CLOSED"), tostring(st.seedMode or "pseudostable"),
+        tostring(st.preset or "balanced"), tonumber(st.stability) or 100, tonumber(st.costMod) or 0,
+        st.stHalting and "YES" or "NO", st.savingRecipe and "ACTIVE" or (st.saveRecipeMode ~= false and "ON" or "OFF")), 152),
+        COLORS.fg, COLORS.panelBg)
+    self:drawText(4, 9, padOrTrunc(string.format(
+        "Tier:%s  Effective Parallels:%d  Held:%ds  KeepOpen:%s  SpaceTime:%s  Collapsers:%d  Seeds:%d  Cycles:%d",
+        tostring(st.tierName or "UV"), tonumber(st.parallels) or 0, tonumber(st.heldSec) or 0,
+        tostring(st.keepOpen == true), UI.formatNumber(st.spacetimeStockL or 0, "L"),
+        tonumber(st.collapsers) or 0, tonumber(st.seeds) or 0, tonumber(st.cyclesCompleted) or 0), 152),
+        COLORS.cyan, COLORS.panelBg)
+
+    local bx = 4
+    bx = self:drawOrchestratorBtn(bx, 11, "[Arm BHC]", COLORS.fg, COLORS.darkGreen, "bhc", "resume")
+    bx = self:drawOrchestratorBtn(bx, 11, "[Pause BHC]", COLORS.yellow, COLORS.amberBg, "bhc", "pause")
+    bx = self:drawOrchestratorBtn(bx, 11, "[Poll]", COLORS.cyan, COLORS.btnBg, "bhc", "poll")
+    bx = self:drawOrchestratorBtn(bx, 11, "[Open BH]", COLORS.purple, COLORS.btnBg, "bhc", "open_bh")
+    bx = self:drawOrchestratorBtn(bx, 11, "[Collapse BH]", COLORS.red, COLORS.darkRed, "bhc", "collapse_bh")
+    bx = self:drawRebootBtn(bx, 11, "bhc", "[Reboot BHC]", "[Confirm?]")
+    self:drawUpdateBtn(bx, 11, "upd_bhc", "[↑ Upd]", "[Confirm?]", function()
+        self:triggerPeerUpdate("bhc", "Updating BHC")
+    end)
+
+    self:drawFrame(2, 15, 157, 33, COLORS.border, COLORS.panelBg, "round")
+    self:drawText(4, 15, " ◈ STRATEGY PRESETS & STABILITY MONITOR ", COLORS.accent, COLORS.panelBg)
+    local stab = math.max(0, math.min(100, tonumber(st.stability) or 100))
+    self:drawText(4, 18, string.format("Black Hole Stability (%5.1f%%):", stab), COLORS.fg, COLORS.panelBg)
+    self:drawProgressBar(38, 18, 60, stab, stab <= 5 and COLORS.red or (stab < 20 and COLORS.green or COLORS.cyan), COLORS.border, COLORS.panelBg)
+    local px = 4
+    for _, pr in ipairs({ "balanced", "throughput", "save_seeds", "save_spacetime", "superstable" }) do
+        local isAct = (st.preset == pr)
+        px = self:drawOrchestratorBtn(px, 21, "[" .. pr .. "]", isAct and COLORS.fg or COLORS.cyan,
+            isAct and COLORS.btnActiveBg or COLORS.btnBg, "bhc", "apply_preset", { preset = pr })
+    end
+    self:drawText(4, 25, "Notes: Open BHC with Seed + Collapser reserve, free-decay below 20% (4x parallels), halt decay via SpaceTime,", COLORS.muted, COLORS.panelBg)
+    self:drawText(4, 27, "and Save Recipe Mode extends SpaceTime automatically before 0% voiding if an active craft is mid-cycle.", COLORS.muted, COLORS.panelBg)
+end
+
+function UI:renderNanoTab()
+    local peer = self.hub and self.hub.peers and self.hub.peers.nano
+    local st = peer and peer.status or nil
+    if type(st) ~= "table" then
+        self:renderPeerOfflineGuide("TIER 4 NANO FORGE CONTROLLER", "nanoforge", peer, 60)
+        return
+    end
+    local now = tonumber(self.hub.nowUptime) or 0
+    local fresh = peer.addr and (now - (peer.lastSeen or -1000)) < 60
+
+    self:drawFrame(2, 5, 157, 9, COLORS.border, COLORS.panelBg, "round")
+    self:drawText(4, 5, " ◈ TIER 4 NANO FORGE ORCHESTRATOR ", COLORS.accent, COLORS.panelBg)
+    self:drawText(138, 5, fresh and (" ONLINE (" .. UI.formatAge(now, peer.lastSeen) .. ") ") or " STALE ", fresh and COLORS.green or COLORS.yellow, COLORS.panelBg)
+    self:drawText(4, 7, padOrTrunc(string.format(
+        "Armed:%-5s  Forge Tier:T%d  Mode:%-12s  Phase:%-10s  Bus Purity:%-14s  Completed:%d",
+        tostring(st.armed == true), tonumber(st.forgeTier) or 4, tostring(st.mode or "both"),
+        tostring(st.phase or "IDLE"), (st.busClean ~= false) and "CLEAN" or "FOREIGN BLOCKED",
+        tonumber(st.completedBatches) or 0), 152),
+        (st.busClean == false) and COLORS.red or COLORS.fg, COLORS.panelBg)
+    self:drawText(4, 9, padOrTrunc(string.format(
+        "Active Batch: %-28s  Parallels:%dx  Magmatter:%d L  Perfect 4/4 OC:%s  Mag Avail:%s",
+        (st.activeLabel and st.activeLabel ~= "") and tostring(st.activeLabel) or "None (IDLE)",
+        tonumber(st.parallels) or 0, tonumber(st.magmatterL) or 0,
+        st.perfectOC and "YES" or "NO", UI.formatNumber(st.magAvailableL or 0, "L")), 152),
+        COLORS.cyan, COLORS.panelBg)
+
+    local bx = 4
+    bx = self:drawOrchestratorBtn(bx, 11, "[Arm Forge]", COLORS.fg, COLORS.darkGreen, "nano", "resume")
+    bx = self:drawOrchestratorBtn(bx, 11, "[Pause Forge]", COLORS.yellow, COLORS.amberBg, "nano", "pause")
+    bx = self:drawOrchestratorBtn(bx, 11, "[Poll]", COLORS.cyan, COLORS.btnBg, "nano", "poll")
+    bx = self:drawOrchestratorBtn(bx, 11, "[Sweep Bus]", COLORS.yellow, COLORS.btnBg, "nano", "sweep_bus")
+    bx = self:drawRebootBtn(bx, 11, "nano", "[Reboot Nano]", "[Confirm?]")
+    self:drawUpdateBtn(bx, 11, "upd_nano", "[↑ Upd]", "[Confirm?]", function()
+        self:triggerPeerUpdate("nano", "Updating Nano Forge")
+    end)
+
+    self:drawFrame(2, 15, 157, 33, COLORS.border, COLORS.panelBg, "round")
+    self:drawText(4, 15, " ◈ T4 MAGMATTER METERING & PURITY INVARIANTS ", COLORS.accent, COLORS.panelBg)
+    self:drawText(4, 18, "Magmatter / Parallel : T1 = 36L  |  T2 = 72L  |  T3 = 144L  |  T4 = 288L  (1x Bootstrap = 0L)", COLORS.fg, COLORS.panelBg)
+    self:drawText(4, 20, "Overclock & Speed    : 0.9999^P duration multiplier | T1/T2 4/4 OC | T3 >=2x (288L+) 4/4 OC | T4 2/4 OC", COLORS.cyan, COLORS.panelBg)
+    self:drawText(4, 22, "Strict Purity Guard  : Serializes 1 nanite recipe per dedicated Regular Bus (never mixed Stocking Bus).", COLORS.yellow, COLORS.panelBg)
+    self:drawText(4, 24, "Use the Web Console 'BHC & Nano' tab for per-nanite targets, manual batch runs, and Stock input pushes.", COLORS.muted, COLORS.panelBg)
+end
+
 function UI:renderSetupTab()
     -- Left Card: Live Exporter Feature Toggles
     self:drawFrame(2, 5, 77, 43, COLORS.border, COLORS.panelBg, "round")
@@ -1837,12 +2019,16 @@ function UI:render()
         self:renderStockTab()
     elseif self.tab == TAB_QFT then
         self:renderQftTab()
+    elseif self.tab == TAB_BHC then
+        self:renderBhcTab()
+    elseif self.tab == TAB_NANO then
+        self:renderNanoTab()
     elseif self.tab == TAB_SETUP then
         self:renderSetupTab()
     end
 
     self:drawText(1, self.h - 1, string.rep("─", self.w), COLORS.border, COLORS.bg)
-    local keysStr = "Keys: 1-9,0 Tabs | / Search | S Scan | P Ping | L Log | R Reset | Q Quit"
+    local keysStr = "Keys: 1-0,B,N Tabs | / Search | S Scan | P Ping | L Log | R Reset | Q Quit"
     local keysX = Common.fitRightX(self.w, keysStr, 2)
     self:drawText(2, self.h, padOrTrunc(self.statusMsg or "", math.max(0, keysX - 4)), COLORS.fg, COLORS.bg)
     self:drawText(keysX, self.h, keysStr, COLORS.muted, COLORS.bg)
@@ -1893,7 +2079,7 @@ function UI:handleScroll(dir)
         self.logScroll = math.max(0, (self.logScroll or 0) + delta)
     elseif self.tab == TAB_CPUS then
         self.cpuScroll = math.max(0, (self.cpuScroll or 0) + delta)
-    elseif self.tab >= TAB_DTPF and self.tab <= TAB_QFT then
+    elseif self.tab >= TAB_DTPF and self.tab <= TAB_NANO then
         self.tabScroll = math.max(0, (self.tabScroll or 0) + delta)
     end
     self:render()
@@ -1931,14 +2117,26 @@ function UI:handleKeyDown(char, code)
         self.confirmCancelCpu = nil
         self.confirmRebootPeer = nil
         self.confirmUpdateKey = nil
+    elseif char == 98 or char == 66 then -- 'b'/'B' -> BHC
+        self.tab = TAB_BHC
+        self.tabScroll = 0
+        self.confirmCancelCpu = nil
+        self.confirmRebootPeer = nil
+        self.confirmUpdateKey = nil
+    elseif char == 110 or char == 78 then -- 'n'/'N' -> Nano Forge
+        self.tab = TAB_NANO
+        self.tabScroll = 0
+        self.confirmCancelCpu = nil
+        self.confirmRebootPeer = nil
+        self.confirmUpdateKey = nil
     elseif char == 48 then -- '0' -> Setup
         self.tab = TAB_SETUP
         self.tabScroll = 0
         self.confirmCancelCpu = nil
         self.confirmRebootPeer = nil
         self.confirmUpdateKey = nil
-    elseif code == 15 or char == 9 then -- Tab cycles 1..10
-        self.tab = (self.tab % 10) + 1
+    elseif code == 15 or char == 9 then -- Tab cycles 1..12
+        self.tab = (self.tab % 12) + 1
         self.tabScroll = 0
         self.confirmCancelCpu = nil
         self.confirmRebootPeer = nil

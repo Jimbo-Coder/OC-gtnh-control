@@ -11,3 +11,5 @@
   - **NIDAS** (`NIDAS` `autostocker.lua`, [`nidas/`](../references/nidas/)) — Drop-in Transposer slot + interactive configuration UX.
   - **DylanTaylor1** ([`DylanTaylor1/GTNH-Stocking`](https://github.com/DylanTaylor1/GTNH-Stocking), MIT License) — O(1) AE2 `getItemInNetwork` / `getFluidInNetwork` lookup concepts.
   - **KaseiFR** ([`KaseiFR/ae2-manager`](https://github.com/KaseiFR/ae2-manager), GPL-3.0 upstream reference; no upstream code copied) — Multi-page/grouped AE2 level-maintaining concepts.
+- **`gtnh-bhc-control/`** — Clean-room implementation inspired conceptually by **Navatusein** ([`Navatusein/GTNH-OC-Black-Hole-Control`](https://github.com/Navatusein/GTNH-OC-Black-Hole-Control), MIT License) including SpaceTime decay holding and "Save Recipe Mode", paired with GTNH 2.9.0 Black Hole Utility Hatch pulse/static sync.
+- **`gtnh-nanoforge-control/`** — Clean-room Tier 4 Nano Forge automation informed by **GTNH Wiki** ([`Nano Forge`](https://wiki.gtnewhorizons.com/wiki/Nano_Forge), CC BY-SA 4.0) and GTNH 2.9.0 `MTENanoForge` / `NaniteChain` bytecode mechanics.
