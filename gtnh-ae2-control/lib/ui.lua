@@ -805,7 +805,10 @@ function UI:renderMeshPeerCard(x, y, cw, ch, title, peerKey, peer, winSec, targe
         end
     end) + 2
     if self.cb.onPeerAction then
-        self:drawRebootBtn(bx, y + ch - 3, peerKey, "[Reboot]", "[Confirm Reboot?]")
+        bx = self:drawRebootBtn(bx, y + ch - 3, peerKey, "[Reboot]", "[Confirm Reboot?]")
+        self:drawUpdateBtn(bx, y + ch - 3, "upd_card_" .. tostring(peerKey), "[↑ Upd]", "[Confirm Upd?]", function()
+            self.statusMsg = tostring(self.cb.onPeerAction(peerKey, "update_local", { source = "local" }) or ("Updating " .. tostring(peerKey)))
+        end)
     end
     if targetTab then
         self:drawButton(x + cw - 12, y + ch - 3, "[Open ->]", COLORS.fg, COLORS.btnActiveBg, function()
@@ -824,6 +827,26 @@ end
 
 function UI:renderMeshTab()
     local peers = (self.hub and self.hub.peers) or {}
+
+    self:drawText(2, 4, "Fleet OTA:", COLORS.accent, COLORS.bg)
+    local fx = 14
+    fx = self:drawUpdateBtn(fx, 4, "mesh_fleet_local", "[↑ Update All: Local]", "[Confirm Local All?]", function()
+        if self.cb.onUpdateFleet then
+            local _, msg = self.cb.onUpdateFleet("local")
+            self.statusMsg = tostring(msg or "Fleet local update dispatched.")
+        end
+    end)
+    fx = self:drawUpdateBtn(fx, 4, "mesh_fleet_github", "[↑ Update All: GitHub]", "[Confirm GH All?]", function()
+        if self.cb.onUpdateFleet then
+            local _, msg = self.cb.onUpdateFleet("github")
+            self.statusMsg = tostring(msg or "Fleet GitHub update dispatched.")
+        end
+    end)
+    self:drawUpdateBtn(fx, 4, "mesh_upd_ae2", "[↻ Update Brain]", "[Confirm Brain?]", function()
+        if self.cb.onPeerAction then
+            self.statusMsg = tostring(self.cb.onPeerAction("ae2", "update_local", { source = "local" }) or "Updating Brain...")
+        end
+    end)
 
     -- Card 1: DTPF Fleet (x=2, y=5, w=77, h=14)
     self:renderMeshPeerCard(2, 5, 77, 14, "DTPF FLEET CONTROLLER", "dtpf", peers.dtpf, 60, TAB_DTPF, function(st, bx, by, bw)

@@ -33,7 +33,28 @@ local Common = (function()
   local ok, m = pcall(require, 'gtnh_common')
   if ok and type(m) == 'table' then return m end
   package.path = '/usr/lib/?.lua;/lib/?.lua;./common/?.lua;../common/?.lua;' .. tostring(package.path or '')
-  return require('gtnh_common')
+  ok, m = pcall(require, 'gtnh_common')
+  if ok and type(m) == 'table' then return m end
+  local instPath = '/home/install_pump.lua'
+  local ch = loadfile and loadfile(instPath) or nil
+  if not ch and io and io.open then
+    local f = io.open(instPath, 'r')
+    if f then local src = f:read('*a'); f:close(); ch = load(src, '=' .. instPath) end
+  end
+  if ch then
+    pcall(ch, '--update', '--yes', '--no-prompt')
+    package.loaded['gtnh_common'] = nil
+    ok, m = pcall(require, 'gtnh_common')
+    if not ok or type(m) ~= 'table' then
+      pcall(ch, '--local-bridge', '--update', '--yes', '--no-prompt')
+      package.loaded['gtnh_common'] = nil
+      ok, m = pcall(require, 'gtnh_common')
+    end
+  end
+  if not ok or type(m) ~= 'table' then
+    error('Missing /usr/lib/gtnh_common.lua: ' .. tostring(m))
+  end
+  return m
 end)()
 local pumps = {}
 local refreshRequested = false

@@ -46,7 +46,30 @@ end
 local scriptDir = resolveScriptDir("/home/brain")
 package.path = string.format("%s/?.lua;%s/?/init.lua;/usr/lib/?.lua;%s/../common/?.lua;%s;/home/?.lua",
     scriptDir, scriptDir, scriptDir, package.path)
-local Common = require("gtnh_common")
+local okCommon, Common = pcall(require, "gtnh_common")
+if not okCommon then
+    local instPath = (okFs and filesystem and filesystem.exists and filesystem.exists(scriptDir .. "/install.lua"))
+        and (scriptDir .. "/install.lua")
+        or "/home/install_ae2.lua"
+    local ch = loadfile and loadfile(instPath) or nil
+    if not ch and io and io.open then
+        local f = io.open(instPath, "r")
+        if f then local src = f:read("*a"); f:close(); ch = load(src, "=" .. instPath) end
+    end
+    if ch then
+        pcall(ch, "--update", "--yes", "--no-prompt")
+        package.loaded["gtnh_common"] = nil
+        okCommon, Common = pcall(require, "gtnh_common")
+        if not okCommon then
+            pcall(ch, "--local-bridge", "--update", "--yes", "--no-prompt")
+            package.loaded["gtnh_common"] = nil
+            okCommon, Common = pcall(require, "gtnh_common")
+        end
+    end
+    if not okCommon then
+        error("Missing /usr/lib/gtnh_common.lua: " .. tostring(Common))
+    end
+end
 
 local SHRC_PATH = "/home/.shrc"
 local isBrainShrcLine = Common.makeShrcMatcher({

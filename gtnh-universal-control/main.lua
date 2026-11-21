@@ -66,7 +66,28 @@ do
     end
 end
 
-local Common = require("gtnh_common")
+local okCommon, Common = pcall(require, "gtnh_common")
+if not okCommon then
+    local instPath = filesystem.concat(scriptDir, "install.lua")
+    local ch = loadfile and loadfile(instPath) or nil
+    if not ch and io and io.open then
+        local f = io.open(instPath, "r")
+        if f then local src = f:read("*a"); f:close(); ch = load(src, "=" .. instPath) end
+    end
+    if ch then
+        pcall(ch, "--update", "--yes", "--no-prompt")
+        package.loaded["gtnh_common"] = nil
+        okCommon, Common = pcall(require, "gtnh_common")
+        if not okCommon then
+            pcall(ch, "--local-bridge", "--update", "--yes", "--no-prompt")
+            package.loaded["gtnh_common"] = nil
+            okCommon, Common = pcall(require, "gtnh_common")
+        end
+    end
+    if not okCommon then
+        error("Missing /usr/lib/gtnh_common.lua: " .. tostring(Common))
+    end
+end
 
 local Hardware = require("lib.hardware")
 local Scheduler = require("lib.scheduler")
