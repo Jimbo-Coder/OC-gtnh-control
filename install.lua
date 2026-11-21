@@ -2,7 +2,7 @@
 -- One-line install:
 --   wget -f https://raw.githubusercontent.com/Jimbo-Coder/OC-gtnh-control/main/install.lua /tmp/install.lua && /tmp/install.lua
 -- Direct module install:
---   /tmp/install.lua <dtpf|universal|ae2|pump|gorge|stock|qft> [--yes] [--no-autostart]
+--   /tmp/install.lua <dtpf|universal|brain|pump|gorge|stock|qft> [--yes] [--no-autostart]  (`ae2` is an alias for `brain`)
 -- Update all modules installed on this computer:
 --   /tmp/install.lua --update
 
@@ -19,7 +19,7 @@ local MANIFEST_PATH = "/home/.oc-gtnh.manifest"
 local MODULES = {
     { key = "dtpf",      subdir = "gtnh-dtpf-control",      desc = "DTPF Control Center (Passive/OD/Catalyst Scheduler + 160x50 GUI)", detect = "/home/dtpf/main.lua" },
     { key = "universal", subdir = "gtnh-universal-control", desc = "Universal Automation (Multi-Ch Toggle Bus + Push Events + MLFQ)", detect = "/home/universal/main.lua" },
-    { key = "ae2",       subdir = "gtnh-ae2-control",       desc = "AE2 Control & Hub (Influx Exporter, Craft Requester & Mesh Gateway)", detect = "/home/exporter.lua" },
+    { key = "brain",     aliases = { "ae2" }, subdir = "gtnh-ae2-control",       desc = "Mainnet Brain & Hub (AE2 Telemetry, Craft Requester & Mesh Gateway)", detect = { "/home/brain/main.lua", "/home/exporter.lua" } },
     { key = "pump",      subdir = "gtnh-space-pump",        desc = "Space Elevator Pump (Target Fluid Pumping + Optional Mesh)",         detect = "/home/autoPump.lua" },
     { key = "gorge",     subdir = "gtnh-gorge-control",     desc = "Forge of the Gods & Multi-Exoticizer Control (Self-Healing + GUI)",   detect = "/home/gorge/main.lua" },
     { key = "stock",     subdir = "gtnh-stock-control",     desc = "Mainnet AE2 Stock Maintainer (O(1) Items+Fluids + 160x50 GUI)",       detect = "/home/stock/main.lua" },
@@ -31,6 +31,9 @@ for i, m in ipairs(MODULES) do
     BY_KEY[m.key] = m
     BY_KEY[m.subdir] = m
     BY_KEY[tostring(i)] = m
+    for _, al in ipairs(m.aliases or {}) do
+        BY_KEY[al] = m
+    end
 end
 
 local function readWholeFile(path)
@@ -109,10 +112,19 @@ local function loadManifest()
             end
         end
     end
+    if m.modules.ae2 then
+        m.modules.brain = true
+        m.modules.ae2 = nil
+    end
     -- Also detect any pre-existing modules installed prior to monorepo manifest
     for _, spec in ipairs(MODULES) do
-        if spec.detect and filesystem.exists(spec.detect) then
-            m.modules[spec.key] = true
+        local det = spec.detect
+        if type(det) == "string" then
+            if filesystem.exists(det) then m.modules[spec.key] = true end
+        elseif type(det) == "table" then
+            for _, p in ipairs(det) do
+                if filesystem.exists(p) then m.modules[spec.key] = true; break end
+            end
         end
     end
     return m

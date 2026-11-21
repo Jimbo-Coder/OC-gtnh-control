@@ -446,8 +446,8 @@ end
 -- TEST 1: Syntax / Load Check of All Lua Files
 -- =====================================================================
 for _, rel in ipairs({
-    "exporter.lua",
-    "ae2_ui.lua",
+    "main.lua",
+    "lib/ui.lua",
     "install.lua",
     "config.example.lua",
 }) do
@@ -457,16 +457,16 @@ for _, rel in ipairs({
     assert(chunk, "Syntax error in " .. rel .. ": " .. tostring(err))
 end
 
--- Copy config.example.lua -> /home/config.lua inside VFS
+-- Copy config.example.lua -> /home/brain/config.lua inside VFS
 local cfgSrc = __py_read_file(__AE2_ROOT .. "/config.example.lua")
-__py_write_file("/home/config.lua", cfgSrc:gsub("enableEnergyAE2 = false", "enableEnergyAE2 = true"):gsub("enableResilience = true", "enableResilience = false"):gsub("enableItems = true", "enableItems = false"):gsub("enableFluids = true", "enableFluids = false"):gsub("enableEssentia = true", "enableEssentia = false"))
-__py_write_file("/home/exporter.lua", __py_read_file(__AE2_ROOT .. "/exporter.lua"))
--- Intentionally omit ae2_ui.lua from /home initially & temporarily hide package.path root to prove headless runs WITHOUT ae2_ui.lua!
+__py_write_file("/home/brain/config.lua", cfgSrc:gsub("enableEnergyAE2 = false", "enableEnergyAE2 = true"):gsub("enableResilience = true", "enableResilience = false"):gsub("enableItems = true", "enableItems = false"):gsub("enableFluids = true", "enableFluids = false"):gsub("enableEssentia = true", "enableEssentia = false"))
+__py_write_file("/home/brain/main.lua", __py_read_file(__AE2_ROOT .. "/main.lua"))
+-- Intentionally omit /home/brain/lib/ui.lua initially & temporarily hide AE2_ROOT from package.path to prove headless runs WITHOUT lib/ui.lua!
 local savedPkgPath = package.path
-package.path = "/home/?.lua"
+package.path = "/home/brain/?.lua;/home/?.lua"
 
 -- =====================================================================
--- TEST 2: Headless Run Without ae2_ui.lua + Cached Mesh Transports
+-- TEST 2: Headless Run Without lib/ui.lua + Cached Mesh Transports
 --         + GORGE_METRICS Influx Export + univ_action / gorge_action
 -- =====================================================================
 component._reset()
@@ -673,7 +673,7 @@ meshEventQueue[#meshEventQueue + 1] = { "modem_message", "mod-1", "dtpf-addr", 4
 }) }
 
 -- Enable bridge in config for Test 2
-__py_write_file("/home/config.lua", __py_read_file("/home/config.lua"):gsub("enableBridge = false", "enableBridge = true"))
+__py_write_file("/home/brain/config.lua", __py_read_file("/home/brain/config.lua"):gsub("enableBridge = false", "enableBridge = true"))
 
 event.pull = function(timeout, filter)
     if #meshEventQueue > 0 then
@@ -693,7 +693,7 @@ event.pull = function(timeout, filter)
     return nil
 end
 
-local expChunk = assert(load(__py_read_file("/home/exporter.lua"), "@/home/exporter.lua"))
+local expChunk = assert(load(__py_read_file("/home/brain/main.lua"), "@/home/brain/main.lua"))
 expChunk("--headless")
 
 -- Assert 0 redundant open() / setStrength() calls because isOpen=true & getStrength=400!
@@ -802,7 +802,7 @@ assert(allBridge:find('"retried":true', 1, true), "Chunked STOCK_REPLY missing r
 --         Setup Overrides Persistence & Clean Shutdown
 -- =====================================================================
 package.path = savedPkgPath
-local Ae2UI = require("ae2_ui")
+local Ae2UI = require("lib.ui")
 component.gpu = component._newMockGPU(160, 50)
 component._register("scr-1", "screen", {})
 
@@ -810,7 +810,7 @@ local canceledCpuName = nil
 local cpuBusyState = true
 local peerActionsLog = {}
 
-local cfg3 = assert(loadfile("/home/config.lua"))()
+local cfg3 = assert(loadfile("/home/brain/config.lua"))()
 cfg3._sec = {
     itemInterval = 65, fluidInterval = 55, essentiaInterval = 60, energyInterval = 10,
     energyAE2Interval = 10, cpuInterval = 20, tpsInterval = 5, allItemsInterval = 1800,
@@ -973,12 +973,12 @@ ui3:handleTouch(46, 40, 0)
 assertEq(peerActionsLog[#peerActionsLog], "ae2:reboot", "Setup 2nd click triggered ae2:reboot")
 
 -- =====================================================================
--- TEST 4: Live exporter.lua GUI Integration + Overrides Persistence + Pause Export
+-- TEST 4: Live main.lua GUI Integration + Overrides Persistence + Pause Export + Autostart
 -- =====================================================================
-__py_write_file("/home/ae2_ui.lua", __py_read_file(__AE2_ROOT .. "/ae2_ui.lua"))
+__py_write_file("/home/brain/lib/ui.lua", __py_read_file(__AE2_ROOT .. "/lib/ui.lua"))
 -- Seed clean config without bridge for integrated GUI event loop test
 local baseCfgSrc = __py_read_file(__AE2_ROOT .. "/config.example.lua")
-__py_write_file("/home/config.lua", baseCfgSrc
+__py_write_file("/home/brain/config.lua", baseCfgSrc
     :gsub("enableEnergyAE2 = false", "enableEnergyAE2 = true")
     :gsub("enableResilience = true", "enableResilience = false")
     :gsub("enableItems = true", "enableItems = false")
@@ -988,12 +988,14 @@ __py_write_file("/home/config.lua", baseCfgSrc
 
 posts = {}
 local guiEvs = {
-    -- Touch header [EXPORT: ON    ] at x=33, y=1 -> pauses exports & saves /home/config_overrides.lua
+    -- Touch header [EXPORT: ON    ] at x=33, y=1 -> pauses exports & saves /home/brain/config_overrides.lua
     { "touch", "scr-1", 33, 1, 0 },
     -- Key '0' (Setup & Exports tab)
     { "key_down", "kbd-1", 48, 11 },
-    -- Touch [+] on itemInterval (y=7, x=126) -> 65 + 5 = 70s & saves /home/config_overrides.lua
+    -- Touch [+] on itemInterval (y=7, x=126) -> 65 + 5 = 70s & saves /home/brain/config_overrides.lua
     { "touch", "scr-1", 126, 7, 0 },
+    -- Touch [Auto: OFF] (y=40, x=63) -> enables autostart in /home/.shrc
+    { "touch", "scr-1", 63, 40, 0 },
     -- Key 'Q' to exit cleanly
     { "key_down", "kbd-1", 113, 16 },
 }
@@ -1008,16 +1010,17 @@ event.pull = function(_, filter)
     return nil
 end
 
-package.loaded["ae2_ui"] = nil
-local expGuiChunk = assert(load(__py_read_file("/home/exporter.lua"), "@/home/exporter.lua"))
+package.loaded["lib.ui"] = nil
+local expGuiChunk = assert(load(__py_read_file("/home/brain/main.lua"), "@/home/brain/main.lua"))
 expGuiChunk()
 
-assert(__py_exists("/home/config_overrides.lua"), "Setup changes saved /home/config_overrides.lua")
-local ovTbl = serialization.unserialize(__py_read_file("/home/config_overrides.lua"))
+assert(__py_exists("/home/brain/config_overrides.lua"), "Setup changes saved /home/brain/config_overrides.lua")
+local ovTbl = serialization.unserialize(__py_read_file("/home/brain/config_overrides.lua"))
 assertEq(ovTbl.exportPaused, true, "Saved exportPaused=true override")
 assertEq(ovTbl.intervals.itemInterval, 70, "Saved itemInterval=70s override")
+assert(__py_read_file("/home/.shrc"):find("brain", 1, true), "Setup [Auto] enabled 'brain' in /home/.shrc")
 
--- Reload headless exporter.lua -> verify overrides load & exportPaused suppresses Influx POSTs!
+-- Reload headless main.lua -> verify overrides load & exportPaused suppresses Influx POSTs!
 local postCountBeforeReload = #posts
 pullStep = 0
 event.pull = function(timeout)
@@ -1026,18 +1029,18 @@ event.pull = function(timeout)
     if pullStep >= 2 then return "interrupted" end
     return nil
 end
-local reloadCfg = assert(load(__py_read_file("/home/exporter.lua"), "@/home/exporter.lua"))
+local reloadCfg = assert(load(__py_read_file("/home/brain/main.lua"), "@/home/brain/main.lua"))
 reloadCfg("--headless")
 assertEq(#posts, postCountBeforeReload, "Paused export from config_overrides.lua sent 0 InfluxDB POSTs")
 
--- Exercise live GUI 2-click [Reboot AE2] on Tab 0 (Setup) -> invokes computer.shutdown(true) cleanly
+-- Exercise live GUI 2-click [Reboot Brain] on Tab 0 (Setup) -> invokes computer.shutdown(true) cleanly
 do
     local shutdownArg = "none"
     local origShutdown = computer.shutdown
     computer.shutdown = function(rbt) shutdownArg = rbt end
     local rbtEvs = {
         { "key_down", "kbd-1", 48, 11 }, -- Tab 0 (Setup)
-        { "touch", "scr-1", 46, 40, 0 }, -- 1st click [Reboot AE2]
+        { "touch", "scr-1", 46, 40, 0 }, -- 1st click [Reboot Brain]
         { "touch", "scr-1", 46, 40, 0 }, -- 2nd click [Confirm Reboot?]
     }
     event.pull = function(_, filter)
@@ -1050,10 +1053,10 @@ do
         end
         return nil
     end
-    local rbtChunk = assert(load(__py_read_file("/home/exporter.lua"), "@/home/exporter.lua"))
+    local rbtChunk = assert(load(__py_read_file("/home/brain/main.lua"), "@/home/brain/main.lua"))
     rbtChunk()
     computer.shutdown = origShutdown
-    assertEq(shutdownArg, true, "GUI 2-click [Reboot AE2] invoked computer.shutdown(true)")
+    assertEq(shutdownArg, true, "GUI 2-click [Reboot Brain] invoked computer.shutdown(true)")
 end
 
 rawset(_G, "__HELD_OBJECTS", { cfg3, hub3, ui3 })
@@ -1090,7 +1093,7 @@ rawset(_G, "__HELD_OBJECTS", { cfg3, hub3, ui3 })
                 prod_host.exec_lua(
                     """
                     local component = require("component")
-                    local Ae2UI = require("ae2_ui")
+                    local Ae2UI = require("lib.ui")
                     component._reset()
                     component.gpu = {
                         maxResolution = function() return 160, 50 end,
@@ -1126,27 +1129,31 @@ rawset(_G, "__HELD_OBJECTS", { cfg3, hub3, ui3 })
                 prod_host.close()
 
             # =====================================================================
-            # TEST 5: Standalone install.lua & Monorepo install.lua (`ae2`)
+            # TEST 5: Standalone install.lua & Monorepo install.lua (`brain` / `ae2`)
+            #         + Legacy Migration (/home/exporter.lua + /home/config.lua)
             # =====================================================================
             inst_host = LuaHost(Path(td), font_widths)
             try:
                 inst_host.exec_lua(
                     """
                     local inst = assert(loadfile(__AE2_ROOT .. "/install.lua"))
-                    assert(inst("--local", __AE2_ROOT, "--yes", "--no-autostart"), "Standalone AE2 install failed")
-                    assert(__py_exists("/home/exporter.lua"), "Missing /home/exporter.lua")
-                    assert(__py_exists("/home/ae2_ui.lua"), "Missing /home/ae2_ui.lua")
-                    assert(__py_exists("/home/config.lua"), "Missing /home/config.lua")
-                    assert(__py_exists("/home/install_ae2.lua"), "Missing /home/install_ae2.lua for --update")
+                    assert(inst("--local", __AE2_ROOT, "--yes", "--no-autostart"), "Standalone Brain install failed")
+                    assert(__py_exists("/home/brain/main.lua"), "Missing /home/brain/main.lua")
+                    assert(__py_exists("/home/brain/lib/ui.lua"), "Missing /home/brain/lib/ui.lua")
+                    assert(__py_exists("/home/brain/config.lua"), "Missing /home/brain/config.lua")
+                    assert(__py_exists("/home/brain/install.lua"), "Missing /home/brain/install.lua for --update")
+                    assert(__py_exists("/usr/bin/brain.lua"), "Missing /usr/bin/brain.lua")
+                    assert(__py_exists("/usr/bin/ae2.lua"), "Missing /usr/bin/ae2.lua")
+                    assert(not __py_exists("/home/.shrc"), "--no-autostart must suppress /home/.shrc write")
 
-                    local fCfg = io.open("/home/config.lua", "w"); fCfg:write("return { customAe = 88 }"); fCfg:close()
-                    local fOv = io.open("/home/config_overrides.lua", "w"); fOv:write("{exportPaused=true}"); fOv:close()
+                    local fCfg = io.open("/home/brain/config.lua", "w"); fCfg:write("return { customAe = 88 }"); fCfg:close()
+                    local fOv = io.open("/home/brain/config_overrides.lua", "w"); fOv:write("{exportPaused=true}"); fOv:close()
 
-                    assert(inst("--local", __AE2_ROOT, "--update", "--yes"), "Standalone AE2 --update failed")
-                    local c2 = io.open("/home/config.lua", "r"):read("*a")
-                    assert(c2:find("customAe = 88", 1, true), "Update overwrote /home/config.lua!")
-                    local o2 = io.open("/home/config_overrides.lua", "r"):read("*a")
-                    assert(o2:find("exportPaused=true", 1, true), "Update overwrote /home/config_overrides.lua!")
+                    assert(inst("--local", __AE2_ROOT, "--update", "--yes"), "Standalone Brain --update failed")
+                    local c2 = io.open("/home/brain/config.lua", "r"):read("*a")
+                    assert(c2:find("customAe = 88", 1, true), "Update overwrote /home/brain/config.lua!")
+                    local o2 = io.open("/home/brain/config_overrides.lua", "r"):read("*a")
+                    assert(o2:find("exportPaused=true", 1, true), "Update overwrote /home/brain/config_overrides.lua!")
 
                     -- Verify --local-bridge fetches from http://127.0.0.1:8765/oc-raw/gtnh-ae2-control/...
                     local comp = require("component")
@@ -1167,23 +1174,62 @@ rawset(_G, "__HELD_OBJECTS", { cfg3, hub3, ui3 })
                             }
                         end,
                     })
-                    assert(inst("--local-bridge", "--update", "--yes"), "AE2 --local-bridge --update failed")
-                    local sawLocalExporterUrl = false
+                    assert(inst("--local-bridge", "--update", "--yes"), "Brain --local-bridge --update failed")
+                    local sawLocalMainUrl = false
                     for _, u in ipairs(fetchedUrls) do
-                        if u == "http://127.0.0.1:8765/oc-raw/gtnh-ae2-control/exporter.lua" then sawLocalExporterUrl = true end
+                        if u == "http://127.0.0.1:8765/oc-raw/gtnh-ae2-control/main.lua" then sawLocalMainUrl = true end
                     end
-                    assert(sawLocalExporterUrl, "Expected --local-bridge to fetch /oc-raw/gtnh-ae2-control/exporter.lua")
-                    local c3 = io.open("/home/config.lua", "r"):read("*a")
-                    assert(c3:find("customAe = 88", 1, true), "--local-bridge --update overwrote /home/config.lua!")
+                    assert(sawLocalMainUrl, "Expected --local-bridge to fetch /oc-raw/gtnh-ae2-control/main.lua")
+                    local c3 = io.open("/home/brain/config.lua", "r"):read("*a")
+                    assert(c3:find("customAe = 88", 1, true), "--local-bridge --update overwrote /home/brain/config.lua!")
+
+                    -- Verify /usr/bin/brain.lua --help runs cleanly with OpenOS 1.8.9 shim (no shell.getRunningProgram)
+                    assert(loadfile("/usr/bin/brain.lua"))("--help")
 
                     local rootInst = assert(loadfile(__MONOREPO_ROOT .. "/install.lua"))
-                    assert(rootInst("--local", __MONOREPO_ROOT, "ae2", "--yes", "--no-autostart"), "Monorepo install ae2 failed")
+                    assert(rootInst("--local", __MONOREPO_ROOT, "brain", "--yes", "--no-autostart"), "Monorepo install brain failed")
+                    assert(rootInst("--local", __MONOREPO_ROOT, "ae2", "--yes", "--no-autostart"), "Monorepo install ae2 alias failed")
                     assert(__py_exists("/home/.oc-gtnh.manifest"), "Missing monorepo manifest")
                     """,
                     "install_test",
                 )
+                assert "GTNH Mainnet Brain" in "\n".join(inst_host.stdout)
             finally:
                 inst_host.close()
+
+            mig_host = LuaHost(Path(td), font_widths)
+            try:
+                mig_host.exec_lua(
+                    """
+                    __py_write_file("/home/config.lua", "return { customAe = 99 }")
+                    __py_write_file("/home/config_overrides.lua", "{exportPaused=true}")
+                    __py_write_file("/home/exporter.lua", "-- legacy exporter")
+                    __py_write_file("/home/ae2_ui.lua", "-- stale ui")
+                    __py_write_file("/home/install_ae2.lua", "-- old installer")
+                    __py_write_file("/home/.ae2_repo", "Jimbo-Coder/gtnh-dtpf-control\\nmain\\n")
+                    __py_write_file("/home/.shrc", "/home/exporter.lua --headless\\n")
+                    __py_write_file("/home/.oc-gtnh.manifest", "return { repo = 'Jimbo-Coder/gtnh-dtpf-control', branch = 'main', modules = { ae2 = true } }")
+
+                    local rootInst = assert(loadfile(__MONOREPO_ROOT .. "/install.lua"))
+                    assert(rootInst("--local", __MONOREPO_ROOT, "--update", "--repo", "Jimbo-Coder/OC-gtnh-control", "--yes"), "Monorepo legacy ae2 -> brain migration failed")
+                    assert(__py_exists("/home/brain/main.lua"), "Missing migrated /home/brain/main.lua")
+                    assert(__py_exists("/home/brain/lib/ui.lua"), "Missing migrated /home/brain/lib/ui.lua")
+                    local mc = __py_read_file("/home/brain/config.lua")
+                    assert(mc and mc:find("customAe = 99", 1, true), "Legacy /home/config.lua was NOT migrated!")
+                    local mo = __py_read_file("/home/brain/config_overrides.lua")
+                    assert(mo and mo:find("exportPaused=true", 1, true), "Legacy /home/config_overrides.lua was NOT migrated!")
+                    assert(not __py_exists("/home/ae2_ui.lua"), "Stale /home/ae2_ui.lua should be removed")
+                    local sh = __py_read_file("/home/.shrc")
+                    assert(sh and sh:find("brain --headless", 1, true), "Legacy .shrc was NOT migrated to 'brain --headless': " .. tostring(sh))
+                    local fw = __py_read_file("/home/exporter.lua")
+                    assert(fw and fw:find("/home/brain/main.lua", 1, true), "Legacy /home/exporter.lua should forward to /home/brain/main.lua")
+                    assert(loadfile("/home/exporter.lua"))("--help")
+                    assert(loadfile("/usr/bin/ae2.lua"))("--help")
+                    """,
+                    "legacy_migration_test",
+                )
+            finally:
+                mig_host.close()
 
             print(
                 f"ALL AE2 CONTROL OFFLINE SUITES PASSED "

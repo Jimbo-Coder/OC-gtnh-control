@@ -1,4 +1,4 @@
--- Copy to /home/config.lua (created automatically by install.lua on fresh installs; preserved on updates).
+-- Copy to /home/brain/config.lua (created automatically by install.lua on fresh installs; preserved on updates).
 local config = {
     -- InfluxDB (set enableItems/enableFluids/etc. to false if using purely as an in-game OC Mesh Hub)
     dbHostname = "http://127.0.0.1:8086",

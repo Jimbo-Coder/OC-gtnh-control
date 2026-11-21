@@ -1,5 +1,5 @@
--- /home/ae2_ui.lua
--- Visual Touch Control Center for Mainnet AE2 Exporter & OC Mesh Hub (160x50 Tier 3 GPU).
+-- /home/brain/lib/ui.lua
+-- Visual Touch Control Center for Mainnet Brain & OC Mesh Hub (160x50 Tier 3 GPU).
 -- Uses 64-bit packed integer screen buffers (zero per-cell string allocations) and strictly width-1 glyphs.
 
 local component = require("component")
@@ -286,7 +286,7 @@ function UI:renderHeader()
     local hub = self.hub
     local paused = (self.cfg.exportPaused == true)
     self:fillRect(1, 1, self.w, 2, " ", COLORS.fg, COLORS.headerBg)
-    self:drawText(2, 1, "◈ GTNH MAINNET AE2 CONTROL", COLORS.accent, COLORS.headerBg)
+    self:drawText(2, 1, "◈ GTNH MAINNET BRAIN HUB", COLORS.accent, COLORS.headerBg)
 
     local nx = self:drawButton(31, 1, paused and "[EXPORT: PAUSED]" or "[EXPORT: ON    ]",
         paused and COLORS.yellow or COLORS.fg,
@@ -1485,9 +1485,18 @@ function UI:renderSetupTab()
         end
     end)
     if self.cb.onPeerAction then
-        self:drawRebootBtn(44, ay, "ae2", "[Reboot AE2]", "[Confirm Reboot?]")
+        self:drawRebootBtn(44, ay, "ae2", "[Reboot Brain]", "[Confirm Reboot?]")
     end
-    self:drawText(4, 43, "Changes save immediately to /home/config_overrides.lua (survives updates).", COLORS.muted, COLORS.panelBg)
+    if self.cb.onToggleAutostart then
+        local autoOn = (type(self.cb.isAutostartEnabled) == "function") and (self.cb.isAutostartEnabled() == true)
+        self:drawButton(61, ay, autoOn and "[Auto: ON ]" or "[Auto: OFF]",
+            autoOn and COLORS.fg or COLORS.muted,
+            autoOn and COLORS.darkGreen or COLORS.btnBg,
+            function()
+                self.statusMsg = tostring(self.cb.onToggleAutostart() or "Toggled autostart.")
+            end)
+    end
+    self:drawText(4, 43, "Changes save immediately to config_overrides.lua (survives updates).", COLORS.muted, COLORS.panelBg)
 
     -- Right Card: Polling Intervals (Seconds)
     self:drawFrame(81, 5, 78, 43, COLORS.border, COLORS.panelBg, "round")

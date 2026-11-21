@@ -1,33 +1,139 @@
 local cliArgs = { ... }
-package.path = package.path .. ";/home/?.lua"
 
 local computer = require("computer")
 local component = require("component")
-local config = require("config")
-local internet = require("internet")
-local event = require("event")
-local okSer, serialization = pcall(require, "serialization")
 local okFs, filesystem = pcall(require, "filesystem")
+local okSer, serialization = pcall(require, "serialization")
 local okTerm, term = pcall(require, "term")
-local okUiMod, Ae2UI = pcall(require, "ae2_ui")
+
+local function resolveScriptDir(defaultDir)
+    local function checkCandidate(rawPath)
+        if type(rawPath) ~= "string" or rawPath == "" then return nil end
+        local canon = (okFs and filesystem and filesystem.canonical and filesystem.canonical(rawPath)) or rawPath
+        local dir = (okFs and filesystem and filesystem.path and filesystem.path(canon)) or canon:match("^(.*)/[^/]+$")
+        if type(dir) ~= "string" or dir == "" then return nil end
+        dir = dir:gsub("/+$", "")
+        if dir == "" then dir = "/" end
+        local function ex(rel)
+            if not (okFs and filesystem and filesystem.exists) then return false end
+            local p = (filesystem.concat and filesystem.concat(dir, rel)) or (dir .. "/" .. rel)
+            return filesystem.exists(p)
+        end
+        if ex("lib/ui.lua") or ex("install.lua") or ex("config.lua") then
+            return dir
+        end
+        return nil
+    end
+    if debug and debug.getinfo then
+        for level = 1, 5 do
+            local ok, info = pcall(debug.getinfo, level, "S")
+            if ok and type(info) == "table" and type(info.source) == "string" then
+                local pfx = info.source:sub(1, 1)
+                if pfx == "@" or pfx == "=" then
+                    local d = checkCandidate(info.source:sub(2))
+                    if d then return d end
+                end
+            end
+        end
+    end
+    if os and os.getenv then
+        local d = checkCandidate(os.getenv("_"))
+        if d then return d end
+    end
+    return defaultDir
+end
+
+local scriptDir = resolveScriptDir("/home/brain")
+package.path = string.format("%s/?.lua;%s/?/init.lua;%s;/home/?.lua", scriptDir, scriptDir, package.path)
+
+local SHRC_PATH = "/home/.shrc"
+local function isBrainShrcLine(line)
+    if line:match("^%s*#") then return false end
+    local trimmed = line:match("^%s*(.-)%s*$") or ""
+    if trimmed == "" then return false end
+    local cmd = trimmed:match("^(%S+)") or ""
+    return cmd == "brain"
+        or cmd == "ae2"
+        or cmd == "/usr/bin/brain"
+        or cmd == "/usr/bin/brain.lua"
+        or cmd == "/usr/bin/ae2"
+        or cmd == "/usr/bin/ae2.lua"
+        or cmd == "/home/brain/main.lua"
+        or cmd == "/home/exporter.lua"
+        or cmd == "exporter"
+end
+
+local function isAutostartEnabled()
+    if not io or not io.open then return false end
+    local f = io.open(SHRC_PATH, "r")
+    if not f then return false end
+    local raw = f:read("*a")
+    f:close()
+    if type(raw) ~= "string" then return false end
+    for line in raw:gmatch("[^\r\n]+") do
+        if isBrainShrcLine(line) then return true end
+    end
+    return false
+end
+
+local function setAutostartEnabled(enable)
+    local raw = ""
+    if io and io.open then
+        local f = io.open(SHRC_PATH, "r")
+        if f then raw = f:read("*a") or ""; f:close() end
+    end
+    local lines = {}
+    for line in raw:gmatch("[^\r\n]+") do
+        if not isBrainShrcLine(line) then lines[#lines + 1] = line end
+    end
+    if enable then
+        local hasDisplay = (component.list("screen", true)() ~= nil) and (component.list("gpu", true)() ~= nil)
+        local cmd = (okFs and filesystem and filesystem.exists and filesystem.exists("/usr/bin/brain.lua"))
+            and "brain"
+            or "/home/brain/main.lua"
+        if not hasDisplay then cmd = cmd .. " --headless" end
+        lines[#lines + 1] = cmd
+    end
+    if io and io.open then
+        local f = io.open(SHRC_PATH, "w")
+        if f then
+            f:write((#lines > 0) and (table.concat(lines, "\n") .. "\n") or "")
+            f:close()
+        end
+    end
+    return enable
+end
+
+local INST_PATH = ((okFs and filesystem and filesystem.concat) and filesystem.concat(scriptDir, "install.lua") or (scriptDir .. "/install.lua"))
+if okFs and filesystem and filesystem.exists and not filesystem.exists(INST_PATH) and filesystem.exists("/home/install_ae2.lua") then
+    INST_PATH = "/home/install_ae2.lua"
+end
 
 local forceHeadless = false
 for i = 1, #cliArgs do
     local a = tostring(cliArgs[i] or "")
-    if a == "--headless" or a == "headless" then
+    if a == "--help" or a == "-h" then
+        print("GTNH Mainnet Brain: brain [--headless|--worker|--autostart on|off|--update]")
+        return
+    elseif a == "--headless" or a == "headless" or a == "--worker" or a == "worker" then
         forceHeadless = true
+    elseif a == "--autostart" or a == "autostart" then
+        local nxt = tostring(cliArgs[i + 1] or ""):lower()
+        local en = (nxt == "on" or nxt == "true") and true or ((nxt == "off" or nxt == "false") and false or not isAutostartEnabled())
+        setAutostartEnabled(en)
+        print("Brain Autostart: " .. (en and "ON" or "OFF"))
+        return
     elseif a == "--update" or a == "update" then
-        local instPath = "/home/install_ae2.lua"
         local src = nil
-        local f = io.open(instPath, "r")
+        local f = io and io.open and io.open(INST_PATH, "r") or nil
         if f then src = f:read("*a"); f:close() end
         if not src then
-            io.stderr:write("ERROR: /home/install_ae2.lua not found. Re-run install.lua once to enable --update.\n")
+            io.stderr:write("ERROR: " .. INST_PATH .. " not found. Re-run install.lua once to enable --update.\n")
             return
         end
-        local chunk, err = load(src, "=" .. instPath)
+        local chunk, err = load(src, "=" .. INST_PATH)
         if not chunk then
-            io.stderr:write("ERROR: Invalid /home/install_ae2.lua: " .. tostring(err) .. "\n")
+            io.stderr:write("ERROR: Invalid " .. INST_PATH .. ": " .. tostring(err) .. "\n")
             return
         end
         local extra = { "--update" }
@@ -36,7 +142,50 @@ for i = 1, #cliArgs do
     end
 end
 
-local OVERRIDES_PATH = "/home/config_overrides.lua"
+local function loadBrainConfig()
+    local cands = {
+        (okFs and filesystem and filesystem.concat) and filesystem.concat(scriptDir, "config.lua") or (scriptDir .. "/config.lua"),
+        "/home/config.lua",
+        "/home/config.brain.bak",
+    }
+    for _, p in ipairs(cands) do
+        local exists = (okFs and filesystem and filesystem.exists) and filesystem.exists(p) or false
+        if not exists and io and io.open then
+            local probe = io.open(p, "r")
+            if probe then probe:close(); exists = true end
+        end
+        if exists then
+            local ch, lerr = loadfile and loadfile(p) or nil, nil
+            if not ch and io and io.open then
+                local cf = io.open(p, "r")
+                if cf then
+                    local raw = cf:read("*a"); cf:close()
+                    ch, lerr = load(raw, "=" .. p)
+                end
+            end
+            if ch then
+                local okR, tbl = pcall(ch)
+                if okR and type(tbl) == "table" then return tbl end
+            elseif lerr then
+                io.stderr:write("WARN: Invalid config at " .. p .. ": " .. tostring(lerr) .. "\n")
+            end
+        end
+    end
+    local okReq, cfgMod = pcall(require, "config")
+    if okReq and type(cfgMod) == "table" then return cfgMod end
+    error("No Brain config.lua found (expected " .. cands[1] .. ")")
+end
+
+local config = loadBrainConfig()
+local internet = require("internet")
+local event = require("event")
+package.loaded["lib.ui"] = nil
+local okUiMod, Ae2UI = pcall(require, "lib.ui")
+
+local OVERRIDES_PATH = (okFs and filesystem and filesystem.concat)
+    and filesystem.concat(scriptDir, "config_overrides.lua")
+    or (scriptDir .. "/config_overrides.lua")
+local LEGACY_OVERRIDES_PATH = "/home/config_overrides.lua"
 local INTERVAL_KEYS = {
     "itemInterval", "fluidInterval", "essentiaInterval", "energyInterval",
     "energyAE2Interval", "cpuInterval", "tpsInterval", "storageInterval", "allItemsInterval",
@@ -128,6 +277,9 @@ end
 local function loadConfigOverrides()
     if not okSer or not io or not io.open then return end
     local okO, f = pcall(io.open, OVERRIDES_PATH, "r")
+    if (not okO or not f) and OVERRIDES_PATH ~= LEGACY_OVERRIDES_PATH then
+        okO, f = pcall(io.open, LEGACY_OVERRIDES_PATH, "r")
+    end
     if not okO or not f then return end
     local raw = f:read("*a")
     f:close()
@@ -189,8 +341,14 @@ local function resetConfigOverrides()
     end
     if okFs and filesystem and filesystem.remove then
         pcall(filesystem.remove, OVERRIDES_PATH)
+        if OVERRIDES_PATH ~= LEGACY_OVERRIDES_PATH then
+            pcall(filesystem.remove, LEGACY_OVERRIDES_PATH)
+        end
     elseif os and os.remove then
         pcall(os.remove, OVERRIDES_PATH)
+        if OVERRIDES_PATH ~= LEGACY_OVERRIDES_PATH then
+            pcall(os.remove, LEGACY_OVERRIDES_PATH)
+        end
     end
 end
 
@@ -3001,8 +3159,14 @@ local function main()
                 if config.enableMesh ~= false then getMeshTransports() end
                 if not config.enableBridge then closeBridgeSocket() end
                 uiDirty = true
-                logMsg("OUT", "Reset overrides -> restored /home/config.lua defaults.")
-                return "Reset overrides to /home/config.lua defaults."
+                logMsg("OUT", "Reset overrides -> restored config.lua defaults.")
+                return "Reset overrides to config.lua defaults."
+            end,
+            isAutostartEnabled = isAutostartEnabled,
+            onToggleAutostart = function()
+                local en = setAutostartEnabled(not isAutostartEnabled())
+                logMsg("OUT", "Brain autostart -> " .. (en and "ON" or "OFF"))
+                return "Brain Autostart: " .. (en and "ON" or "OFF")
             end,
         }
         ui = Ae2UI.new(config, hubState, uiCallbacks)
@@ -3260,7 +3424,7 @@ local function main()
     if pendingSelfUpdateUrl then
         local updUrl = pendingSelfUpdateUrl
         pendingSelfUpdateUrl = nil
-        local instPath = "/home/install_ae2.lua"
+        local instPath = INST_PATH
         local chunk, loadErr = loadfile and loadfile(instPath) or nil, nil
         if not chunk and io and io.open then
             local f = io.open(instPath, "r")
@@ -3299,10 +3463,10 @@ end
 
 if config.enableResilience then
     while not needExitFlag do
-        print("Exporter running...")
+        print("Brain running...")
         local ok, msg = pcall(main)
         if not ok then
-            print("[Exporter Error] " .. tostring(msg))
+            print("[Brain Error] " .. tostring(msg))
             if not needExitFlag then os.sleep(2) end
         end
     end

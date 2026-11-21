@@ -11,6 +11,7 @@ local SUBDIR = "gtnh-space-pump"
 local DEFAULT_BRANCH = "main"
 local DEST_PATH = "/home/autoPump.lua"
 local BACKUP_PATH = "/home/autoPump.lua.bak"
+local BIN_PATH = "/usr/bin/pump.lua"
 local REPO_META_PATH = "/home/.pump_repo"
 local SHRC_PATH = "/home/.shrc"
 
@@ -148,6 +149,8 @@ local function runInstaller(args)
     end
 
     writeWholeFile(DEST_PATH, body)
+    filesystem.makeDirectory("/usr/bin")
+    writeWholeFile(BIN_PATH, "local args = { ... }\nlocal c, e = loadfile(\"/home/autoPump.lua\")\nif not c then error(e) end\nreturn c(table.unpack(args))\n")
     local instBody = localDir and readWholeFile(filesystem.concat(localDir, "install.lua")) or select(1, fetchUrl(internet, baseUrl .. "install.lua"))
     if instBody and load(instBody, "@install_pump.lua", "t") then
         writeWholeFile("/home/install_pump.lua", instBody)
@@ -156,21 +159,47 @@ local function runInstaller(args)
     print(string.format("[OK 1/1] %s (%d bytes)", DEST_PATH, #body))
 
     local existingShrc = readWholeFile(SHRC_PATH) or ""
-    if not isUpdate and not existingShrc:find("autoPump.lua", 1, true) then
-        local wantAuto = optYes or optAutostart
-        if not wantAuto and not optNoPrompt and optAutostart == nil and io.read then
-            io.write("Auto-start /home/autoPump.lua in /home/.shrc? [Y/n]: ")
+    local shrcLines, migratedShrc, hasPumpAuto = {}, false, false
+    for line in existingShrc:gmatch("[^\r\n]+") do
+        local isComment = line:match("^%s*#") ~= nil
+        local trimmed = line:match("^%s*(.-)%s*$") or ""
+        if (not isComment) and trimmed ~= "" then
+            local cmd, rest = trimmed:match("^(%S+)(.*)$")
+            rest = rest or ""
+            if cmd == "/home/autoPump.lua" or cmd == "autoPump" or cmd == "autoPump.lua" then
+                line = "pump" .. rest
+                migratedShrc = true
+                cmd = "pump"
+            end
+            if cmd == "pump" or cmd == "/usr/bin/pump" or cmd == "/usr/bin/pump.lua" then
+                hasPumpAuto = true
+            end
+        end
+        shrcLines[#shrcLines + 1] = line
+    end
+    if migratedShrc then
+        writeWholeFile(SHRC_PATH, table.concat(shrcLines, "\n") .. "\n")
+        print("[MIGRATE] Updated " .. SHRC_PATH .. ": autoPump.lua -> pump")
+    end
+    if not isUpdate and not hasPumpAuto then
+        local wantAuto
+        if optAutostart ~= nil then
+            wantAuto = (optAutostart == true)
+        elseif optYes then
+            wantAuto = true
+        elseif not optNoPrompt and io.read then
+            io.write("Auto-start 'pump' in /home/.shrc? [Y/n]: ")
             local line = io.read()
             wantAuto = (tostring(line or "y") .. "y"):match("^%s*[Yy]") ~= nil
         end
         if wantAuto then
-            local pref = (existingShrc ~= "" and existingShrc:sub(-1) ~= "\n") and (existingShrc .. "\n") or existingShrc
-            writeWholeFile(SHRC_PATH, pref .. "/home/autoPump.lua\n")
-            print("[AUTO]    Added /home/autoPump.lua to /home/.shrc")
+            shrcLines[#shrcLines + 1] = "pump"
+            writeWholeFile(SHRC_PATH, table.concat(shrcLines, "\n") .. "\n")
+            print("[AUTO]    Added 'pump' to /home/.shrc")
         end
     end
 
-    print("Done! Run `/home/autoPump.lua` (set `enableMesh = false` at top for standalone).")
+    print("Done! Run 'pump' from any directory (set `enableMesh = false` in /home/autoPump.lua for standalone).")
     return true
 end
 
